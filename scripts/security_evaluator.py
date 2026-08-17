@@ -84,9 +84,10 @@ DYNAMIC_SUBSTITUTION_PATTERN = re.compile(
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
 
-# 9. GPT-OSS 120B Private Model Configuration (Default Reasoning: LOW for Guard Watcher)
+# 9. LLM / GPT-OSS 120B / DeepSeek Model Configuration
 DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
 DEFAULT_GPT_OSS_ENDPOINT = os.environ.get("GUARD_LLM_ENDPOINT", "http://192.168.10.102:8000/v1/chat/completions")
+DEFAULT_GPT_OSS_API_KEY = os.environ.get("GUARD_LLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
 
 # Tool Definition for Tool-Calling Semantic Inspector
@@ -256,10 +257,11 @@ def audit_dynamic_substitution_with_llm(
     cmd_str: str,
     endpoint: str = DEFAULT_GPT_OSS_ENDPOINT,
     model: str = DEFAULT_GPT_OSS_MODEL,
+    api_key: Optional[str] = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     max_hops: int = 2
 ) -> Tuple[bool, str]:
-    """Multi-turn Tool-Calling security inspector using private GPT-OSS 120B.
+    """Multi-turn Tool-Calling security inspector using private GPT-OSS 120B or DeepSeek.
     
     Guards against indirect command substitution attacks by reading referenced files
     and verifying whether runtime expanded arguments contain sensitive/system paths.
@@ -297,10 +299,15 @@ def audit_dynamic_substitution_with_llm(
             req_body["reasoning_effort"] = reasoning_effort.lower()
 
         payload = json.dumps(req_body).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        effective_key = api_key if api_key is not None else DEFAULT_GPT_OSS_API_KEY
+        if effective_key:
+            headers["Authorization"] = f"Bearer {effective_key}"
+
         req = urllib.request.Request(
             endpoint,
             data=payload,
-            headers={"Content-Type": "application/json"}
+            headers=headers
         )
 
         try:

@@ -1,0 +1,42 @@
+name: LLM Security Evaluator CI
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 1'   # Weekly every Monday at 00:00 UTC
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  eval-tests:
+    name: Run LLM Security & Substitution Tests
+    runs-on: ubuntu-latest
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      GUARD_LLM_ENDPOINT: "https://api.deepseek.com/v1/chat/completions"
+      GUARD_LLM_MODEL: "deepseek-chat"
+      GUARD_REASONING_EFFORT: "low"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Verify Environment
+        run: |
+          python3 --version
+          git --version
+
+      - name: Install Test Dependencies
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --no-cache-dir pytest
+
+      - name: Run Unit Guardrail Tests
+        run: |
+          source .venv/bin/activate
+          pytest -v tests/test_dynamic_substitution.py
+
+      - name: Run Live LLM Integration Tests (DeepSeek)
+        run: |
+          source .venv/bin/activate
+          pytest -v -s tests/test_llm_evaluator_integration.py
