@@ -173,7 +173,7 @@ def parse_permission_request(visible_text):
         return m3.group(1).strip()
 
     # Pattern 4: Execute/Run command [y/N]
-    m4 = re.search(r"(?:Execute|Run command\?):\s*\n([\s\S]*?)\n\s*\[[Yy]/[Nn]\]", visible_text)
+    m4 = re.search(r"(?:Execute[\s\w?]*|Run\s*command\??):\s*\n([\s\S]*?)\n\s*\[[Yy]/[Nn]\]", visible_text)
     if m4:
         return m4.group(1).strip()
 
