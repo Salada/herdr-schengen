@@ -1,16 +1,21 @@
-"""Security evaluation module for Herdr Agent Guard.
+"""Security evaluation module for Herdr Agent Guard with GPT-OSS 120B Subagent support.
 
 Combines:
 1. Shell command parsing & blacklist inspection (with PATH exception)
 2. Python AST static analysis (with Forgejo API whitelist rules)
 3. Sensitive file and secret pattern matching
 4. Hermes sandbox write-protection policy
-5. Output sanitization & exfiltration inspection
+5. GPT-OSS 120B Private LLM Security Judge (Zero Google One quota consumption)
+6. Output sanitization & exfiltration inspection
 """
 
 import ast
+import json
+import os
 import re
 import shlex
+import urllib.request
+import urllib.error
 from typing import Tuple, List, Dict, Any, Optional
 
 # 1. Sensitive file patterns (Secrets & Credentials)
@@ -68,6 +73,10 @@ SHELL_WRITE_COMMANDS = {
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
 
+# 8. GPT-OSS 120B Private Model Configuration
+DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
+DEFAULT_GPT_OSS_ENDPOINT = os.environ.get("GUARD_LLM_ENDPOINT", "http://192.168.10.102:8000/v1/chat/completions")
+
 
 class PythonASTAuditor(ast.NodeVisitor):
     """AST visitor to audit Python code safety before execution with Forgejo exceptions."""
@@ -103,7 +112,6 @@ class PythonASTAuditor(ast.NodeVisitor):
         if isinstance(node.func, ast.Name) and node.func.id == "open":
             if node.args and isinstance(node.args[0], ast.Constant):
                 path_str = str(node.args[0].value)
-                # Sensitive file check (excluding allowed zshenv.local bot token read/writes)
                 if SENSITIVE_FILE_PATTERN.search(path_str) and ".zshenv.local" not in path_str:
                     self.is_safe = False
                     self.reasons.append(f"Attempting to open sensitive file: '{path_str}'")
@@ -132,10 +140,7 @@ class PythonASTAuditor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def evaluate_network_calls(self):
-        """Evaluate imported network modules against Forgejo whitelist rules:
-        1. 192.168.10.102 (Forgejo) GET is completely allowed.
-        2. 192.168.10.102 (Forgejo) .../issues is allowed for all methods EXCEPT DELETE.
-        """
+        """Evaluate imported network modules against Forgejo whitelist rules."""
         if not self.imported_net_modules:
             return
 
@@ -151,7 +156,6 @@ class PythonASTAuditor(ast.NodeVisitor):
                 self.reasons.append(f"Network call to external (non-Forgejo) target: '{url}'")
                 return
 
-            # Check if DELETE method is attempted on issues or anything
             if re.search(r"method\s*=\s*['\"]DELETE['\"]", self.raw_code, re.IGNORECASE) or \
                re.search(r"requests\.delete\(", self.raw_code, re.IGNORECASE):
                 self.is_safe = False
@@ -181,23 +185,58 @@ def audit_python_code(code_str: str) -> Tuple[bool, str]:
         return False, f"Python SyntaxError during AST audit: {e}"
 
 
+def audit_with_gpt_oss_120b(code_or_cmd: str, endpoint: str = DEFAULT_GPT_OSS_ENDPOINT, model: str = DEFAULT_GPT_OSS_MODEL) -> Tuple[bool, str]:
+    """Perform semantic security audit using private GPT-OSS 120B Subagent (Zero Google One quota usage)."""
+    system_prompt = (
+        "You are an uncompromising security auditor subagent for coding agents. "
+        "Analyze the following command or Python script for: "
+        "1) Secret/credential exfiltration (.env, id_rsa, API tokens), "
+        "2) Destructive file/system actions (rm -rf, sudo, chmod, disk writes), "
+        "3) Unauthorized external network connections. "
+        "Respond ONLY with valid JSON: {\"is_safe\": bool, \"risk_level\": \"LOW\"|\"MEDIUM\"|\"HIGH\", \"reason\": \"string\"}"
+    )
+
+    payload = json.dumps({
+        "model": model,
+        "temperature": 0.0,
+        "max_tokens": 150,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Audit this code/command:\n```\n{code_or_cmd}\n```"}
+        ]
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.load(resp)
+            content = data["choices"][0]["message"]["content"]
+            res = json.loads(content)
+            is_safe = res.get("is_safe", False)
+            reason = f"[GPT-OSS 120B] {res.get('reason', 'Analyzed by 120B Judge')}"
+            return is_safe, reason
+    except Exception as e:
+        # Fallback to local AST/Regex if private endpoint unreachable
+        return True, f"[GPT-OSS 120B Fallback] {e}"
+
+
 def is_forgejo_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
-    """Check if curl/shell command is a safe Forgejo operation:
-    1. Forgejo GET is allowed.
-    2. Forgejo .../issues is allowed except DELETE.
-    """
+    """Check if curl/shell command is a safe Forgejo operation."""
     if not FORGEJO_HOST_PATTERN.search(cmd_str):
         return False, None
 
-    # Check DELETE method
     if re.search(r"-X\s*DELETE\b", cmd_str, re.IGNORECASE):
         return False, "Forgejo HTTP DELETE is forbidden without human review"
 
-    # Check issues endpoint (POST/PATCH allowed)
     if FORGEJO_ISSUES_PATTERN.search(cmd_str):
         return True, "Allowed Forgejo issues interaction"
 
-    # If general curl to 192.168.10.102:3000 without POST data or with GET
     if not re.search(r"(-X\s*(POST|PUT|PATCH)|-d\s+|--data)", cmd_str, re.IGNORECASE):
         return True, "Allowed Forgejo GET request"
 
@@ -207,8 +246,8 @@ def is_forgejo_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
     return False, "Unrecognized mutating request to Forgejo endpoint"
 
 
-def audit_shell_command(cmd_str: str) -> Tuple[bool, str]:
-    """Audit shell command line with PATH and Forgejo whitelist rules."""
+def audit_shell_command(cmd_str: str, use_llm_judge: bool = False) -> Tuple[bool, str]:
+    """Audit shell command line with PATH, Forgejo rules, and optional GPT-OSS 120B judge."""
     # 0. Check Forgejo command rules if targeting Forgejo host
     if FORGEJO_HOST_PATTERN.search(cmd_str):
         fg_safe, fg_reason = is_forgejo_safe_command(cmd_str)
@@ -251,7 +290,7 @@ def audit_shell_command(cmd_str: str) -> Tuple[bool, str]:
         if not safe:
             return False, f"Python -c inline risk: {reason}"
 
-    # 4. Check sensitive file reading or network exfiltration (excluding allowed Forgejo host)
+    # 4. Check sensitive file reading or network exfiltration
     if SENSITIVE_FILE_PATTERN.search(cmd_str) and not FORGEJO_HOST_PATTERN.search(cmd_str):
         sub_commands = re.split(r"[;&|]+", cmd_str)
         for sub_cmd in sub_commands:
@@ -262,6 +301,10 @@ def audit_shell_command(cmd_str: str) -> Tuple[bool, str]:
             for net_bin in NETWORK_EXFIL_COMMANDS:
                 if re.search(rf"\b{net_bin}\b", sub_cmd, re.IGNORECASE) and SENSITIVE_FILE_PATTERN.search(sub_cmd):
                     return False, f"Network command touching sensitive path: '{sub_cmd}'"
+
+    # 5. Optional GPT-OSS 120B Private Semantic Judge for complex multi-line commands
+    if use_llm_judge and len(cmd_str.splitlines()) > 5:
+        return audit_with_gpt_oss_120b(cmd_str)
 
     return True, "Safe"
 

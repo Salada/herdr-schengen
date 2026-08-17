@@ -1,11 +1,11 @@
 ---
 name: herdr-agent-guard
-description: Herdr 패널에서 실행 중인 에이전트(AGY, Hermes, Codex 등)를 모니터링하고, AST 정적 분석 및 Dual-LLM Guardrail을 통해 안전한 명령(Forgejo GET/Issues, PATH 등)은 5초 주기로 자동 승인하며 위험/모호한 동작(시크릿 노출, Hermes Sandbox 쓰기 등)은 사용자에게 위임하는 실시간 보안 감시 스킬.
+description: Herdr 패널에서 실행 중인 에이전트(AGY, Hermes, Codex 등)를 모니터링하고, AST 정적 분석 및 GPT-OSS 120B Private Subagent를 통해 안전한 명령은 5초 주기로 자동 승인하며 위험/모호한 동작은 사용자에게 위임하는 실시간 보안 감시 스킬.
 ---
 
 # Herdr Agent Guard 🛡️
 
-`herdr-agent-guard`는 **Herdr 터미널 멀티플렉서** 환경에서 백그라운드로 실행 중인 코딩 에이전트(AGY, Hermes, Codex 등)의 권한 요청(Approval Prompt)을 주기적으로 감시하고, **Python AST 정적 분석, 시크릿 노출 방지, Hermes Sandbox 쓰기 차단, 사설 SCM(Forgejo) 화이트리스트 룰, 그리고 SQLite3 기반 영속 감사/패턴 분석**을 지원하는 실시간 보안 가드레일 스킬입니다.
+`herdr-agent-guard`는 **Herdr 터미널 멀티플렉서** 환경에서 백그라운드로 실행 중인 코딩 에이전트(AGY, Hermes, Codex 등)의 권한 요청(Approval Prompt)을 주기적으로 감시하고, **Python AST 정적 분석, 시크릿 노출 방지, Hermes Sandbox 쓰기 차단, 사설 SCM(Forgejo) 화이트리스트 룰, 그리고 GPT-OSS 120B 기반 프라이빗 시맨틱 감사**를 지원하는 실시간 보안 가드레일 스킬입니다.
 
 ---
 
@@ -16,15 +16,34 @@ description: Herdr 패널에서 실행 중인 에이전트(AGY, Hermes, Codex �
 python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target wP:p2 --interval 5
 ```
 
-### 2. 모든 활성 에이전트 자동 감지 및 감시 (Auto Target)
+### 2. GPT-OSS 120B 프라이빗 시맨틱 감사관 활성화 (Google One 쿼터 소모 0)
 ```bash
-python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto
+python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target wP:p2 --use-gpt-oss
 ```
 
 ### 3. 축적된 승인 패턴 및 빈도 통계 조회 (Human Review Board)
 ```bash
 python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --stats
 ```
+
+---
+
+## 🧠 모델 분리 아키텍처 (Model Routing Optimization)
+
+Google One 요금제(Gemini 3.7)의 쿼터를 최적으로 보존하기 위해, 보안 판별은 전용 **GPT-OSS 120B** 또는 로컬 모델로 완전히 분리 라우팅됩니다:
+
+```mermaid
+flowchart LR
+    A["메인 작업 세션 (AGY)"] -->|권한 요청 발생| B["Herdr Agent Guard (Watcher)"]
+    B -->|1차 정적 필터 1ms| C[Python AST / Regex]
+    C -->|2차 심층 시맨틱 판별| D["GPT-OSS 120B Subagent (Private OpenAI API)"]
+    D -->|결과 피드백 (0 Google Quota)| B
+    B -->|승인/보류 조치| A
+```
+
+- **환경변수 설정**:
+  - `GUARD_LLM_MODEL`: 기본값 `gpt-oss:120b`
+  - `GUARD_LLM_ENDPOINT`: 기본값 `http://192.168.10.102:8000/v1/chat/completions` (또는 `http://localhost:11434/v1/chat/completions`)
 
 ---
 

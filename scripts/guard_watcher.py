@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Herdr Agent Guard Watcher Daemon with SQLite3 Persistence.
+"""Herdr Agent Guard Watcher Daemon with SQLite3 Persistence & GPT-OSS 120B Subagent support.
 
 Monitors Herdr pane(s) at configurable intervals, performs AST static
 analysis and security evaluation on requested commands/scripts, logs every
 event into SQLite3 database (~/.local/state/herdr-agent-guard/guard_history.db),
 and auto-approves safe commands while delegating risky commands to the user.
+Zero Google One quota consumption by leveraging private GPT-OSS 120B Subagent.
 """
 
 import argparse
@@ -28,7 +29,7 @@ from guard_db import (
     init_db,
     DB_PATH
 )
-from security_evaluator import audit_shell_command, audit_python_code, sanitize_output
+from security_evaluator import audit_shell_command, audit_python_code, sanitize_output, DEFAULT_GPT_OSS_MODEL, DEFAULT_GPT_OSS_ENDPOINT
 
 
 def run_cmd(args):
@@ -90,12 +91,13 @@ def parse_permission_request(visible_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with SQLite3 Persistence")
+    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with GPT-OSS 120B Subagent Support")
     parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto'")
     parser.add_argument("--interval", type=int, default=5, help="Polling interval in seconds (default: 5)")
     parser.add_argument("--auto-exit", action="store_true", default=True, help="Automatically exit when agent finishes session")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions without injecting keys")
     parser.add_argument("--stats", action="store_true", help="Display pattern analysis stats from DB and exit")
+    parser.add_argument("--use-gpt-oss", action="store_true", default=False, help="Enable private GPT-OSS 120B semantic judge (Zero Google One quota)")
     args = parser.parse_args()
 
     init_db()
@@ -113,7 +115,7 @@ def main():
             print("-" * 80)
         return
 
-    print(f"🛡️  Herdr Agent Guard started (target={args.target}, interval={args.interval}s, db={DB_PATH})", flush=True)
+    print(f"🛡️  Herdr Agent Guard started (target={args.target}, interval={args.interval}s, gpt_oss={args.use_gpt_oss}, db={DB_PATH})", flush=True)
 
     last_approved_cmd = {}
     idle_count = 0
@@ -155,7 +157,7 @@ def main():
                     is_safe = True
                     reason = wl_reason
                 else:
-                    is_safe, reason = audit_shell_command(req_cmd)
+                    is_safe, reason = audit_shell_command(req_cmd, use_llm_judge=args.use_gpt_oss)
 
                 print(f"⚖️  Safety Evaluation: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason})", flush=True)
 
