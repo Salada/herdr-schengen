@@ -12,30 +12,32 @@ description: Herdr 패널에서 실행 중인 에이전트(AGY, Hermes, Codex �
 ## 🧭 핵심 철학: 인간 중심 통제 & 싱글톤 무결성 (Human-in-the-Loop & Singleton Lock)
 
 1. **인간 중심 통제 (No Silent LaunchAgents)**:
-   - OS 레벨에서 백그라운드에 숨어 무조건 실행되는 백그라운드 데몬(LaunchAgent)을 지양합니다.
+   - OS 레벨에서 백그라운드에 숨어 무조건 실행되는 백그라운드 데몬(LaunchAgent)을 배제합니다.
    - 사용자가 Herdr 워크스페이스에서 **직접 눈으로 보며 필요할 때 명시적으로 실행**하고, 언제든 중단(`--stop`)하거나 직접 결재할 수 있는 가시성을 보장합니다.
 2. **엄격한 싱글톤 락 (Strict Singleton FileLock)**:
    - `~/.local/state/herdr-agent-guard/guard.lock`에 `fcntl.flock`을 체결하여, 중복 인스턴스가 실행될 경우 Race Condition이나 키 중복 주입을 방지하고 즉시 안전하게 종료됩니다.
-3. **Google One 쿼터 보존 (Zero Quota Consumption)**:
+3. **가변 Reasoning Effort 제어 (Default: `medium`, Option: `low` / `off`)**:
+   - 기본값은 안정적인 **`medium`**으로 동작하며, 빠른 초저지연을 원할 경우 **`--reasoning low`** 또는 **`--reasoning off`**로 즉시 전환할 수 있습니다.
+4. **Google One 쿼터 보존 (Zero Quota Consumption)**:
    - 보안 심사는 프라이빗 인프라(GPT-OSS 120B)로 분리 라우팅되어 메인 Gemini 3.7의 개발 쿼터를 단 1토큰도 소모하지 않습니다.
 
 ---
 
 ## 🚀 빠른 실행 (Quick Start)
 
-### 1. 전역 모든 활성 에이전트 자동 감지 및 감시 (기본)
+### 1. 전역 모든 활성 에이전트 자동 감지 및 감시 (기본: Reasoning Medium)
 ```bash
 python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto
 ```
 
-### 2. 특정 패널 5초 주기 감시
+### 2. 초저지연 모드 (Reasoning Low + GPT-OSS 120B)
 ```bash
-python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target wP:p2 --interval 5
+python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto --use-gpt-oss --reasoning low
 ```
 
-### 3. GPT-OSS 120B 프라이빗 시맨틱 감사관 활성화
+### 3. 특정 패널 5초 주기 감시
 ```bash
-python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto --use-gpt-oss
+python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target wP:p2 --interval 5
 ```
 
 ### 4. 실행 중인 가드 프로세스 안전 중단 (Stop Singleton)

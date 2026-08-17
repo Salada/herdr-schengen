@@ -9,6 +9,7 @@ and auto-approves safe commands while delegating risky commands to the user.
 Key Architecture:
 - Explicit Human-in-the-Loop invocation (No silent OS daemons).
 - Strict Singleton FileLock (fcntl.flock) to prevent race conditions & duplicate key injection.
+- Configurable Reasoning Effort (default: medium, selectable: low/high/off).
 - Zero Google One quota consumption by leveraging private GPT-OSS 120B Subagent.
 """
 
@@ -36,7 +37,14 @@ from guard_db import (
     DB_DIR,
     DB_PATH
 )
-from security_evaluator import audit_shell_command, audit_python_code, sanitize_output, DEFAULT_GPT_OSS_MODEL, DEFAULT_GPT_OSS_ENDPOINT
+from security_evaluator import (
+    audit_shell_command,
+    audit_python_code,
+    sanitize_output,
+    DEFAULT_GPT_OSS_MODEL,
+    DEFAULT_GPT_OSS_ENDPOINT,
+    DEFAULT_REASONING_EFFORT
+)
 
 LOCK_FILE = DB_DIR / "guard.lock"
 
@@ -53,7 +61,6 @@ def acquire_singleton_lock():
         lock_fd.flush()
         return lock_fd
     except (IOError, BlockingIOError):
-        # Read running PID if available
         running_pid = "unknown"
         try:
             with open(LOCK_FILE, "r") as f:
@@ -148,13 +155,14 @@ def parse_permission_request(visible_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with Singleton FileLock")
+    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with Singleton FileLock & Reasoning Control")
     parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto'")
     parser.add_argument("--interval", type=int, default=5, help="Polling interval in seconds (default: 5)")
     parser.add_argument("--auto-exit", action="store_true", default=True, help="Automatically exit when agent finishes session")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions without injecting keys")
     parser.add_argument("--stats", action="store_true", help="Display pattern analysis stats from DB and exit")
     parser.add_argument("--use-gpt-oss", action="store_true", default=False, help="Enable private GPT-OSS 120B semantic judge")
+    parser.add_argument("--reasoning", choices=["off", "low", "medium", "high"], default=DEFAULT_REASONING_EFFORT, help="Reasoning effort level for LLM judge (default: medium)")
     parser.add_argument("--stop", action="store_true", help="Stop currently running guard process and exit")
     args = parser.parse_args()
 
@@ -180,7 +188,7 @@ def main():
     # Acquire strict singleton lock
     lock_fd = acquire_singleton_lock()
 
-    print(f"🛡️  Herdr Agent Guard started (PID: {os.getpid()}, target={args.target}, interval={args.interval}s, db={DB_PATH})", flush=True)
+    print(f"🛡️  Herdr Agent Guard started (PID: {os.getpid()}, target={args.target}, interval={args.interval}s, reasoning={args.reasoning}, db={DB_PATH})", flush=True)
 
     last_approved_cmd = {}
     idle_count = 0
@@ -223,7 +231,11 @@ def main():
                         is_safe = True
                         reason = wl_reason
                     else:
-                        is_safe, reason = audit_shell_command(req_cmd, use_llm_judge=args.use_gpt_oss)
+                        is_safe, reason = audit_shell_command(
+                            req_cmd,
+                            use_llm_judge=args.use_gpt_oss,
+                            reasoning_effort=args.reasoning
+                        )
 
                     print(f"⚖️  Safety Evaluation: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason})", flush=True)
 
