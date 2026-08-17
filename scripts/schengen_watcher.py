@@ -113,7 +113,8 @@ def show_guard_status():
 
     # Active Herdr Panes
     all_panes = get_all_panes()
-    print(f"\n🖥️  Discovered Herdr Panes ({len(all_panes)} active):")
+    self_pane = detect_self_pane_id()
+    print(f"\n🖥️  Discovered Herdr Panes ({len(all_panes)} active, Self-Caller: {self_pane or 'None'}):")
     if not all_panes:
         print("   (No active Herdr panes detected or Herdr not running)")
     for p in all_panes:
@@ -121,8 +122,13 @@ def show_guard_status():
         agent = p.get("agent", "none")
         agent_status = p.get("agent_status", "")
         cwd = p.get("foreground_cwd") or p.get("cwd", "")
-        is_agy = " [🎯 Guard Target: AGY]" if agent == "agy" else ""
-        print(f"   • Pane {pane_id:<6} | Agent: {agent:<8} | Status: {agent_status:<8} | CWD: {cwd}{is_agy}")
+        if self_pane and pane_id == self_pane:
+            guard_label = " [🚫 EXCLUDED: Self-Caller Pane (No Self-Approval)]"
+        elif agent == "agy":
+            guard_label = " [🎯 Guard Target: AGY Sibling/Child Pane]"
+        else:
+            guard_label = f" [⚪ Ignored: Non-AGY ({agent})]"
+        print(f"   • Pane {pane_id:<6} | Agent: {agent:<8} | Status: {agent_status:<8} | CWD: {cwd}{guard_label}")
 
     # Recent Audit Log Entries
     print(f"\n📜 Recent SmartGate Audit Events (from SQLite3):")
@@ -343,11 +349,12 @@ def main():
         print(f"🚀 Starting SmartGate / Herdr Schengen watcher daemon in background...")
         daemonize()
 
-    # Acquire strict singleton lock
-    lock_fd = acquire_singleton_lock()
-
+    # Auto-detect self pane for strict exclusion (prevents self-recursive approval)
+    self_pane = detect_self_pane_id()
     excluded = set(args.exclude_pane)
-    print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, target={args.target}, agent_filter={args.agent_filter}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning})", flush=True)
+    if self_pane:
+        excluded.add(self_pane)
+    print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning})", flush=True)
 
     last_approved_cmd = {}
     idle_count = 0
