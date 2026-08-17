@@ -13,11 +13,12 @@ description: Herdr Schengen (SmartGate) - Autonomous border-free flow with stric
 
 ---
 
-## 🚀 Quick Start & CLI Usage
+## 🚀 Quick Start & AGY Execution Models
 
-### 1. Start SmartGate Daemon (Auto-detect active & future AGY panes)
+### 1. AGY-Native Clearance (Method A, Primary Model)
+When invoked within an AGY session, `schengen_watcher.py` runs as a streaming background task holding the single-session authority (`fcntl.flock` on `schengen.lock`). Safe commands are cleared instantly via 1ms AST, while intercepted border risks stream directly to the AGY session for conversational escalation.
 ```bash
-# Main command
+# Main command (AGY-native streaming mode)
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto
 
 # Alias command

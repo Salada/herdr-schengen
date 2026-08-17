@@ -447,7 +447,10 @@ def main():
                             print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
                         last_approved_cmd[pane_id] = req_cmd
                     else:
-                        print(f"🛑 Pre-execution HALTED for safety. Awaiting human review on pane {pane_id}.", flush=True)
+                        print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review.", flush=True)
+                        print(f"   • Pane: {pane_id} ({agent_kind})", flush=True)
+                        print(f"   • Reason: {reason}", flush=True)
+                        print(f"   • Intercepted Command:\n     {req_cmd}", flush=True)
                         run_cmd(["herdr", "notification", "send", "--title", "SmartGate Alert", "--body", f"Manual approval required on {pane_id}: {reason}"])
                         last_approved_cmd[pane_id] = req_cmd
 
