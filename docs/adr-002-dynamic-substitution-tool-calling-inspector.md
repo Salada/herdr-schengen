@@ -24,15 +24,15 @@ We adopt a **3-tier evaluation architecture** that marries deterministic static 
 
 ```mermaid
 flowchart TD
-    CMD["Input Command (e.g. cp $(cat safe_list.txt) ~/dest/)"] --> L1{"Tier 1: 1ms AST Static Audit<br>(Static path & zero substitution?)"}
-    L1 -->|Static Safe| PASS["✅ Tier 1: Auto-Approve (0.1s Fast-Path)"]
-    L1 -->|Dynamic Substitution $(cat ...)| L2["Tier 2: Private GPT-OSS 120B Tool-Calling Inspector<br>(Zero Google Quota)"]
+    CMD["Input Command: cp $(cat safe_list.txt) ~/dest/"] --> L1{"Tier 1: 1ms AST Static Audit<br/>(Static path & zero substitution?)"}
+    L1 -->|"Static Safe"| PASS["✅ Tier 1: Auto-Approve (0.1s Fast-Path)"]
+    L1 -->|"Dynamic Substitution $(cat ...)"| L2["Tier 2: Private GPT-OSS 120B Tool-Calling Inspector<br/>(Zero Google Quota)"]
     
     subgraph L2_Inspection ["Tier 2: Real-time Inspection with Guardrails"]
         L2 --> TC["Tool Call: read_file_content('safe_list.txt')"]
         TC --> G5{"5 Anti-Loop Guardrails Check"}
-        G5 -->|Verified Safe Content| L2_PASS["✅ Tier 2: Auto-Approve with Audit Log"]
-        G5 -->|Sensitive / System Content Detected| L3["👤 Tier 3: Human Review (Manual Delegation)"]
+        G5 -->|"Verified Safe Content"| L2_PASS["✅ Tier 2: Auto-Approve with Audit Log"]
+        G5 -->|"Sensitive / System Content Detected"| L3["👤 Tier 3: Human Review (Manual Delegation)"]
     end
 ```
 

@@ -44,17 +44,17 @@ When orchestrating multi-agent workflows across terminal multiplexers like [Herd
 
 ```mermaid
 flowchart TD
-    CMD["Agent Command (e.g. cp $(cat manifest.txt) dist/)"] --> T1{"Tier 1: 1ms AST Static Audit<br>(Deterministic & Zero-Token)"}
+    CMD["Agent Command: cp $(cat manifest.txt) dist/"] --> T1{"Tier 1: 1ms AST Static Audit<br/>(Deterministic & Zero-Token)"}
     
-    T1 -->|Static Safe Command| PASS["✅ Tier 1: Auto-Approve (0.1s Fast-Track)"]
-    T1 -->|Critical Denylist Trigger| BLOCK["🚨 Blocked: Critical Risk (rm -rf, sudo, .env leak)"]
-    T1 -->|Dynamic Substitution $(cat ...)| T2["Tier 2: Tool-Calling Semantic Inspector<br>(GPT-OSS 120B / DeepSeek-V3)"]
+    T1 -->|"Static Safe Command"| PASS["✅ Tier 1: Auto-Approve (0.1s Fast-Track)"]
+    T1 -->|"Critical Denylist Trigger"| BLOCK["🚨 Blocked: Critical Risk (rm -rf, sudo, .env leak)"]
+    T1 -->|"Dynamic Substitution $(cat ...)"| T2["Tier 2: Tool-Calling Semantic Inspector<br/>(GPT-OSS 120B / DeepSeek-V3)"]
     
     subgraph T2_Inspection ["Tier 2: Real-time Payload Inspection"]
         T2 --> TC["Tool Call: read_file_content('manifest.txt')"]
         TC --> G5{"5 Anti-Loop Guardrails Check"}
-        G5 -->|Verified Safe Payload| T2_PASS["✅ Tier 2: Auto-Approved with Audit Trail"]
-        G5 -->|Sensitive / System Paths Found| T3["👤 Tier 3: Human Review & Delegation"]
+        G5 -->|"Verified Safe Payload"| T2_PASS["✅ Tier 2: Auto-Approved with Audit Trail"]
+        G5 -->|"Sensitive / System Paths Found"| T3["👤 Tier 3: Human Review & Delegation"]
     end
 
     BLOCK --> T3
