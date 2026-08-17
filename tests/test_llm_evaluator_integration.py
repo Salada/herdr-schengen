@@ -14,21 +14,25 @@ from security_evaluator import audit_dynamic_substitution_with_llm
 
 @pytest.fixture
 def llm_config():
-    """Resolve LLM endpoint, model, and API key from environment."""
-    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GUARD_LLM_API_KEY") or ""
+    """Resolve LLM endpoint, model, and API key strictly from environment variables.
+    
+    Raises an explicit error if required environment variables are not provided.
+    """
     endpoint = os.environ.get("GUARD_LLM_ENDPOINT")
     model = os.environ.get("GUARD_LLM_MODEL")
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GUARD_LLM_API_KEY") or ""
 
     if not endpoint:
-        if api_key.startswith("sk-"):
-            endpoint = "https://api.deepseek.com/v1/chat/completions"
-            model = model or "deepseek-chat"
-        else:
-            endpoint = "http://192.168.10.102:8000/v1/chat/completions"
-            model = model or "gpt-oss:120b"
+        raise ValueError(
+            "Missing mandatory environment variable 'GUARD_LLM_ENDPOINT'. "
+            "Integration test requires an explicit OpenAI-compatible endpoint URL."
+        )
 
-    if not api_key and not endpoint.startswith("http://192.168."):
-        pytest.skip("No DEEPSEEK_API_KEY or local LLM endpoint provided; skipping live integration tests.")
+    if not model:
+        raise ValueError(
+            "Missing mandatory environment variable 'GUARD_LLM_MODEL'. "
+            "Integration test requires an explicit model identifier (e.g. 'deepseek-chat' or 'gpt-oss:120b')."
+        )
 
     return {
         "endpoint": endpoint,
