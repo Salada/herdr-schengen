@@ -349,6 +349,9 @@ def main():
         print(f"🚀 Starting SmartGate / Herdr Schengen watcher daemon in background...")
         daemonize()
 
+    # Acquire strict singleton lock
+    lock_fd = acquire_singleton_lock()
+
     # Auto-detect self pane for strict exclusion (prevents self-recursive approval)
     self_pane = detect_self_pane_id()
     excluded = set(args.exclude_pane)

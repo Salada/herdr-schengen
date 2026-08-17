@@ -286,6 +286,7 @@ def audit_dynamic_substitution_with_llm(
 
     visited_paths = set()
 
+    for hop in range(max_hops):
         req_body: Dict[str, Any] = {
             "model": model,
             "temperature": 0.0,
