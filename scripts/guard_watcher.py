@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Herdr Agent Guard Watcher Daemon with AGY-Only Targeting & Strict Singleton FileLock.
+"""Herdr Agent Guard Watcher Daemon with AGY Isolation, Self-Exclusion & Singleton Lock.
 
 Monitors Herdr pane(s) at configurable intervals, performs AST static
 analysis and security evaluation on requested commands/scripts, logs every
@@ -8,6 +8,7 @@ and auto-approves safe commands while delegating risky commands to the user.
 
 Key Architecture:
 - STRICT AGY-ONLY SCOPE: Excludes Hermes and other agents by default (--agent-filter agy).
+- STRICT SELF-EXCLUSION: Never auto-approves commands on the guard's own caller pane (eliminates self-recursive hazards).
 - Explicit Human-in-the-Loop invocation (No silent OS daemons).
 - Strict Singleton FileLock (fcntl.flock) to prevent race conditions & duplicate key injection.
 - Robust Script Pre-approval Detection across diverse AGY approval prompts.
@@ -132,17 +133,34 @@ def get_pane_text(pane_id, lines=80):
     return out or ""
 
 
-def find_blocked_panes(agent_filter="agy"):
-    """Find panes currently waiting on approval, strictly filtered by agent type (default: agy only)."""
+def detect_self_pane_id():
+    """Detect the current pane ID running this guard watcher process."""
+    env_pane = os.environ.get("HERDR_PANE") or os.environ.get("HERDR_PANE_ID")
+    if env_pane:
+        return env_pane.strip()
+    return None
+
+
+def find_blocked_panes(agent_filter="agy", exclude_panes=None):
+    """Find panes currently waiting on approval, strictly filtered by agent type and excluding self pane."""
+    if exclude_panes is None:
+        exclude_panes = set()
+    else:
+        exclude_panes = set(exclude_panes)
+
     blocked = []
     for pane in get_all_panes():
+        pane_id = pane.get("pane_id", "")
+        if pane_id in exclude_panes:
+            # Strictly skip self pane to prevent self-recursive auto-approval
+            continue
+
         agent_kind = pane.get("agent", "")
         if agent_filter != "all" and agent_kind != agent_filter:
             # Strictly skip non-matching agents (e.g. hermes, codex)
             continue
 
         status = pane.get("agent_status", "")
-        pane_id = pane.get("pane_id", "")
         if status == "blocked":
             blocked.append(pane_id)
         else:
@@ -196,9 +214,10 @@ def parse_permission_request(visible_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with AGY-Only Isolation")
+    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with Self-Exclusion & AGY Isolation")
     parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto'")
     parser.add_argument("--agent-filter", choices=["agy", "all"], default="agy", help="Target agent filter (default: agy only, Hermes is strictly excluded)")
+    parser.add_argument("--exclude-pane", action="append", default=[], help="Pane ID to exclude from auto-approval (e.g. self caller pane)")
     parser.add_argument("--interval", type=int, default=5, help="Polling interval in seconds (default: 5)")
     parser.add_argument("--auto-exit", action="store_true", default=True, help="Automatically exit when agent finishes session")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions without injecting keys")
@@ -227,10 +246,16 @@ def main():
             print("-" * 80)
         return
 
+    # Auto-detect self pane for exclusion
+    self_pane = detect_self_pane_id()
+    excluded = set(args.exclude_pane)
+    if self_pane:
+        excluded.add(self_pane)
+
     # Acquire strict singleton lock
     lock_fd = acquire_singleton_lock()
 
-    print(f"🛡️  Herdr Agent Guard started (PID: {os.getpid()}, target={args.target}, agent_filter={args.agent_filter}, interval={args.interval}s, reasoning={args.reasoning})", flush=True)
+    print(f"🛡️  Herdr Agent Guard started (PID: {os.getpid()}, target={args.target}, agent_filter={args.agent_filter}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning})", flush=True)
 
     last_approved_cmd = {}
     idle_count = 0
@@ -239,25 +264,29 @@ def main():
         while True:
             target_panes = []
             if args.target == "auto":
-                target_panes = find_blocked_panes(agent_filter=args.agent_filter)
+                target_panes = find_blocked_panes(agent_filter=args.agent_filter, exclude_panes=excluded)
                 if not target_panes:
                     all_p = get_all_panes()
                     if args.agent_filter == "agy":
-                        active = [p["pane_id"] for p in all_p if p.get("agent") == "agy"]
+                        active = [p["pane_id"] for p in all_p if p.get("agent") == "agy" and p["pane_id"] not in excluded]
                     else:
-                        active = [p["pane_id"] for p in all_p if p.get("agent") in ("agy", "hermes", "codex")]
+                        active = [p["pane_id"] for p in all_p if p.get("agent") in ("agy", "hermes", "codex") and p["pane_id"] not in excluded]
                     target_panes = active
             else:
-                pane_info = get_pane_info(args.target)
-                if pane_info:
-                    agent_kind = pane_info.get("agent", "")
-                    if args.agent_filter != "all" and agent_kind != args.agent_filter:
-                        print(f"⚠️  Target pane {args.target} is running '{agent_kind}', which does not match agent filter '{args.agent_filter}'. Skipping.", flush=True)
-                        target_panes = []
+                if args.target in excluded:
+                    print(f"⚠️  Target pane {args.target} is in exclusion list (self caller pane). Skipping.", flush=True)
+                    target_panes = []
+                else:
+                    pane_info = get_pane_info(args.target)
+                    if pane_info:
+                        agent_kind = pane_info.get("agent", "")
+                        if args.agent_filter != "all" and agent_kind != args.agent_filter:
+                            print(f"⚠️  Target pane {args.target} is running '{agent_kind}', which does not match agent filter '{args.agent_filter}'. Skipping.", flush=True)
+                            target_panes = []
+                        else:
+                            target_panes = [args.target]
                     else:
                         target_panes = [args.target]
-                else:
-                    target_panes = [args.target]
 
             if not target_panes:
                 idle_count += 1
