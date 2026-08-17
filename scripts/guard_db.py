@@ -15,8 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-DB_DIR = Path.home() / ".local" / "state" / "herdr-agent-guard"
-DB_PATH = DB_DIR / "guard_history.db"
+DB_DIR = Path.home() / ".local" / "state" / "herdr-schengen"
+DB_PATH = DB_DIR / "schengen_history.db"
 
 
 def get_db_connection() -> sqlite3.Connection:
