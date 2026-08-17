@@ -5,7 +5,7 @@ Combines:
 2. Python AST static analysis (with Forgejo API whitelist rules)
 3. Sensitive file and secret pattern matching
 4. Hermes sandbox write-protection policy
-5. GPT-OSS 120B Private LLM Security Judge with Low Reasoning Effort by default
+5. Multi-turn Tool-Calling Semantic Inspector (GPT-OSS 120B) for dynamic substitutions $(cat ...)
 6. Output sanitization & exfiltration inspection
 """
 
@@ -14,8 +14,10 @@ import json
 import os
 import re
 import shlex
+import stat
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Tuple, List, Dict, Any, Optional
 
 # 1. Sensitive file patterns (Secrets & Credentials)
@@ -69,14 +71,78 @@ SHELL_WRITE_COMMANDS = {
     "cp", "mv", "touch", "mkdir", "rsync", "tar", "unzip", "tee", "wget", "curl", "dd"
 }
 
-# 7. Dangerous Python AST modules & functions
+# 7. Dynamic Substitution Patterns $(cat ...) or `cat ...`
+DYNAMIC_SUBSTITUTION_PATTERN = re.compile(
+    r"""(
+        \$\(\s*(cat|head|tail|grep|find|awk|sed|<)\b|
+        `\s*(cat|head|tail|grep|find|awk|sed|<)\b
+    )""",
+    re.VERBOSE | re.IGNORECASE
+)
+
+# 8. Dangerous Python AST modules & functions
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
 
-# 8. GPT-OSS 120B Private Model Configuration (Default Reasoning: LOW for Guard Watcher)
+# 9. GPT-OSS 120B Private Model Configuration (Default Reasoning: LOW for Guard Watcher)
 DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
 DEFAULT_GPT_OSS_ENDPOINT = os.environ.get("GUARD_LLM_ENDPOINT", "http://192.168.10.102:8000/v1/chat/completions")
 DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
+
+# Tool Definition for Tool-Calling Semantic Inspector
+INSPECTOR_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file_content",
+            "description": "Read content of a regular local text file to inspect dynamic parameters before command execution. Returns up to 8KB.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to inspect (e.g. 'safe_list.txt')"
+                    }
+                },
+                "required": ["file_path"]
+            }
+        }
+    }
+]
+
+
+def safe_read_file_content(file_path: str, max_bytes: int = 8192) -> Tuple[bool, str]:
+    """Safely read text file content with 5 defensive guardrails:
+    1. Canonical realpath resolution (prevents symlink loops)
+    2. S_ISREG check (prevents FIFOs, sockets, character/block devices)
+    3. Sensitive file exclusion (refuses direct read of .env / id_rsa)
+    4. Max byte limit (8KB max to prevent memory exhaustion)
+    5. Python native direct I/O (prevents shell subshell re-entrancy)
+    """
+    try:
+        clean_path = Path(file_path.strip().strip("'\"")).expanduser().resolve()
+        path_str = str(clean_path)
+
+        # Guard: Never read secrets
+        if SENSITIVE_FILE_PATTERN.search(path_str):
+            return False, f"Refused read: Path contains sensitive credentials '{path_str}'"
+
+        # Guard: Never read system root directories
+        if re.search(r"^/(etc|var|System|Library|dev|proc|sys)/", path_str):
+            return False, f"Refused read: System/device directory path '{path_str}'"
+
+        if not clean_path.exists():
+            return False, f"File does not exist: '{path_str}'"
+
+        st = clean_path.stat()
+        if not stat.S_ISREG(st.st_mode):
+            return False, f"Refused read: Target is not a regular file (FIFO/socket/device): '{path_str}'"
+
+        with open(clean_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(max_bytes)
+            return True, content
+    except Exception as e:
+        return False, f"Safe read error: {e}"
 
 
 class PythonASTAuditor(ast.NodeVisitor):
@@ -186,57 +252,116 @@ def audit_python_code(code_str: str) -> Tuple[bool, str]:
         return False, f"Python SyntaxError during AST audit: {e}"
 
 
-def audit_with_gpt_oss_120b(
-    code_or_cmd: str,
+def audit_dynamic_substitution_with_llm(
+    cmd_str: str,
     endpoint: str = DEFAULT_GPT_OSS_ENDPOINT,
     model: str = DEFAULT_GPT_OSS_MODEL,
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    max_hops: int = 2
 ) -> Tuple[bool, str]:
-    """Perform semantic security audit using private GPT-OSS 120B Subagent (Default: reasoning=low for fast response)."""
+    """Multi-turn Tool-Calling security inspector using private GPT-OSS 120B.
+    
+    Guards against indirect command substitution attacks by reading referenced files
+    and verifying whether runtime expanded arguments contain sensitive/system paths.
+    Enforces Max Hops = 2 to prevent infinite tool loops.
+    """
     system_prompt = (
-        "You are an uncompromising security auditor subagent for coding agents. "
-        "Analyze the following command or Python script for: "
-        "1) Secret/credential exfiltration (.env, id_rsa, API tokens), "
-        "2) Destructive file/system actions (rm -rf, sudo, chmod, disk writes), "
-        "3) Unauthorized external network connections. "
-        "Respond ONLY with valid JSON: {\"is_safe\": bool, \"risk_level\": \"LOW\"|\"MEDIUM\"|\"HIGH\", \"reason\": \"string\"}"
+        "You are an uncompromising security inspector subagent for Herdr SmartGate. "
+        "A command contains dynamic command substitution (e.g. $(cat ...)). "
+        "Use the `read_file_content` tool to inspect the referenced file(s). "
+        "Check if the file content contains: "
+        "1) Sensitive secrets (.env, id_rsa, tokens, credentials, passwords), "
+        "2) System root paths (/etc, /System, /var, /usr, /dev), "
+        "3) Destructive shell flags or commands. "
+        "If safe, respond ONLY with JSON: {\"is_safe\": true, \"reason\": \"File content verified safe: <summary>\"}. "
+        "If dangerous or uncertain, respond ONLY with JSON: {\"is_safe\": false, \"reason\": \"<danger explanation>\"}."
     )
 
-    max_tokens_map = {"off": 150, "low": 250, "medium": 600, "high": 1500}
-    max_tok = max_tokens_map.get(reasoning_effort.lower(), 250)
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Inspect the dynamic parameters of this command before approval:\n```\n{cmd_str}\n```"}
+    ]
 
-    req_body: Dict[str, Any] = {
-        "model": model,
-        "temperature": 0.0,
-        "max_tokens": max_tok,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Audit this code/command:\n```\n{code_or_cmd}\n```"}
-        ]
-    }
+    visited_paths = set()
 
-    if reasoning_effort.lower() != "off":
-        req_body["reasoning_effort"] = reasoning_effort.lower()
+    for hop in range(max_hops + 1):
+        req_body: Dict[str, Any] = {
+            "model": model,
+            "temperature": 0.0,
+            "max_tokens": 500,
+            "messages": messages,
+            "tools": INSPECTOR_TOOLS,
+            "tool_choice": "auto"
+        }
+        if reasoning_effort.lower() != "off":
+            req_body["reasoning_effort"] = reasoning_effort.lower()
 
-    payload = json.dumps(req_body).encode("utf-8")
+        payload = json.dumps(req_body).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"}
+        )
 
-    req = urllib.request.Request(
-        endpoint,
-        data=payload,
-        headers={"Content-Type": "application/json"}
-    )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.load(resp)
+                choice = data["choices"][0]
+                message = choice.get("message", {})
+                tool_calls = message.get("tool_calls", [])
 
-    try:
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            data = json.load(resp)
-            content = data["choices"][0]["message"]["content"]
-            res = json.loads(content)
-            is_safe = res.get("is_safe", False)
-            reason = f"[GPT-OSS 120B (reasoning={reasoning_effort})] {res.get('reason', 'Analyzed by 120B Judge')}"
-            return is_safe, reason
-    except Exception as e:
-        return True, f"[GPT-OSS 120B Fallback] {e}"
+                if tool_calls:
+                    if hop >= max_hops:
+                        return False, f"Dynamic substitution inspection hop limit exceeded (Max Hops: {max_hops}); requires human review"
+
+                    messages.append(message)
+                    for tc in tool_calls:
+                        fn_name = tc.get("function", {}).get("name")
+                        fn_args_raw = tc.get("function", {}).get("arguments", "{}")
+                        try:
+                            fn_args = json.loads(fn_args_raw)
+                        except Exception:
+                            fn_args = {}
+
+                        if fn_name == "read_file_content":
+                            target_file = fn_args.get("file_path", "")
+                            norm_path = str(Path(target_file).expanduser().resolve())
+
+                            if norm_path in visited_paths:
+                                tool_result = f"Error: Circular reference loop detected for '{norm_path}'"
+                            else:
+                                visited_paths.add(norm_path)
+                                success, content = safe_read_file_content(target_file)
+                                tool_result = content if success else f"Error: {content}"
+
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", "call_1"),
+                                "content": tool_result
+                            })
+                    continue  # Next turn in loop
+
+                # Final text response
+                content_str = message.get("content", "")
+                # Try parsing JSON response
+                try:
+                    # Clean json fences if present
+                    clean_json = re.sub(r"^```json\s*", "", content_str.strip(), flags=re.IGNORECASE)
+                    clean_json = re.sub(r"\s*```$", "", clean_json)
+                    res = json.loads(clean_json)
+                    is_safe = bool(res.get("is_safe", False))
+                    reason = f"[GPT-OSS 120B Inspector] {res.get('reason', 'Inspected dynamic parameters')}"
+                    return is_safe, reason
+                except Exception:
+                    if "true" in content_str.lower() and "safe" in content_str.lower() and "not" not in content_str.lower():
+                        return True, f"[GPT-OSS 120B Inspector] Safe: {content_str[:80]}"
+                    return False, f"[GPT-OSS 120B Inspector] Uncertain verdict: {content_str[:80]}; delegating to human"
+
+        except Exception as e:
+            # Fail-Safe to Human Review when private LLM inspector is unreachable
+            return False, f"Dynamic substitution detected & LLM Inspector offline ({e}); requires human review"
+
+    return False, "Dynamic substitution inspection could not be completed; requires human review"
 
 
 def is_forgejo_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
@@ -260,7 +385,7 @@ def is_forgejo_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
 
 
 def audit_shell_command(cmd_str: str, use_llm_judge: bool = False, reasoning_effort: str = DEFAULT_REASONING_EFFORT) -> Tuple[bool, str]:
-    """Audit shell command line with PATH, Forgejo rules, and optional GPT-OSS 120B judge with reasoning effort."""
+    """Audit shell command line with PATH, Forgejo rules, dynamic substitution inspection, and AST judge."""
     if not cmd_str or not cmd_str.strip():
         return True, "Safe"
 
@@ -318,9 +443,10 @@ def audit_shell_command(cmd_str: str, use_llm_judge: bool = False, reasoning_eff
                 if re.search(rf"\b{net_bin}\b", sub_cmd, re.IGNORECASE) and SENSITIVE_FILE_PATTERN.search(sub_cmd):
                     return False, f"Network command touching sensitive path: '{sub_cmd}'"
 
-    # 5. Optional GPT-OSS 120B Private Semantic Judge with Reasoning Effort
-    if use_llm_judge and len(cmd_str.splitlines()) > 5:
-        return audit_with_gpt_oss_120b(cmd_str, reasoning_effort=reasoning_effort)
+    # 5. Check dynamic command substitution $(cat ...) or `cat ...`
+    if DYNAMIC_SUBSTITUTION_PATTERN.search(cmd_str):
+        # Trigger L2 Multi-turn Tool-Calling Semantic Inspector with 5 Guardrails
+        return audit_dynamic_substitution_with_llm(cmd_str, reasoning_effort=reasoning_effort)
 
     return True, "Safe"
 
