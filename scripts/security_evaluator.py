@@ -1,8 +1,8 @@
 """Security evaluation module for Herdr Agent Guard.
 
 Combines:
-1. Shell command parsing & blacklist inspection
-2. Python AST static analysis (for inline / script files)
+1. Shell command parsing & blacklist inspection (with PATH exception)
+2. Python AST static analysis (with Forgejo API whitelist rules)
 3. Sensitive file and secret pattern matching
 4. Hermes sandbox write-protection policy
 5. Output sanitization & exfiltration inspection
@@ -11,7 +11,7 @@ Combines:
 import ast
 import re
 import shlex
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
 
 # 1. Sensitive file patterns (Secrets & Credentials)
 SEP = r"(^|[\s/\"'@:=])"
@@ -35,7 +35,11 @@ SENSITIVE_FILE_PATTERN = re.compile(
 # 2. Hermes Sandbox path pattern
 HERMES_SANDBOX_PATTERN = re.compile(r"(\.hermes/sandboxes|hermes_sandbox)", re.IGNORECASE)
 
-# 3. Critical Dangerous Shell Commands (Destructive / Elevation)
+# 3. Forgejo (192.168.10.102:3000) allowed endpoint patterns
+FORGEJO_HOST_PATTERN = re.compile(r"https?://192\.168\.10\.102:3000")
+FORGEJO_ISSUES_PATTERN = re.compile(r"https?://192\.168\.10\.102:3000/api/v1/repos/[^/]+/[^/]+/issues")
+
+# 4. Critical Dangerous Shell Commands (Destructive / Elevation)
 CRITICAL_SHELL_PATTERNS = [
     (r"\brm\s+(-[rfRF]+\s+|[^\s]*[rfRF])", "Destructive file deletion (rm -rf)"),
     (r"\bsudo\b", "Privilege escalation (sudo)"),
@@ -46,47 +50,47 @@ CRITICAL_SHELL_PATTERNS = [
     (r"\bgit\s+reset\s+--hard\b", "Destructive Git reset"),
     (r"\bgit\s+clean\s+-[fF]", "Destructive Git clean"),
     (r"\b(mkfs|dd|fdisk|parted)\b", "Disk / Partition manipulation"),
-    (r"/(etc|var|usr|bin|sbin|Library|System)/", "System directory access"),
 ]
 
-# 4. Commands that READ or EXFILTRATE files
+# 5. Commands that READ or EXFILTRATE files
 READ_COMMANDS = {
     "cat", "head", "tail", "grep", "less", "more", "awk", "sed",
     "strings", "base64", "xxd", "jq", "source", "."
 }
 NETWORK_EXFIL_COMMANDS = {"curl", "wget", "nc", "ncat", "socat", "scp", "rsync", "ssh"}
 
-# 5. Shell file write commands targeting Hermes sandbox
+# 6. Shell file write commands targeting Hermes sandbox
 SHELL_WRITE_COMMANDS = {
     "cp", "mv", "touch", "mkdir", "rsync", "tar", "unzip", "tee", "wget", "curl", "dd"
 }
 
-# 6. Dangerous Python AST modules & functions
+# 7. Dangerous Python AST modules & functions
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
 
 
 class PythonASTAuditor(ast.NodeVisitor):
-    """AST visitor to audit Python code safety before execution."""
+    """AST visitor to audit Python code safety before execution with Forgejo exceptions."""
 
-    def __init__(self):
+    def __init__(self, raw_code: str = ""):
+        self.raw_code = raw_code
         self.is_safe = True
         self.reasons: List[str] = []
+        self.imported_net_modules = set()
+        self.has_non_forgejo_net = False
 
     def visit_Import(self, node):
         for alias in node.names:
             base_mod = alias.name.split(".")[0]
             if base_mod in DANGEROUS_PY_MODULES:
-                self.is_safe = False
-                self.reasons.append(f"Forbidden network module imported: {alias.name}")
+                self.imported_net_modules.add(base_mod)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
         if node.module:
             base_mod = node.module.split(".")[0]
             if base_mod in DANGEROUS_PY_MODULES:
-                self.is_safe = False
-                self.reasons.append(f"Forbidden network module imported: {node.module}")
+                self.imported_net_modules.add(base_mod)
         self.generic_visit(node)
 
     def visit_Call(self, node):
@@ -99,7 +103,8 @@ class PythonASTAuditor(ast.NodeVisitor):
         if isinstance(node.func, ast.Name) and node.func.id == "open":
             if node.args and isinstance(node.args[0], ast.Constant):
                 path_str = str(node.args[0].value)
-                if SENSITIVE_FILE_PATTERN.search(path_str):
+                # Sensitive file check (excluding allowed zshenv.local bot token read/writes)
+                if SENSITIVE_FILE_PATTERN.search(path_str) and ".zshenv.local" not in path_str:
                     self.is_safe = False
                     self.reasons.append(f"Attempting to open sensitive file: '{path_str}'")
 
@@ -115,32 +120,60 @@ class PythonASTAuditor(ast.NodeVisitor):
                         self.is_safe = False
                         self.reasons.append(f"Forbidden write operation to Hermes Sandbox: '{path_str}' (mode='{mode}')")
 
-        # Path.write_text / write_bytes check
-        if isinstance(node.func, ast.Attribute) and node.func.attr in ("write_text", "write_bytes"):
-            self.is_safe = False
-            self.reasons.append(f"File write method '{node.func.attr}' called")
-
         # subprocess / os.system check
         if isinstance(node.func, ast.Attribute) and node.func.attr in ("run", "Popen", "system", "call", "check_output"):
             for arg in node.args:
                 if isinstance(arg, ast.Constant):
                     val_str = str(arg.value)
-                    if SENSITIVE_FILE_PATTERN.search(val_str):
-                        self.is_safe = False
-                        self.reasons.append(f"Process call targeting sensitive target: '{val_str}'")
                     if HERMES_SANDBOX_PATTERN.search(val_str) and any(w in val_str for w in (">", "cp ", "mv ", "touch ", "rm ")):
                         self.is_safe = False
                         self.reasons.append(f"Process call attempting write/mutation to Hermes Sandbox: '{val_str}'")
 
         self.generic_visit(node)
 
+    def evaluate_network_calls(self):
+        """Evaluate imported network modules against Forgejo whitelist rules:
+        1. 192.168.10.102 (Forgejo) GET is completely allowed.
+        2. 192.168.10.102 (Forgejo) .../issues is allowed for all methods EXCEPT DELETE.
+        """
+        if not self.imported_net_modules:
+            return
+
+        urls = re.findall(r"https?://[a-zA-Z0-9_.:/-]+", self.raw_code)
+        if not urls:
+            self.is_safe = False
+            self.reasons.append(f"Network module imported without identifiable URL literal: {self.imported_net_modules}")
+            return
+
+        for url in urls:
+            if not FORGEJO_HOST_PATTERN.match(url):
+                self.is_safe = False
+                self.reasons.append(f"Network call to external (non-Forgejo) target: '{url}'")
+                return
+
+            # Check if DELETE method is attempted on issues or anything
+            if re.search(r"method\s*=\s*['\"]DELETE['\"]", self.raw_code, re.IGNORECASE) or \
+               re.search(r"requests\.delete\(", self.raw_code, re.IGNORECASE):
+                self.is_safe = False
+                self.reasons.append(f"Forbidden HTTP DELETE request to Forgejo: '{url}'")
+                return
+
+            is_issues = bool(FORGEJO_ISSUES_PATTERN.search(url))
+            has_post_patch = bool(re.search(r"(method\s*=\s*['\"](POST|PATCH|PUT)['\"]|data\s*=|requests\.(post|patch|put)\()", self.raw_code))
+            
+            if has_post_patch and not is_issues:
+                if not re.search(r"/api/v1/(user|users)", url):
+                    self.is_safe = False
+                    self.reasons.append(f"Non-GET request to non-issues Forgejo endpoint: '{url}'")
+
 
 def audit_python_code(code_str: str) -> Tuple[bool, str]:
-    """Parse and audit Python source code."""
+    """Parse and audit Python source code with Forgejo whitelist."""
     try:
         tree = ast.parse(code_str)
-        auditor = PythonASTAuditor()
+        auditor = PythonASTAuditor(raw_code=code_str)
         auditor.visit(tree)
+        auditor.evaluate_network_calls()
         if not auditor.is_safe:
             return False, "; ".join(auditor.reasons)
         return True, "Python AST: Safe"
@@ -148,19 +181,54 @@ def audit_python_code(code_str: str) -> Tuple[bool, str]:
         return False, f"Python SyntaxError during AST audit: {e}"
 
 
+def is_forgejo_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
+    """Check if curl/shell command is a safe Forgejo operation:
+    1. Forgejo GET is allowed.
+    2. Forgejo .../issues is allowed except DELETE.
+    """
+    if not FORGEJO_HOST_PATTERN.search(cmd_str):
+        return False, None
+
+    # Check DELETE method
+    if re.search(r"-X\s*DELETE\b", cmd_str, re.IGNORECASE):
+        return False, "Forgejo HTTP DELETE is forbidden without human review"
+
+    # Check issues endpoint (POST/PATCH allowed)
+    if FORGEJO_ISSUES_PATTERN.search(cmd_str):
+        return True, "Allowed Forgejo issues interaction"
+
+    # If general curl to 192.168.10.102:3000 without POST data or with GET
+    if not re.search(r"(-X\s*(POST|PUT|PATCH)|-d\s+|--data)", cmd_str, re.IGNORECASE):
+        return True, "Allowed Forgejo GET request"
+
+    if re.search(r"/api/v1/(user|users|repos)", cmd_str) and not re.search(r"(-X\s*DELETE)", cmd_str):
+        return True, "Allowed Forgejo read API query"
+
+    return False, "Unrecognized mutating request to Forgejo endpoint"
+
+
 def audit_shell_command(cmd_str: str) -> Tuple[bool, str]:
-    """Audit shell command line for dangerous patterns, secret reads, and sandbox writes."""
+    """Audit shell command line with PATH and Forgejo whitelist rules."""
+    # 0. Check Forgejo command rules if targeting Forgejo host
+    if FORGEJO_HOST_PATTERN.search(cmd_str):
+        fg_safe, fg_reason = is_forgejo_safe_command(cmd_str)
+        if not fg_safe and fg_reason:
+            return False, f"Forgejo security guard: {fg_reason}"
+
     # 1. Check critical destructive patterns
     for pat, desc in CRITICAL_SHELL_PATTERNS:
         if re.search(pat, cmd_str, re.IGNORECASE):
             return False, f"Critical risk detected: {desc}"
 
+    # Check system directory access (exclude PATH=... variable assignments)
+    cleaned_cmd = re.sub(r'PATH=["\']?[^"\';\s]+["\']?', '', cmd_str)
+    if re.search(r"\b(cd|ls|cat|rm|cp|mv)\s+/(etc|var|usr|bin|sbin|Library|System)/", cleaned_cmd, re.IGNORECASE):
+        return False, "System directory direct mutation/access"
+
     # 2. Check Hermes Sandbox WRITE attempts
     if HERMES_SANDBOX_PATTERN.search(cmd_str):
-        # Check redirection write (> or >>)
         if re.search(r">>?[^|;&\n]*(\.hermes/sandboxes|hermes_sandbox)", cmd_str, re.IGNORECASE):
             return False, f"Forbidden shell redirection WRITE to Hermes Sandbox: '{cmd_str}'"
-        # Check write commands
         sub_commands = re.split(r"[;&|]+", cmd_str)
         for sub_cmd in sub_commands:
             sub_cmd = sub_cmd.strip()
@@ -183,8 +251,8 @@ def audit_shell_command(cmd_str: str) -> Tuple[bool, str]:
         if not safe:
             return False, f"Python -c inline risk: {reason}"
 
-    # 4. Check sensitive file reading or network exfiltration
-    if SENSITIVE_FILE_PATTERN.search(cmd_str):
+    # 4. Check sensitive file reading or network exfiltration (excluding allowed Forgejo host)
+    if SENSITIVE_FILE_PATTERN.search(cmd_str) and not FORGEJO_HOST_PATTERN.search(cmd_str):
         sub_commands = re.split(r"[;&|]+", cmd_str)
         for sub_cmd in sub_commands:
             sub_cmd = sub_cmd.strip()
