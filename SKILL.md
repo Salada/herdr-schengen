@@ -9,41 +9,44 @@ description: Herdr 패널에서 실행 중인 에이전트(AGY, Hermes, Codex �
 
 ---
 
+## 🧭 핵심 철학: 인간 중심 통제 & 싱글톤 무결성 (Human-in-the-Loop & Singleton Lock)
+
+1. **인간 중심 통제 (No Silent LaunchAgents)**:
+   - OS 레벨에서 백그라운드에 숨어 무조건 실행되는 백그라운드 데몬(LaunchAgent)을 지양합니다.
+   - 사용자가 Herdr 워크스페이스에서 **직접 눈으로 보며 필요할 때 명시적으로 실행**하고, 언제든 중단(`--stop`)하거나 직접 결재할 수 있는 가시성을 보장합니다.
+2. **엄격한 싱글톤 락 (Strict Singleton FileLock)**:
+   - `~/.local/state/herdr-agent-guard/guard.lock`에 `fcntl.flock`을 체결하여, 중복 인스턴스가 실행될 경우 Race Condition이나 키 중복 주입을 방지하고 즉시 안전하게 종료됩니다.
+3. **Google One 쿼터 보존 (Zero Quota Consumption)**:
+   - 보안 심사는 프라이빗 인프라(GPT-OSS 120B)로 분리 라우팅되어 메인 Gemini 3.7의 개발 쿼터를 단 1토큰도 소모하지 않습니다.
+
+---
+
 ## 🚀 빠른 실행 (Quick Start)
 
-### 1. 특정 패널 5초 주기 감시 (기본)
+### 1. 전역 모든 활성 에이전트 자동 감지 및 감시 (기본)
+```bash
+python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto
+```
+
+### 2. 특정 패널 5초 주기 감시
 ```bash
 python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target wP:p2 --interval 5
 ```
 
-### 2. GPT-OSS 120B 프라이빗 시맨틱 감사관 활성화 (Google One 쿼터 소모 0)
+### 3. GPT-OSS 120B 프라이빗 시맨틱 감사관 활성화
 ```bash
-python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target wP:p2 --use-gpt-oss
+python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto --use-gpt-oss
 ```
 
-### 3. 축적된 승인 패턴 및 빈도 통계 조회 (Human Review Board)
+### 4. 실행 중인 가드 프로세스 안전 중단 (Stop Singleton)
+```bash
+python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --stop
+```
+
+### 5. 축적된 승인 패턴 및 빈도 통계 조회 (Human Review Board)
 ```bash
 python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --stats
 ```
-
----
-
-## 🧠 모델 분리 아키텍처 (Model Routing Optimization)
-
-Google One 요금제(Gemini 3.7)의 쿼터를 최적으로 보존하기 위해, 보안 판별은 전용 **GPT-OSS 120B** 또는 로컬 모델로 완전히 분리 라우팅됩니다:
-
-```mermaid
-flowchart LR
-    A["메인 작업 세션 (AGY)"] -->|권한 요청 발생| B["Herdr Agent Guard (Watcher)"]
-    B -->|1차 정적 필터 1ms| C[Python AST / Regex]
-    C -->|2차 심층 시맨틱 판별| D["GPT-OSS 120B Subagent (Private OpenAI API)"]
-    D -->|결과 피드백 (0 Google Quota)| B
-    B -->|승인/보류 조치| A
-```
-
-- **환경변수 설정**:
-  - `GUARD_LLM_MODEL`: 기본값 `gpt-oss:120b`
-  - `GUARD_LLM_ENDPOINT`: 기본값 `http://192.168.10.102:8000/v1/chat/completions` (또는 `http://localhost:11434/v1/chat/completions`)
 
 ---
 
@@ -57,13 +60,3 @@ flowchart LR
 | **Hermes Sandbox** | 샌드박스 내부 단순 조회/읽기 (`cat / ls` 등) | 샌드박스 경로 대상 쓰기 (`> .hermes/sandboxes/...`, `cp/mv`, `touch`, `rsync`) |
 | **Secrets** | `.env.example` 등 템플릿 파일 다루기 | `cat .env`, `grep KEY .env`, `id_rsa`, `~/.aws`, `~/.config/gh/hosts.yml` 접근 |
 | **Python AST** | 데이터 가공, 린터/테스트(`pytest`), 허용된 Forgejo API 호출 | `requests`/`socket` 외부 인터넷 통신, `eval()`, `exec()`, 샌드박스 파일 쓰기 |
-
----
-
-## 🗄️ SQLite3 영속 데이터 모델
-
-- **DB 경로**: `~/.local/state/herdr-agent-guard/guard_history.db`
-- **테이블 구성**:
-  1. `audit_logs`: 모든 권한 요청, 정규화된 템플릿, 판정 결과, 타임스탬프, 에이전트 종류 기록.
-  2. `pattern_stats`: 정규화된 명령어 패턴별 누적 발생 횟수, 자동 승인 횟수, 위임 횟수 집계.
-  3. `user_allowlist`: 사용자가 직접 리뷰하고 영속화한 커스텀 화이트리스트 정규식 규칙.
