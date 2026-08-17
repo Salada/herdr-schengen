@@ -176,21 +176,32 @@ def stop_running_guard():
         print(f"❌ Failed to stop SmartGate process: {e}")
 
 
-def daemonize():
-    """Daemonize current process to run persistently in background."""
-    DB_DIR.mkdir(parents=True, exist_ok=True)
-    if os.fork() > 0:
-        sys.exit(0)
-    os.setsid()
-    if os.fork() > 0:
-        sys.exit(0)
+def verify_agy_runtime_environment():
+    """Ensure Schengen watcher is executing strictly within an Antigravity agent runtime."""
+    is_agy = (
+        os.environ.get("ANTIGRAVITY_AGENT") == "1"
+        or os.environ.get("AI_AGENT") == "antigravity"
+        or bool(os.environ.get("ANTIGRAVITY_CONVERSATION_ID"))
+    )
+    if not is_agy:
+        sys.stderr.write(
+            "❌ [SCHENGEN_FATAL] Execution rejected: Herdr Schengen (SmartGate) must run exclusively\n"
+            "   within an active Antigravity (AGY) agent session (ANTIGRAVITY_AGENT=1 or AI_AGENT=antigravity).\n"
+            "   Standalone terminal execution or detached background daemons are forbidden by ADR-003 governance.\n"
+        )
+        sys.exit(1)
 
-    sys.stdout.flush()
-    sys.stderr.flush()
 
-    log_fd = open(LOG_FILE, "a+")
-    os.dup2(log_fd.fileno(), sys.stdout.fileno())
-    os.dup2(log_fd.fileno(), sys.stderr.fileno())
+def is_parent_alive(initial_ppid: int) -> bool:
+    """Check if the parent process that launched this watcher task is still alive and not reparented to init/launchd."""
+    curr_ppid = os.getppid()
+    if curr_ppid == 1 or curr_ppid != initial_ppid:
+        return False
+    try:
+        os.kill(initial_ppid, 0)
+        return True
+    except (ProcessLookupError, OSError):
+        return False
 
 
 def run_cmd(args):
@@ -307,13 +318,12 @@ def parse_permission_request(visible_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Herdr SmartGate / Schengen Trusted Clearance Watcher")
+    parser = argparse.ArgumentParser(description="Herdr SmartGate / Schengen Trusted Clearance Watcher (AGY Exclusive)")
     parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto' (default: auto - monitors all active & future panes)")
     parser.add_argument("--agent-filter", choices=["agy", "all"], default="agy", help="Target agent filter (default: agy only)")
     parser.add_argument("--exclude-pane", action="append", default=[], help="Pane ID to exclude from auto-approval")
     parser.add_argument("--interval", type=int, default=3, help="Polling interval in seconds (default: 3)")
     parser.add_argument("--auto-exit", action="store_true", default=False, help="Automatically exit after idle timeout (default: False, runs continuously)")
-    parser.add_argument("--daemon", "-d", action="store_true", help="Run in background daemon mode")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions without injecting keys")
     parser.add_argument("--stats", action="store_true", help="Display pattern analysis stats from DB and exit")
     parser.add_argument("--status", action="store_true", help="Display status of SmartGate daemon and monitored panes")
@@ -345,9 +355,11 @@ def main():
             print("-" * 80)
         return
 
-    if args.daemon:
-        print(f"🚀 Starting SmartGate / Herdr Schengen watcher daemon in background...")
-        daemonize()
+    # Strictly verify AGY runtime environment (ADR-003 mandate)
+    verify_agy_runtime_environment()
+
+    # Track parent PID for orphan prevention
+    initial_ppid = os.getppid()
 
     # Acquire strict singleton lock
     lock_fd = acquire_singleton_lock()
@@ -357,13 +369,18 @@ def main():
     excluded = set(args.exclude_pane)
     if self_pane:
         excluded.add(self_pane)
-    print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning})", flush=True)
+    print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning})", flush=True)
 
     last_approved_cmd = {}
     idle_count = 0
 
     try:
         while True:
+            # P1 Guard against orphan process: verify parent AGY session is alive
+            if not is_parent_alive(initial_ppid):
+                print(f"🛑 [SCHENGEN_LIFECYCLE] Parent AGY session (PID {initial_ppid}) terminated. Exiting SmartGate watcher to prevent orphan auto-approval.", flush=True)
+                break
+
             target_panes = []
             all_p = get_all_panes()
 
@@ -419,17 +436,18 @@ def main():
                     if is_whitelisted:
                         is_safe = True
                         reason = wl_reason
+                        decision = "ALLOWLIST_BYPASS"
                     else:
                         is_safe, reason = audit_shell_command(
                             req_cmd,
                             use_llm_judge=args.use_gpt_oss,
                             reasoning_effort=args.reasoning
                         )
+                        decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
 
-                    print(f"⚖️  Safety Evaluation: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason})", flush=True)
+                    print(f"⚖️  Safety Evaluation: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}]", flush=True)
 
                     # 2. Record to SQLite3 DB
-                    decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
                     record_audit_log(
                         pane_id=pane_id,
                         raw_command=req_cmd,
@@ -441,6 +459,13 @@ def main():
                     # 3. Action
                     if is_safe:
                         if not args.dry_run:
+                            # P0 TOCTOU Guard: Re-read pane immediately before sending enter to ensure prompt has not changed
+                            current_text = get_pane_text(pane_id, lines=80)
+                            current_req = parse_permission_request(current_text)
+                            if current_req != req_cmd:
+                                print(f"⚠️  [TOCTOU_ABORT] Pane {pane_id} prompt modified during safety evaluation. Aborting key injection.", flush=True)
+                                continue
+
                             print(f"🚀 Auto-approving pre-execution script for {pane_id} (sending Enter via SmartGate)...", flush=True)
                             run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
                         else:

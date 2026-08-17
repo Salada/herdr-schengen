@@ -56,9 +56,13 @@ flowchart TD
 
 ---
 
-### Decision 1: AGY-Native Task Execution as the First-Class Mode
-- `schengen_watcher.py --target auto` executes as a foreground streaming process within the AGY Background Task Runner.
-- Eliminates daemon isolation blind spots while maintaining non-blocking asynchronous execution.
+### Decision 1: AGY-Native Task Execution as the Mandatory Runtime Model
+- `schengen_watcher.py --target auto` executes strictly as a foreground streaming process within an active Antigravity (AGY) agent session (`ANTIGRAVITY_AGENT=1` or `AI_AGENT=antigravity`).
+- **Code Enforcement**: `verify_agy_runtime_environment()` rejects execution in standalone shell or detached daemon modes at the entrypoint (`[SCHENGEN_FATAL]`).
+- **Architectural Boundary**:
+  - **Security Core (Process-Agnostic)**: Deterministic 1ms AST, dangerous command denylist, Bitwarden/secret isolation, sandbox protection, and private LLM semantic evaluator operate deterministically.
+  - **Escalation & Clearance UX (AGY-Session-Exclusive)**: Conversational escalation, reactive message wakeup on intercept (`[BORDER_CONTROL_INTERCEPT]`), and automated key injection are strictly bound to the active AGY master session.
+- **Orphan Process Protection**: Watcher monitors parent process liveness (`is_parent_alive()`). If the parent AGY session exits or disconnects, the watcher terminates immediately to prevent unsupervised headless key injection.
 
 ### Decision 2: Strict Single-Session FileLock Authority (`fcntl.flock`)
 - Only **one AGY session** across the entire Herdr server may hold the clearance lock (`~/.local/state/herdr-schengen/schengen.lock`).
@@ -66,8 +70,10 @@ flowchart TD
 - If a secondary session attempts invocation, it cleanly exits with:
   `🔒 [Singleton Guard] SmartGate / Herdr Schengen is already active in another session (PID: <pid>).`
 
-### Decision 3: Standardized Intercept Event Format for Reactive Wakeup
-- When a command is blocked for human/agent review, the watcher emits a structured event line to stdout:
+### Decision 3: Standardized Intercept Event Format & TOCTOU Verification
+- **TOCTOU Guard**: Before injecting Enter keys (`herdr agent send-keys <pane_id> enter`), the watcher re-reads the pane's visible text buffer to verify that the pending prompt has not changed during evaluation. If a race condition is detected, key injection is aborted (`[TOCTOU_ABORT]`).
+- **Allowlist Governance**: Overbroad regex catch-alls (`.*`, `.+`) are rejected at configuration time, and allowlist matches are recorded under distinct audit action `ALLOWLIST_BYPASS`.
+- **Reactive Wakeup**: When a command is blocked for human/agent review, the watcher emits a structured event line to stdout:
   ```text
   🚨 [BORDER_CONTROL_INTERCEPT] Pane: <pane_id> | Agent: <agent> | Category: <DENYLIST|SECRET|SANDBOX|DYNAMIC> | Reason: <safety_reason>
      Raw Command: <command>
@@ -92,5 +98,6 @@ To guarantee system stability and prevent unintended regressions:
   - Unifies automated fast-path execution (0.1s) with intelligent human-in-the-loop escalation.
   - Zero token waste for safe operations; rich context explanations for dangerous operations.
   - Full single-authority guarantee across all Herdr workspaces.
+  - Enforces runtime environment strictly in code rather than relying only on documentation conventions.
 - **Trade-Offs**:
   - The watcher task lifecycle is tied to the AGY session; closing the master AGY session cleanly releases the lock for future sessions.

@@ -169,8 +169,13 @@ def check_persisted_allowlist(cmd_str: str) -> Tuple[bool, Optional[str]]:
 
 
 def add_to_allowlist(pattern_regex: str, description: str = ""):
-    """Add a verified pattern to the persistent allowlist."""
+    """Add a verified pattern to the persistent allowlist with safety validation."""
     init_db()
+    pat_stripped = pattern_regex.strip()
+    dangerous_catch_alls = {".*", ".+", "^.*$", "^.+$", ".*?", ".+?", "^.*", ".*$"}
+    if pat_stripped in dangerous_catch_alls or len(pat_stripped) < 3:
+        raise ValueError(f"Overbroad or dangerous allowlist pattern rejected: '{pattern_regex}'")
+
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_db_connection() as conn:
         cursor = conn.cursor()
