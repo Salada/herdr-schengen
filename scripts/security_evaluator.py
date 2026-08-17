@@ -5,7 +5,7 @@ Combines:
 2. Python AST static analysis (with Forgejo API whitelist rules)
 3. Sensitive file and secret pattern matching
 4. Hermes sandbox write-protection policy
-5. GPT-OSS 120B Private LLM Security Judge with configurable Reasoning Effort
+5. GPT-OSS 120B Private LLM Security Judge with Low Reasoning Effort by default
 6. Output sanitization & exfiltration inspection
 """
 
@@ -73,10 +73,10 @@ SHELL_WRITE_COMMANDS = {
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
 
-# 8. GPT-OSS 120B Private Model Configuration
+# 8. GPT-OSS 120B Private Model Configuration (Default Reasoning: LOW for Guard Watcher)
 DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
 DEFAULT_GPT_OSS_ENDPOINT = os.environ.get("GUARD_LLM_ENDPOINT", "http://192.168.10.102:8000/v1/chat/completions")
-DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "medium")
+DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
 
 
 class PythonASTAuditor(ast.NodeVisitor):
@@ -192,7 +192,7 @@ def audit_with_gpt_oss_120b(
     model: str = DEFAULT_GPT_OSS_MODEL,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
 ) -> Tuple[bool, str]:
-    """Perform semantic security audit using private GPT-OSS 120B Subagent with configurable reasoning effort."""
+    """Perform semantic security audit using private GPT-OSS 120B Subagent (Default: reasoning=low for fast response)."""
     system_prompt = (
         "You are an uncompromising security auditor subagent for coding agents. "
         "Analyze the following command or Python script for: "
@@ -203,7 +203,7 @@ def audit_with_gpt_oss_120b(
     )
 
     max_tokens_map = {"off": 150, "low": 250, "medium": 600, "high": 1500}
-    max_tok = max_tokens_map.get(reasoning_effort.lower(), 600)
+    max_tok = max_tokens_map.get(reasoning_effort.lower(), 250)
 
     req_body: Dict[str, Any] = {
         "model": model,
@@ -236,7 +236,6 @@ def audit_with_gpt_oss_120b(
             reason = f"[GPT-OSS 120B (reasoning={reasoning_effort})] {res.get('reason', 'Analyzed by 120B Judge')}"
             return is_safe, reason
     except Exception as e:
-        # Fallback to local AST/Regex if private endpoint unreachable
         return True, f"[GPT-OSS 120B Fallback] {e}"
 
 
@@ -262,6 +261,9 @@ def is_forgejo_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
 
 def audit_shell_command(cmd_str: str, use_llm_judge: bool = False, reasoning_effort: str = DEFAULT_REASONING_EFFORT) -> Tuple[bool, str]:
     """Audit shell command line with PATH, Forgejo rules, and optional GPT-OSS 120B judge with reasoning effort."""
+    if not cmd_str or not cmd_str.strip():
+        return True, "Safe"
+
     # 0. Check Forgejo command rules if targeting Forgejo host
     if FORGEJO_HOST_PATTERN.search(cmd_str):
         fg_safe, fg_reason = is_forgejo_safe_command(cmd_str)

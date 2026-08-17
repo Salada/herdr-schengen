@@ -5,47 +5,42 @@ description: Herdr 패널에서 실행 중인 에이전트(AGY, Hermes, Codex �
 
 # Herdr Agent Guard 🛡️
 
-`herdr-agent-guard`는 **Herdr 터미널 멀티플렉서** 환경에서 백그라운드로 실행 중인 코딩 에이전트(AGY, Hermes, Codex 등)의 권한 요청(Approval Prompt)을 주기적으로 감시하고, **Python AST 정적 분석, 시크릿 노출 방지, Hermes Sandbox 쓰기 차단, 사설 SCM(Forgejo) 화이트리스트 룰, 그리고 GPT-OSS 120B 기반 프라이빗 시맨틱 감사**를 지원하는 실시간 보안 가드레일 스킬입니다.
+`herdr-agent-guard`는 **Herdr 터미널 멀티플렉서** 환경에서 백그라운드로 실행 중인 코딩 에이전트(AGY, Hermes, Codex 등)의 권한 요청(Approval Prompt)을 주기적으로 감시하고, **Python AST 정적 분석, 시크릿 노출 방지, Hermes Sandbox 쓰기 차단, 사설 SCM(Forgejo) 화이트리스트 룰, 스크립트 실행 전 대기(Pre-approval) 정밀 감지, 그리고 GPT-OSS 120B 기반 프라이빗 시맨틱 감사**를 지원하는 실시간 보안 가드레일 스킬입니다.
 
 ---
 
-## 🧭 핵심 철학: 인간 중심 통제 & 싱글톤 무결성 (Human-in-the-Loop & Singleton Lock)
+## 🧭 핵심 철학: 독립된 Reasoning 분리 & 사전 승인 감지
 
-1. **인간 중심 통제 (No Silent LaunchAgents)**:
-   - OS 레벨에서 백그라운드에 숨어 무조건 실행되는 백그라운드 데몬(LaunchAgent)을 배제합니다.
-   - 사용자가 Herdr 워크스페이스에서 **직접 눈으로 보며 필요할 때 명시적으로 실행**하고, 언제든 중단(`--stop`)하거나 직접 결재할 수 있는 가시성을 보장합니다.
-2. **엄격한 싱글톤 락 (Strict Singleton FileLock)**:
-   - `~/.local/state/herdr-agent-guard/guard.lock`에 `fcntl.flock`을 체결하여, 중복 인스턴스가 실행될 경우 Race Condition이나 키 중복 주입을 방지하고 즉시 안전하게 종료됩니다.
-3. **가변 Reasoning Effort 제어 (Default: `medium`, Option: `low` / `off`)**:
-   - 기본값은 안정적인 **`medium`**으로 동작하며, 빠른 초저지연을 원할 경우 **`--reasoning low`** 또는 **`--reasoning off`**로 즉시 전환할 수 있습니다.
-4. **Google One 쿼터 보존 (Zero Quota Consumption)**:
-   - 보안 심사는 프라이빗 인프라(GPT-OSS 120B)로 분리 라우팅되어 메인 Gemini 3.7의 개발 쿼터를 단 1토큰도 소모하지 않습니다.
+1. **에이전트 세션과 가드 세션의 Reasoning 분리**:
+   - **메인 AGY 코딩 세션**: 사용자가 설정한 기존 세션 모델 및 `medium` 이상의 깊은 추론력을 온전히 유지하여 고품질 코딩 작업을 수행합니다.
+   - **Guard Watcher (보안 심사관)**: 기본값(Default)을 초저지연 **`reasoning: low`**로 동작시켜 200~300ms 이내에 즉각 판정을 내립니다.
+2. **스크립트 실행 전 대기 (Pre-approval) 완벽 지원**:
+   - `python3 - <<'EOF'` 인라인 스크립트, 다단계 Bash 블록, `[y/N]`, `1. Yes` 번호 선택 메뉴 등 실행 전 승인을 기다리는 모든 대기 패턴을 정밀 추출하여 사전에 안전성을 검사하고 승인합니다.
+3. **인간 중심 통제 (No Silent LaunchAgents)**:
+   - OS 레벨의 숨은 데몬 대신 Herdr 워크스페이스에서 **직접 눈으로 보며 필요할 때 명시적으로 실행**하고 언제든 중단(`--stop`)할 수 있습니다.
+4. **엄격한 싱글톤 락 (Strict Singleton FileLock)**:
+   - `~/.local/state/herdr-agent-guard/guard.lock`을 통해 중복 실행을 100% 방지합니다.
 
 ---
 
 ## 🚀 빠른 실행 (Quick Start)
 
-### 1. 전역 모든 활성 에이전트 자동 감지 및 감시 (기본: Reasoning Medium)
+### 1. 전역 모든 활성 에이전트 자동 감지 및 감시 (기본: Guard Reasoning Low)
 ```bash
 python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto
 ```
 
-### 2. 초저지연 모드 (Reasoning Low + GPT-OSS 120B)
+### 2. GPT-OSS 120B 프라이빗 시맨틱 감사관 활성화 (Google One 쿼터 소모 0)
 ```bash
-python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto --use-gpt-oss --reasoning low
+python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target auto --use-gpt-oss
 ```
 
-### 3. 특정 패널 5초 주기 감시
-```bash
-python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --target wP:p2 --interval 5
-```
-
-### 4. 실행 중인 가드 프로세스 안전 중단 (Stop Singleton)
+### 3. 실행 중인 가드 프로세스 안전 중단 (Stop Singleton)
 ```bash
 python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --stop
 ```
 
-### 5. 축적된 승인 패턴 및 빈도 통계 조회 (Human Review Board)
+### 4. 축적된 승인 패턴 및 빈도 통계 조회 (Human Review Board)
 ```bash
 python3 ~/.gemini/skills/herdr-agent-guard/scripts/guard_watcher.py --stats
 ```

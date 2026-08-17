@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Herdr Agent Guard Watcher Daemon with Singleton FileLock & GPT-OSS 120B support.
+"""Herdr Agent Guard Watcher Daemon with Singleton FileLock, Script Pre-approval Detection & Low Reasoning Default.
 
 Monitors Herdr pane(s) at configurable intervals, performs AST static
 analysis and security evaluation on requested commands/scripts, logs every
@@ -9,8 +9,8 @@ and auto-approves safe commands while delegating risky commands to the user.
 Key Architecture:
 - Explicit Human-in-the-Loop invocation (No silent OS daemons).
 - Strict Singleton FileLock (fcntl.flock) to prevent race conditions & duplicate key injection.
-- Configurable Reasoning Effort (default: medium, selectable: low/high/off).
-- Zero Google One quota consumption by leveraging private GPT-OSS 120B Subagent.
+- Robust Script Pre-approval Detection across diverse AGY/Hermes/CLI approval prompts.
+- Default Low Reasoning Effort for Guard Watcher (Zero Google One quota consumption via private GPT-OSS 120B).
 """
 
 import argparse
@@ -125,7 +125,7 @@ def get_pane_info(pane_id):
     return None
 
 
-def get_pane_text(pane_id, lines=60):
+def get_pane_text(pane_id, lines=80):
     """Read visible terminal buffer from pane."""
     out = run_cmd(["herdr", "pane", "read", pane_id, "--source", "visible", "--lines", str(lines)])
     return out or ""
@@ -140,29 +140,66 @@ def find_blocked_panes():
         if status == "blocked":
             blocked.append(pane_id)
         else:
-            text = get_pane_text(pane_id, lines=40)
-            if "Requesting permission for:" in text or "Do you want to proceed?" in text:
+            text = get_pane_text(pane_id, lines=50)
+            if any(p in text for p in (
+                "Requesting permission for:",
+                "Do you want to proceed?",
+                "Do you want to run",
+                "Execute command?",
+                "> 1. Yes",
+                "Press enter to continue",
+                "[y/N]",
+                "[Y/n]"
+            )):
                 blocked.append(pane_id)
     return list(set(blocked))
 
 
 def parse_permission_request(visible_text):
-    """Extract command from Herdr/AGY approval dialog."""
-    match = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", visible_text)
-    if match:
-        return match.group(1).strip()
+    """Extract command/script from diverse approval dialogs across AGY/Hermes/CLI."""
+    # Pattern 1: Standard AGY Requesting permission dialog
+    m1 = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", visible_text)
+    if m1:
+        return m1.group(1).strip()
+
+    # Pattern 2: Multi-line Command box with Requesting permission
+    m2 = re.search(r"Command\s*\n[─-]+\s*\n\s*Requesting permission for:\s*\n([\s\S]*?)\n\s*(> 1\. Yes|Do you want to proceed)", visible_text)
+    if m2:
+        return m2.group(1).strip()
+
+    # Pattern 3: Do you want to run '...'?
+    m3 = re.search(r"Do you want to run\s*['\"`]([\s\S]*?)['\"`]\?", visible_text)
+    if m3:
+        return m3.group(1).strip()
+
+    # Pattern 4: Execute/Run command [y/N]
+    m4 = re.search(r"(?:Execute|Run command\?):\s*\n([\s\S]*?)\n\s*\[[Yy]/[Nn]\]", visible_text)
+    if m4:
+        return m4.group(1).strip()
+
+    # Pattern 5: Menu options (> 1. Yes) present with python3 heredoc or bash command above
+    if "> 1. Yes" in visible_text or "Do you want to proceed?" in visible_text:
+        # Extract python3 - <<'EOF' block if visible
+        py_match = re.search(r"(python[0-9.]*\s+-\s*<<\s*['\"]?([A-Za-z0-9_]+)['\"]?[\s\S]*?\n\s*\2)", visible_text)
+        if py_match:
+            return py_match.group(1).strip()
+        # Extract last Bash(...) block
+        bash_match = re.findall(r"●\s*Bash\(([\s\S]*?)\)", visible_text)
+        if bash_match:
+            return bash_match[-1].strip()
+
     return None
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with Singleton FileLock & Reasoning Control")
+    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with Singleton FileLock & Low Reasoning Default")
     parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto'")
     parser.add_argument("--interval", type=int, default=5, help="Polling interval in seconds (default: 5)")
     parser.add_argument("--auto-exit", action="store_true", default=True, help="Automatically exit when agent finishes session")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions without injecting keys")
     parser.add_argument("--stats", action="store_true", help="Display pattern analysis stats from DB and exit")
     parser.add_argument("--use-gpt-oss", action="store_true", default=False, help="Enable private GPT-OSS 120B semantic judge")
-    parser.add_argument("--reasoning", choices=["off", "low", "medium", "high"], default=DEFAULT_REASONING_EFFORT, help="Reasoning effort level for LLM judge (default: medium)")
+    parser.add_argument("--reasoning", choices=["off", "low", "medium", "high"], default=DEFAULT_REASONING_EFFORT, help="Reasoning effort for guard watcher (default: low for ultra-fast response)")
     parser.add_argument("--stop", action="store_true", help="Stop currently running guard process and exit")
     args = parser.parse_args()
 
@@ -219,11 +256,11 @@ def main():
                     continue
 
                 agent_kind = pane_info.get("agent", "unknown")
-                visible_text = get_pane_text(pane_id, lines=60)
+                visible_text = get_pane_text(pane_id, lines=80)
                 req_cmd = parse_permission_request(visible_text)
 
                 if req_cmd and last_approved_cmd.get(pane_id) != req_cmd:
-                    print(f"\n🔍 [Target: {pane_id} ({agent_kind})] Detected Permission Request:\n----------------------------------------\n{req_cmd}\n----------------------------------------", flush=True)
+                    print(f"\n🔍 [Target: {pane_id} ({agent_kind})] Detected Script/Command Pre-Approval Request:\n----------------------------------------\n{req_cmd}\n----------------------------------------", flush=True)
 
                     # 1. Check user persisted allowlist
                     is_whitelisted, wl_reason = check_persisted_allowlist(req_cmd)
@@ -252,13 +289,13 @@ def main():
                     # 3. Action
                     if is_safe:
                         if not args.dry_run:
-                            print(f"🚀 Auto-approving for {pane_id} (sending Enter)...", flush=True)
+                            print(f"🚀 Auto-approving pre-execution script for {pane_id} (sending Enter)...", flush=True)
                             run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
                         else:
                             print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
                         last_approved_cmd[pane_id] = req_cmd
                     else:
-                        print(f"🛑 Execution HALTED for safety. Awaiting human review on pane {pane_id}.", flush=True)
+                        print(f"🛑 Pre-execution HALTED for safety. Awaiting human review on pane {pane_id}.", flush=True)
                         run_cmd(["herdr", "notification", "send", "--title", "Agent Guard Alert", "--body", f"Manual approval required on {pane_id}: {reason}"])
                         last_approved_cmd[pane_id] = req_cmd
 
