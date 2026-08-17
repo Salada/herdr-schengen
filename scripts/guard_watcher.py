@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Herdr Agent Guard Watcher Daemon with Singleton FileLock, Script Pre-approval Detection & Low Reasoning Default.
+"""Herdr Agent Guard Watcher Daemon with AGY-Only Targeting & Strict Singleton FileLock.
 
 Monitors Herdr pane(s) at configurable intervals, performs AST static
 analysis and security evaluation on requested commands/scripts, logs every
@@ -7,9 +7,10 @@ event into SQLite3 database (~/.local/state/herdr-agent-guard/guard_history.db),
 and auto-approves safe commands while delegating risky commands to the user.
 
 Key Architecture:
+- STRICT AGY-ONLY SCOPE: Excludes Hermes and other agents by default (--agent-filter agy).
 - Explicit Human-in-the-Loop invocation (No silent OS daemons).
 - Strict Singleton FileLock (fcntl.flock) to prevent race conditions & duplicate key injection.
-- Robust Script Pre-approval Detection across diverse AGY/Hermes/CLI approval prompts.
+- Robust Script Pre-approval Detection across diverse AGY approval prompts.
 - Default Low Reasoning Effort for Guard Watcher (Zero Google One quota consumption via private GPT-OSS 120B).
 """
 
@@ -131,10 +132,15 @@ def get_pane_text(pane_id, lines=80):
     return out or ""
 
 
-def find_blocked_panes():
-    """Find all panes currently waiting on approval/blocked status."""
+def find_blocked_panes(agent_filter="agy"):
+    """Find panes currently waiting on approval, strictly filtered by agent type (default: agy only)."""
     blocked = []
     for pane in get_all_panes():
+        agent_kind = pane.get("agent", "")
+        if agent_filter != "all" and agent_kind != agent_filter:
+            # Strictly skip non-matching agents (e.g. hermes, codex)
+            continue
+
         status = pane.get("agent_status", "")
         pane_id = pane.get("pane_id", "")
         if status == "blocked":
@@ -156,7 +162,7 @@ def find_blocked_panes():
 
 
 def parse_permission_request(visible_text):
-    """Extract command/script from diverse approval dialogs across AGY/Hermes/CLI."""
+    """Extract command/script from diverse approval dialogs across AGY prompts."""
     # Pattern 1: Standard AGY Requesting permission dialog
     m1 = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", visible_text)
     if m1:
@@ -179,11 +185,9 @@ def parse_permission_request(visible_text):
 
     # Pattern 5: Menu options (> 1. Yes) present with python3 heredoc or bash command above
     if "> 1. Yes" in visible_text or "Do you want to proceed?" in visible_text:
-        # Extract python3 - <<'EOF' block if visible
         py_match = re.search(r"(python[0-9.]*\s+-\s*<<\s*['\"]?([A-Za-z0-9_]+)['\"]?[\s\S]*?\n\s*\2)", visible_text)
         if py_match:
             return py_match.group(1).strip()
-        # Extract last Bash(...) block
         bash_match = re.findall(r"●\s*Bash\(([\s\S]*?)\)", visible_text)
         if bash_match:
             return bash_match[-1].strip()
@@ -192,14 +196,15 @@ def parse_permission_request(visible_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with Singleton FileLock & Low Reasoning Default")
+    parser = argparse.ArgumentParser(description="Herdr Agent Guard Watcher with AGY-Only Isolation")
     parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto'")
+    parser.add_argument("--agent-filter", choices=["agy", "all"], default="agy", help="Target agent filter (default: agy only, Hermes is strictly excluded)")
     parser.add_argument("--interval", type=int, default=5, help="Polling interval in seconds (default: 5)")
     parser.add_argument("--auto-exit", action="store_true", default=True, help="Automatically exit when agent finishes session")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions without injecting keys")
     parser.add_argument("--stats", action="store_true", help="Display pattern analysis stats from DB and exit")
     parser.add_argument("--use-gpt-oss", action="store_true", default=False, help="Enable private GPT-OSS 120B semantic judge")
-    parser.add_argument("--reasoning", choices=["off", "low", "medium", "high"], default=DEFAULT_REASONING_EFFORT, help="Reasoning effort for guard watcher (default: low for ultra-fast response)")
+    parser.add_argument("--reasoning", choices=["off", "low", "medium", "high"], default=DEFAULT_REASONING_EFFORT, help="Reasoning effort for guard watcher (default: low)")
     parser.add_argument("--stop", action="store_true", help="Stop currently running guard process and exit")
     args = parser.parse_args()
 
@@ -225,7 +230,7 @@ def main():
     # Acquire strict singleton lock
     lock_fd = acquire_singleton_lock()
 
-    print(f"🛡️  Herdr Agent Guard started (PID: {os.getpid()}, target={args.target}, interval={args.interval}s, reasoning={args.reasoning}, db={DB_PATH})", flush=True)
+    print(f"🛡️  Herdr Agent Guard started (PID: {os.getpid()}, target={args.target}, agent_filter={args.agent_filter}, interval={args.interval}s, reasoning={args.reasoning})", flush=True)
 
     last_approved_cmd = {}
     idle_count = 0
@@ -234,18 +239,30 @@ def main():
         while True:
             target_panes = []
             if args.target == "auto":
-                target_panes = find_blocked_panes()
+                target_panes = find_blocked_panes(agent_filter=args.agent_filter)
                 if not target_panes:
                     all_p = get_all_panes()
-                    active = [p["pane_id"] for p in all_p if p.get("agent") in ("agy", "hermes", "codex")]
+                    if args.agent_filter == "agy":
+                        active = [p["pane_id"] for p in all_p if p.get("agent") == "agy"]
+                    else:
+                        active = [p["pane_id"] for p in all_p if p.get("agent") in ("agy", "hermes", "codex")]
                     target_panes = active
             else:
-                target_panes = [args.target]
+                pane_info = get_pane_info(args.target)
+                if pane_info:
+                    agent_kind = pane_info.get("agent", "")
+                    if args.agent_filter != "all" and agent_kind != args.agent_filter:
+                        print(f"⚠️  Target pane {args.target} is running '{agent_kind}', which does not match agent filter '{args.agent_filter}'. Skipping.", flush=True)
+                        target_panes = []
+                    else:
+                        target_panes = [args.target]
+                else:
+                    target_panes = [args.target]
 
             if not target_panes:
                 idle_count += 1
                 if args.auto_exit and idle_count > 6:
-                    print("🏁 No active agent target found. Guard watcher exiting gracefully.", flush=True)
+                    print("🏁 No active target AGY agent found. Guard watcher exiting gracefully.", flush=True)
                     break
                 time.sleep(args.interval)
                 continue
@@ -256,6 +273,9 @@ def main():
                     continue
 
                 agent_kind = pane_info.get("agent", "unknown")
+                if args.agent_filter != "all" and agent_kind != args.agent_filter:
+                    continue
+
                 visible_text = get_pane_text(pane_id, lines=80)
                 req_cmd = parse_permission_request(visible_text)
 
