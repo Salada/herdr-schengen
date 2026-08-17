@@ -286,16 +286,16 @@ def audit_dynamic_substitution_with_llm(
 
     visited_paths = set()
 
-    for hop in range(max_hops + 1):
         req_body: Dict[str, Any] = {
             "model": model,
             "temperature": 0.0,
-            "max_tokens": 500,
+            "max_tokens": 300,
             "messages": messages,
             "tools": INSPECTOR_TOOLS,
             "tool_choice": "auto"
         }
-        if reasoning_effort.lower() != "off":
+        # Only inject reasoning_effort if explicitly configured and targeting a reasoning model
+        if reasoning_effort and reasoning_effort.lower() not in ("off", "none", "") and ("reason" in model.lower() or "gpt-oss" in model.lower()):
             req_body["reasoning_effort"] = reasoning_effort.lower()
 
         payload = json.dumps(req_body).encode("utf-8")
