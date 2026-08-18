@@ -61,8 +61,8 @@ def test_pattern_detection():
 
 def test_static_command_evaluation():
     print("\nTesting Static Command Evaluation...")
-    safe, reason = audit_shell_command("cp file1.txt file2.txt")
-    assert safe, f"Expected static cp to be safe, got: {reason}"
+    safe, reason = audit_shell_command("cp /tmp/file1.txt /tmp/file2.txt")
+    assert safe, f"Expected static cp in /tmp to be safe, got: {reason}"
 
     safe, reason = audit_shell_command("ln -sfn ~/.agents/skills/foo ~/.config/foo")
     assert safe, f"Expected static ln to be safe, got: {reason}"

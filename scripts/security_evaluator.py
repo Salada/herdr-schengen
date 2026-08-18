@@ -20,6 +20,14 @@ import urllib.error
 from pathlib import Path
 from typing import Tuple, List, Dict, Any, Optional
 
+from gray_zone_evaluator import (
+    evaluate_gray_zone_operation,
+    Verdict,
+    format_decision_guidance,
+    ResourceTier,
+    OperationType,
+)
+
 # 1. Sensitive file patterns (Secrets & Credentials)
 SEP = r"(^|[\s/\"'@:=])"
 END_SEP = r"([\s/\"'@:=]|$)"
@@ -455,6 +463,13 @@ def audit_shell_command(cmd_str: str, use_llm_judge: bool = False, reasoning_eff
     if DYNAMIC_SUBSTITUTION_PATTERN.search(cmd_str):
         # Trigger L2 Multi-turn Tool-Calling Semantic Inspector with 5 Guardrails
         return audit_dynamic_substitution_with_llm(cmd_str, reasoning_effort=reasoning_effort)
+
+    # 6. Check Non-VCS Irreversible Mutation & Gray Zone Matrix (ADR-004 / SOP-12)
+    gz_verdict, gz_reason, gz_payload = evaluate_gray_zone_operation(cmd_str)
+    if gz_verdict == Verdict.BLOCK:
+        return False, f"Non-VCS Gray-Zone Guard [BLOCK]: {gz_reason}"
+    if gz_verdict == Verdict.PROMPT and gz_payload:
+        return False, format_decision_guidance(gz_payload)
 
     return True, "Safe"
 
