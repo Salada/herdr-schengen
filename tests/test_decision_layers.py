@@ -77,23 +77,39 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.GRAY_ZONE_MATRIX)
 
     def test_managed_git_guard_layer(self):
-        # 1. Forgejo GET is allowed
+        # 1. Forgejo GET is allowed, DELETE is blocked
         safe, reason, layer = audit_shell_command("curl http://192.168.10.102:3000/api/v1/repos/Org/repo/issues")
         self.assertTrue(safe)
         self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
 
-        # 2. Forgejo DELETE is blocked
         safe, reason, layer = audit_shell_command("curl -X DELETE http://192.168.10.102:3000/api/v1/repos/Org/repo")
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
 
-        # 3. GitHub API GET is allowed
+        # 2. GitHub API GET is allowed, DELETE is blocked
         safe, reason, layer = audit_shell_command("curl https://api.github.com/repos/owner/repo/issues")
         self.assertTrue(safe)
         self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
 
-        # 4. GitHub API DELETE is blocked
         safe, reason, layer = audit_shell_command("curl -X DELETE https://api.github.com/repos/owner/repo")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
+
+        # 3. GitLab API GET is allowed, DELETE is blocked
+        safe, reason, layer = audit_shell_command("curl https://gitlab.com/api/v4/projects/123/issues")
+        self.assertTrue(safe)
+        self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
+
+        safe, reason, layer = audit_shell_command("curl -X DELETE https://gitlab.com/api/v4/projects/123/issues/45")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
+
+        # 4. Gitea API GET is allowed, DELETE is blocked
+        safe, reason, layer = audit_shell_command("curl https://gitea.example.com/api/v1/repos/org/repo/issues")
+        self.assertTrue(safe)
+        self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
+
+        safe, reason, layer = audit_shell_command("curl -X DELETE https://gitea.example.com/api/v1/repos/org/repo/issues/45")
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
 

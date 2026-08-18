@@ -125,11 +125,11 @@ def main():
         return
 
     if args.list_decisions:
-        decisions = ["AUTO_APPROVED", "MANUAL_DELEGATED", "ALLOWLIST_BYPASS", "TOCTOU_ABORT"]
+        decisions = ["AUTO_APPROVED", "MANUAL_DELEGATED", "ALLOWLIST_BYPASS"]
         if args.json:
             print(json.dumps(decisions, indent=2))
         else:
-            print("📋 Herdr Schengen Standard Decision Types:")
+            print("📋 Herdr Schengen Persisted Audit Decision Types:")
             for d in decisions:
                 print(f"  • {d}")
         return

@@ -5,18 +5,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-try:
-    import pytest
-except ImportError:
-    pytest = None
+import unittest
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from security_evaluator import audit_dynamic_substitution_with_llm
-
-
-import unittest
 
 class TestLLMEvaluatorIntegration(unittest.TestCase):
     """Integration test suite for LLM Dynamic Substitution Tool-Calling Inspector."""

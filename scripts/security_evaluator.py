@@ -11,6 +11,7 @@ Combines:
 """
 
 import ast
+from enum import Enum
 import json
 import os
 import re
@@ -52,11 +53,12 @@ SENSITIVE_FILE_PATTERN = re.compile(
 HERMES_SANDBOX_PATTERN = re.compile(r"(\.hermes/sandboxes|hermes_sandbox)", re.IGNORECASE)
 
 # 3. Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) allowed endpoint patterns
-MANAGED_GIT_HOST_PATTERN = re.compile(r"https?://(192\.168\.10\.102:3000|api\.github\.com|gitlab\.com/api)")
+MANAGED_GIT_HOST_PATTERN = re.compile(r"https?://(192\.168\.10\.102:3000|api\.github\.com|gitlab\.com/api|[^/]*gitea[^/]*/api)")
 MANAGED_GIT_ISSUES_PATTERN = re.compile(
     r"https?://(192\.168\.10\.102:3000/api/v1/repos/[^/]+/[^/]+/issues|"
     r"api\.github\.com/repos/[^/]+/[^/]+/(issues|pulls)|"
-    r"gitlab\.com/api/v4/projects/[^/]+/issues)"
+    r"gitlab\.com/api/v4/projects/[^/]+/issues|"
+    r"[^/]*gitea[^/]*/api/v1/repos/[^/]+/[^/]+/issues)"
 )
 # Backward-compatibility alias
 FORGEJO_HOST_PATTERN = MANAGED_GIT_HOST_PATTERN
@@ -411,8 +413,6 @@ def is_managed_git_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
 # Backward compatibility alias
 is_forgejo_safe_command = is_managed_git_safe_command
 
-
-from enum import Enum
 
 class DecisionLayer(str, Enum):
     """Standard 9 inspection layers for Herdr Schengen (SmartGate)."""
