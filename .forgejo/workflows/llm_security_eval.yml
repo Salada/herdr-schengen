@@ -36,6 +36,7 @@ jobs:
           source .venv/bin/activate
           pytest -v tests/test_dynamic_substitution.py
           pytest -v tests/test_gray_zone_matrix.py
+          pytest -v tests/test_decision_layers.py
 
       - name: Run Live LLM Integration Tests (DeepSeek)
         run: |

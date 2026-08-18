@@ -32,17 +32,11 @@ def llm_config():
     model = os.environ.get("GUARD_LLM_MODEL")
     api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GUARD_LLM_API_KEY") or ""
 
-    if not endpoint:
-        raise ValueError(
-            "Missing mandatory environment variable 'GUARD_LLM_ENDPOINT'. "
-            "Integration test requires an explicit OpenAI-compatible endpoint URL."
-        )
-
-    if not model:
-        raise ValueError(
-            "Missing mandatory environment variable 'GUARD_LLM_MODEL'. "
-            "Integration test requires an explicit model identifier (e.g. 'deepseek-chat' or 'gpt-oss:120b')."
-        )
+    if not endpoint or not model or not api_key:
+        if pytest is not None:
+            pytest.skip("Skipping live LLM test: endpoint, model, or API key is not configured in environment.")
+        else:
+            return None
 
     return {
         "endpoint": endpoint,
