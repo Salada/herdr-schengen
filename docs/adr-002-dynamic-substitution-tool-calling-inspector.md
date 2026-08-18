@@ -58,10 +58,26 @@ To prevent recursive loops, blocking I/O hangs, and memory exhaustion during sub
 
 ---
 
-## 📊 4. Consequences & Trade-Offs
+## 💡 4. Context Isolation & Token Economy Rationale (Why Minimal Subagents?)
+
+Spawning dedicated, minimal **subagents** (`gpt-oss 120b` / `flash_lite` / `flash`) within the AGY session is the most cost-effective and latency-efficient approach for dynamic parameter evaluation:
+
+1. **Context Isolation (Zero Bloat)**:
+   - The main AGY coding session maintains rich project context, full developer toolchains, and numerous active domain skills (e.g. `k-skill`, `salada-forgejo`, `mem0`).
+   - The security evaluation subagent is instantiated with a **purely isolated, minimal security prompt** and read-only inspection tools, completely stripped of bulky skill definitions and session history.
+2. **Token Economy & Weekly Limit Protection**:
+   - Because specialized models operate under Antigravity weekly quotas, injecting heavy context into every inspection turn would rapidly exhaust quota.
+   - Minimal prompts mean each security verification consumes negligible input tokens (< 500 tokens vs 50k+ tokens).
+3. **Main Conversation Cleanliness**:
+   - Intermediate inspection artifacts, file dumps, and multi-hop AST traces remain encapsulated within the ephemeral subagent lifecycle, preventing pollution of the main agent's trajectory.
+
+---
+
+## 📊 5. Consequences & Trade-Offs
 
 - **Positives**:
   - **Zero External HTTP Fragility**: Eliminates external HTTP endpoint timeouts or network connection failures.
+  - **Minimal Token Consumption**: Isolated subagents avoid loading the main session's heavy skills or chat history.
   - **Native AGY Ecosystem Cohesion**: Leverages Antigravity's built-in `gpt-oss 120b` subagent model under dedicated weekly limits.
   - **Zero Friction**: Legitimate dynamic operations pass seamlessly after in-session subagent verification.
   - **Deterministic Safety**: 1ms AST fast-track for daily commands + rigorous in-session inspection for dynamic substitutions.
