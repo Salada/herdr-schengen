@@ -34,11 +34,13 @@ jobs:
       - name: Run Unit Guardrail Tests
         run: |
           source .venv/bin/activate
-          pytest -v tests/test_dynamic_substitution.py
-          pytest -v tests/test_gray_zone_matrix.py
-          pytest -v tests/test_decision_layers.py
+          python3 -m unittest discover -s tests -v
 
       - name: Run Live LLM Integration Tests (DeepSeek)
         run: |
           source .venv/bin/activate
-          pytest -v -s tests/test_llm_evaluator_integration.py
+          if [ -n "${DEEPSEEK_API_KEY}" ]; then
+            pytest -v -s tests/test_llm_evaluator_integration.py
+          else
+            echo "ℹ️  DEEPSEEK_API_KEY secret not set; skipping live integration tests in CI."
+          fi
