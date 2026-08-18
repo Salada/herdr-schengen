@@ -102,9 +102,9 @@ DYNAMIC_SUBSTITUTION_PATTERN = re.compile(
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
 
-# 9. LLM / GPT-OSS 120B / DeepSeek Model Configuration
+# 9. LLM / GPT-OSS 120B Model Configuration (Antigravity Native Subagent)
 DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
-DEFAULT_GPT_OSS_ENDPOINT = os.environ.get("GUARD_LLM_ENDPOINT", "http://192.168.10.102:8000/v1/chat/completions")
+DEFAULT_GPT_OSS_ENDPOINT = os.environ.get("GUARD_LLM_ENDPOINT", "")
 DEFAULT_GPT_OSS_API_KEY = os.environ.get("GUARD_LLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
 
@@ -273,19 +273,23 @@ def audit_python_code(code_str: str) -> Tuple[bool, str]:
 
 def audit_dynamic_substitution_with_llm(
     cmd_str: str,
-    endpoint: str = DEFAULT_GPT_OSS_ENDPOINT,
+    endpoint: Optional[str] = None,
     model: str = DEFAULT_GPT_OSS_MODEL,
     api_key: Optional[str] = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     max_hops: int = 2,
     raise_on_error: bool = False
 ) -> Tuple[bool, str]:
-    """Multi-turn Tool-Calling security inspector using private GPT-OSS 120B or DeepSeek.
+    """Helper for semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails.
     
-    Guards against indirect command substitution attacks by reading referenced files
-    and verifying whether runtime expanded arguments contain sensitive/system paths.
-    Enforces Max Hops = 2 to prevent infinite tool loops.
+    In the AGY architecture, dynamic substitutions stream directly to the active AGY session,
+    where Antigravity native subagents (e.g. gpt-oss:120b under weekly limits) inspect parameters.
+    If an external endpoint is explicitly configured, performs HTTP validation; otherwise returns
+    the in-session escalation verdict.
     """
+    target_endpoint = endpoint if endpoint is not None else DEFAULT_GPT_OSS_ENDPOINT
+    if not target_endpoint:
+        return False, "Dynamic command substitution $(cat ...) detected; escalated to AGY Session (gpt-oss:120b native subagent) for parameter inspection"
     system_prompt = (
         "You are an uncompromising security inspector subagent for Herdr SmartGate. "
         "A command contains dynamic command substitution (e.g. $(cat ...)). "
@@ -325,7 +329,7 @@ def audit_dynamic_substitution_with_llm(
             headers["Authorization"] = f"Bearer {effective_key}"
 
         req = urllib.request.Request(
-            endpoint,
+            target_endpoint,
             data=payload,
             headers=headers
         )
