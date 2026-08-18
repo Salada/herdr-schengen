@@ -277,7 +277,8 @@ def audit_dynamic_substitution_with_llm(
     model: str = DEFAULT_GPT_OSS_MODEL,
     api_key: Optional[str] = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-    max_hops: int = 2
+    max_hops: int = 2,
+    raise_on_error: bool = False
 ) -> Tuple[bool, str]:
     """Multi-turn Tool-Calling security inspector using private GPT-OSS 120B or DeepSeek.
     
@@ -381,12 +382,18 @@ def audit_dynamic_substitution_with_llm(
                 except Exception:
                     if "true" in content_str.lower() and "safe" in content_str.lower() and "not" not in content_str.lower():
                         return True, f"[GPT-OSS 120B Inspector] Safe: {content_str[:80]}"
+                    if raise_on_error:
+                        raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
                     return False, f"[GPT-OSS 120B Inspector] Uncertain verdict: {content_str[:80]}; delegating to human"
 
         except Exception as e:
+            if raise_on_error:
+                raise
             # Fail-Safe to Human Review when private LLM inspector is unreachable
             return False, f"Dynamic substitution detected & LLM Inspector offline ({e}); requires human review"
 
+    if raise_on_error:
+        raise RuntimeError("Dynamic substitution inspection could not be completed within max hops")
     return False, "Dynamic substitution inspection could not be completed; requires human review"
 
 

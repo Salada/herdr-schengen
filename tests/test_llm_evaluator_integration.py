@@ -12,6 +12,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from security_evaluator import audit_dynamic_substitution_with_llm
 
+SKIP_CI_REASON = "DeepSeek API가 쉽게 에러가 나고 대안을 찾으려고 하고 있습니다 (DeepSeek API frequently encounters connectivity/rate-limit errors in CI; alternative evaluation backends are being integrated)."
+
+
+@unittest.skipIf(
+    os.environ.get("CI", "").lower() in ("true", "1") or not os.environ.get("RUN_LIVE_LLM_TESTS"),
+    SKIP_CI_REASON,
+)
 class TestLLMEvaluatorIntegration(unittest.TestCase):
     """Integration test suite for LLM Dynamic Substitution Tool-Calling Inspector."""
 
@@ -36,7 +43,8 @@ class TestLLMEvaluatorIntegration(unittest.TestCase):
                 endpoint=self.endpoint,
                 model=self.model,
                 api_key=self.api_key,
-                reasoning_effort="low"
+                reasoning_effort="low",
+                raise_on_error=True
             )
             print(f"\n[Test Result - Safe]: is_safe={is_safe}, reason={reason}")
             self.assertTrue(is_safe, f"Expected safe verdict for benign manifest, got: {reason}")
@@ -57,7 +65,8 @@ class TestLLMEvaluatorIntegration(unittest.TestCase):
                 endpoint=self.endpoint,
                 model=self.model,
                 api_key=self.api_key,
-                reasoning_effort="low"
+                reasoning_effort="low",
+                raise_on_error=True
             )
             print(f"\n[Test Result - Danger System]: is_safe={is_safe}, reason={reason}")
             self.assertFalse(is_safe, f"Expected dangerous verdict for /etc/shadow, got: {reason}")
@@ -78,7 +87,8 @@ class TestLLMEvaluatorIntegration(unittest.TestCase):
                 endpoint=self.endpoint,
                 model=self.model,
                 api_key=self.api_key,
-                reasoning_effort="low"
+                reasoning_effort="low",
+                raise_on_error=True
             )
             print(f"\n[Test Result - Danger Secret]: is_safe={is_safe}, reason={reason}")
             self.assertFalse(is_safe, f"Expected dangerous verdict for secret credentials, got: {reason}")
