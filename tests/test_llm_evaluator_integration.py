@@ -3,8 +3,12 @@
 import os
 import sys
 import tempfile
-import pytest
 from pathlib import Path
+
+try:
+    import pytest
+except ImportError:
+    pytest = None
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
@@ -12,7 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from security_evaluator import audit_dynamic_substitution_with_llm
 
 
-@pytest.fixture
+def _dummy_fixture(fn):
+    return fn
+
+fixture_decorator = pytest.fixture if pytest is not None else _dummy_fixture
+
+
+@fixture_decorator
 def llm_config():
     """Resolve LLM endpoint, model, and API key strictly from environment variables.
     
