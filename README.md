@@ -33,32 +33,46 @@ When orchestrating multi-agent workflows across terminal multiplexers like [Herd
 
 ### The Solution: Herdr Schengen (SmartGate)
 **Herdr Schengen** acts as an automated immigration border control for coding agents:
-- **Fast-Track Schengen Zone (0.1s Fast-Path, Zero Token Cost)**: Common, verifiable safe operations (file edits, test executions, git commits, project builds) are validated via a 1ms local Python AST parser and auto-approved instantly with zero LLM API cost.
-- **Dynamic Semantic Inspection (Private LLM Subagent)**: Indirect substitutions like `cp $(cat safe_list.txt) ~/dest/` are inspected in real time using private self-hosted models (GPT-OSS 120B on local NAS or DeepSeek-V3 via Tool-Calling) to inspect underlying file payloads.
-- **5 Anti-Loop & Anti-Hang Guardrails**: Prevents HTTP-like redirect loops, symlink recursion, blocking FIFOs, and prompt re-entrancy.
-- **Continuous Rule Evolution**: The rules and heuristics in this repository are continually refined to maintain the optimal equilibrium between **hyper cost-efficiency** and **rock-solid security**.
 
----
-
-## 🏛️ 3-Tier Evaluation Architecture
+## 🏛️ 9 Decision Layers Architecture
 
 ```mermaid
 flowchart TD
-    CMD["Agent Command: cp $(cat manifest.txt) dist/"] --> T1{"Tier 1: 1ms AST Static Audit<br/>(Deterministic & Zero-Token)"}
-    
-    T1 -->|"Static Safe Command"| PASS["✅ Tier 1: Auto-Approve (0.1s Fast-Track)"]
-    T1 -->|"Critical Denylist Trigger"| BLOCK["🚨 Blocked: Critical Risk (rm -rf, sudo, .env leak)"]
-    T1 -->|"Dynamic Substitution $(cat ...)"| T2["Tier 2: Tool-Calling Semantic Inspector<br/>(GPT-OSS 120B / DeepSeek-V3)"]
-    
-    subgraph T2_Inspection ["Tier 2: Real-time Payload Inspection"]
-        T2 --> TC["Tool Call: read_file_content('manifest.txt')"]
-        TC --> G5{"5 Anti-Loop Guardrails Check"}
-        G5 -->|"Verified Safe Payload"| T2_PASS["✅ Tier 2: Auto-Approved with Audit Trail"]
-        G5 -->|"Sensitive / System Paths Found"| T3["👤 Tier 3: Human Review & Delegation"]
-    end
+    CMD["Agent Command: cp $(cat manifest.txt) dist/"] --> L0{"Layer 0: ALLOWLIST Regex"}
+    L0 -->|"Matched User Rule"| PASS["✅ Auto-Approved with Audit Log"]
+    L0 -->|"Unmatched"| L1{"Layer 1: MANAGED_GIT_GUARD"}
+    L1 -->|"Blocked Mutating Action (DELETE/Force)"| BLOCK["🚨 Blocked: Critical SCM Risk"]
+    L1 -->|"Safe Query / Continue"| L2{"Layer 2: SHELL_CRITICAL (rm -rf, sudo)"}
+    L2 -->|"Critical Destructive Action"| BLOCK
+    L2 -->|"Continue"| L3{"Layer 3: SANDBOX_GUARD (Hermes Isolation)"}
+    L3 -->|"Sandbox Host Write Attempt"| BLOCK
+    L3 -->|"Continue"| L4{"Layer 4: PYTHON_AST Static Audit"}
+    L4 -->|"Dangerous Code (eval, subprocess write)"| BLOCK
+    L4 -->|"Continue"| L5{"Layer 5: SECRET_GUARD (.env, id_rsa)"}
+    L5 -->|"Credential Leak Risk"| BLOCK
+    L5 -->|"Continue"| L6{"Layer 6: LLM_INSPECTOR (Dynamic $(cat))"}
+    L6 -->|"Payload Sensitive / Failed"| BLOCK
+    L6 -->|"Continue"| L7{"Layer 7: GRAY_ZONE_MATRIX (SOP-12)"}
+    L7 -->|"Irreversible Mutation"| DELEGATE["👤 7-Field Decision Guidance & Delegation"]
+    L7 -->|"Safe / Ephemeral"| L8{"Layer 8: FAST_TRACK_AST (0.1s Fast-Path)"}
+    L8 -->|"Verified Safe Dev Op"| PASS
 
-    BLOCK --> T3
+    BLOCK --> DELEGATE
 ```
+
+### 🛡️ Decision Layers Overview (Layer 0 ~ Layer 8)
+
+| Layer ID | Layer Name | Inspection Scope & Policies |
+| :--- | :--- | :--- |
+| **Layer 0** | `ALLOWLIST` | Human-persisted allowlist regex rules verified by engineers |
+| **Layer 1** | `MANAGED_GIT_GUARD` | Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) API queries & issue/PR interactions |
+| **Layer 2** | `SHELL_CRITICAL` | Destructive commands (`rm -rf`, `sudo`, `git push --force`, `git reset --hard`, `mkfs`) |
+| **Layer 3** | `SANDBOX_GUARD` | Hermes Docker/microVM Sandbox write isolation (`> .hermes/sandboxes/...`, `cp/mv`, `touch`) |
+| **Layer 4** | `PYTHON_AST` | Python AST static analysis (`eval()`, `exec()`, sensitive file opens, subprocess mutations) |
+| **Layer 5** | `SECRET_GUARD` | Sensitive file access (`.env`, `id_rsa`, `hosts.yml`, `credentials.json`, exfiltration) |
+| **Layer 6** | `LLM_INSPECTOR` | L2 Private Tool-Calling Multi-turn Semantic Inspector for dynamic substitutions `$(cat ...)` |
+| **Layer 7** | `GRAY_ZONE_MATRIX` | Non-VCS Irreversible Mutation Matrix (ADR-004 / SOP-12) with structured decision guidance |
+| **Layer 8** | `FAST_TRACK_AST` | Static verified development workflows (`git status`, `mkdir`, `pytest`, `npm run dev`) |
 
 ---
 
@@ -80,8 +94,8 @@ flowchart TD
 4. **Self-Exclusion & Agent Isolation**:
    - The caller pane running the watcher is automatically excluded (`HERDR_PANE_ID`) to prevent self-recursive auto-approval.
    - Strictly targets designated coding agents (`agent: "agy"`) while ignoring non-target agents (Hermes, bare shells).
-5. **Auditing & SQLite3 Ledger**:
-   - Every approval and manual delegation is permanently logged to SQLite with timestamps and safety rationales.
+5. **Auditing & History CLI (`schengen_history.py`)**:
+   - Every approval and manual delegation is permanently logged to SQLite with timestamps, safety rationales, and exact decision layer attribution.
 
 ---
 
@@ -93,7 +107,7 @@ flowchart TD
 npx skills add ssh://git@salada-git:2222/InhouseOriented/herdr-schengen.git -g -y
 ```
 
-### Quick Commands & Aliases
+### Quick Commands & History CLI
 ```bash
 # 1. Start SmartGate daemon monitoring all active & future AGY panes
 python3 scripts/schengen_watcher.py --target auto
@@ -101,36 +115,44 @@ python3 scripts/schengen_watcher.py --target auto
 # 2. Check live status and active Herdr panes
 python3 scripts/schengen_watcher.py --status
 
-# 3. View review board & audit stats
-python3 scripts/schengen_watcher.py --stats
+# 3. View recent audit history with layer attribution
+python3 scripts/schengen_history.py --recent 10
 
-# 4. Stop the SmartGate daemon
+# 4. Search audit logs across commands and layers
+python3 scripts/schengen_history.py --search "git push"
+
+# 5. Discover decision layers and decision types
+python3 scripts/schengen_history.py --list-layers
+python3 scripts/schengen_history.py --list-decisions
+
+# 6. Stop the SmartGate daemon
 python3 scripts/schengen_watcher.py --stop
 ```
 
 ### Shell Aliases (`alias.zsh`)
 - `smartgate`: Start background SmartGate daemon.
 - `smartgate-status`: Show daemon PID, monitored panes, and recent SQLite audit events.
+- `smartgate-history`: Query recent approval and rejection audit events.
 - `smartgate-stop`: Terminate running SmartGate daemon.
 
 ---
 
 ## 🧪 Testing & CI Pipeline
 
-Comprehensive unit tests and live integration tests run on Forgejo Actions:
+Comprehensive unit tests run with zero external dependencies in 0.02s:
 
 ```bash
-# Run unit tests & guardrail verification
-pytest -v tests/test_dynamic_substitution.py
+# Run full unit test suite (39 test cases)
+python3 -m unittest discover -s tests -v
 
-# Run live LLM integration tests
+# Run live LLM integration tests (optional)
 GUARD_LLM_ENDPOINT="https://api.deepseek.com/v1/chat/completions" \
 GUARD_LLM_MODEL="deepseek-chat" \
 DEEPSEEK_API_KEY="sk-..." \
-pytest -v tests/test_llm_evaluator_integration.py
+python3 -m unittest tests/test_llm_evaluator_integration.py
 ```
 
-### CI Triggers ([`.forgejo/workflows/llm_security_eval.yml`](file:///.forgejo/workflows/llm_security_eval.yml))
+### CI Triggers ([`.forgejo/workflows/llm_security_eval.yml`](.forgejo/workflows/llm_security_eval.yml))
 - **Weekly Schedule**: Automated run every Monday at 00:00 UTC.
 - **Pull Requests**: Runs on any PR targeting `main`.
 - **Manual Dispatch**: 1-click execution from Forgejo Web UI.
@@ -140,8 +162,8 @@ pytest -v tests/test_llm_evaluator_integration.py
 ## 🤝 Contributing & Extensibility
 
 Herdr Schengen is designed to be open-source ready and modular:
-- **New AST Rules**: Extend [`scripts/security_evaluator.py`](file:///scripts/security_evaluator.py) to add language-specific parsers.
+- **New AST Rules**: Extend [`scripts/security_evaluator.py`](scripts/security_evaluator.py) to add language-specific parsers.
 - **Custom LLM Providers**: Compatible with any OpenAI-compliant endpoint (vLLM, Ollama, DeepSeek, LocalAI).
-- **Architecture Decision Records**: Consult [`docs/adr-001`](file:///docs/adr-001-runtime-architecture-python-vs-go.md) and [`docs/adr-002`](file:///docs/adr-002-dynamic-substitution-tool-calling-inspector.md) for technical trade-off details.
+- **Architecture Decision Records**: Consult [`docs/adr-001`](docs/adr-001-runtime-architecture-python-vs-go.md) and [`docs/adr-002`](docs/adr-002-dynamic-substitution-tool-calling-inspector.md) for technical trade-off details.
 
 Pull requests, issues, and security rule proposals are warmly welcomed!

@@ -1,12 +1,13 @@
-"""Security evaluation module for Herdr Agent Guard with GPT-OSS 120B Subagent support.
+"""Security evaluation module for Herdr Schengen (SmartGate) across 9 Decision Layers.
 
 Combines:
 1. Shell command parsing & blacklist inspection (with PATH exception)
-2. Python AST static analysis (with Forgejo API whitelist rules)
+2. Python AST static analysis (with Managed Git SCM API whitelist rules)
 3. Sensitive file and secret pattern matching
 4. Hermes sandbox write-protection policy
-5. Multi-turn Tool-Calling Semantic Inspector (GPT-OSS 120B) for dynamic substitutions $(cat ...)
+5. Multi-turn Tool-Calling Semantic Inspector for dynamic substitutions $(cat ...)
 6. Output sanitization & exfiltration inspection
+7. Gray-zone Non-VCS irreversible mutation matrix
 """
 
 import ast

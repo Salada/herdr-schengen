@@ -1,11 +1,11 @@
-"""SQLite3 persistence and pattern analysis module for Herdr Agent Guard.
+"""SQLite3 persistence and pattern analysis module for Herdr Schengen (SmartGate).
 
 Stores:
 1. audit_logs: Every detected permission request, decision, safety check, and timestamp.
 2. pattern_stats: Aggregated frequency and approval count per normalized command template.
 3. user_allowlist: Persisted custom approval rules reviewed by human engineers.
 
-Database location: ~/.local/state/herdr-agent-guard/guard_history.db (XDG compliant, no skill pollution)
+Database location: ~/.local/state/herdr-schengen/schengen_history.db (XDG compliant, no skill pollution)
 """
 
 import os
@@ -311,7 +311,7 @@ if __name__ == "__main__":
         if args.json:
             print(json.dumps(stats, indent=2))
         else:
-            print("\n📊 Herdr Agent Guard - Pattern Analysis & Review Board")
+            print("\n📊 Herdr Schengen - Pattern Analysis & Review Board")
             print("=" * 80)
             if not stats:
                 print("No command patterns recorded yet.")
