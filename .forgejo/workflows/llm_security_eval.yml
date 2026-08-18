@@ -25,22 +25,14 @@ jobs:
           python3 --version
           git --version
 
-      - name: Install Test Dependencies
-        run: |
-          python3 -m venv .venv
-          source .venv/bin/activate
-          pip install --no-cache-dir pytest
-
       - name: Run Unit Guardrail Tests
         run: |
-          source .venv/bin/activate
           python3 -m unittest discover -s tests -v
 
       - name: Run Live LLM Integration Tests (DeepSeek)
         run: |
-          source .venv/bin/activate
           if [ -n "${DEEPSEEK_API_KEY}" ]; then
-            pytest -v -s tests/test_llm_evaluator_integration.py
+            python3 -m unittest tests/test_llm_evaluator_integration.py
           else
             echo "ℹ️  DEEPSEEK_API_KEY secret not set; skipping live integration tests in CI."
           fi

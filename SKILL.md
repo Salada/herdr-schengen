@@ -75,7 +75,7 @@ python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --stats
 ```mermaid
 flowchart TD
     subgraph Schengen_Zone ["Schengen Fast-Track Zone"]
-        A["AGY Worker Agent"] -->|Tool / Command Execution| B["Herdr Schengen Gate (8 Decision Layers)"]
+        A["AGY Worker Agent"] -->|Tool / Command Execution| B["Herdr Schengen Gate (9 Decision Layers)"]
         B -->|Verified Safe| C["✅ Instant Auto-Approve (Enter)"]
     end
 
@@ -86,7 +86,7 @@ flowchart TD
     end
 ```
 
-### 🛡️ 8 Decision Layers Overview
+### 🛡️ 9 Decision Layers Overview (Layer 0 ~ Layer 8)
 
 | Layer ID | Layer Name | Inspection Scope & Policies |
 | :--- | :--- | :--- |

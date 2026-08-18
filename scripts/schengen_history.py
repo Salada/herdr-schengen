@@ -24,12 +24,29 @@ from guard_db import (
     tail_state_log,
     init_db,
 )
+from security_evaluator import DecisionLayer
 
 
 def main():
-    init_db()
     parser = argparse.ArgumentParser(
         description="Herdr Schengen / SmartGate History & Diagnostics CLI"
+    )
+    parser.add_argument(
+        "--version",
+        "-V",
+        action="version",
+        version="Herdr Schengen (SmartGate) v1.2.0",
+        help="Show program version and exit",
+    )
+    parser.add_argument(
+        "--list-layers",
+        action="store_true",
+        help="List all 9 standard Decision Layers and exit",
+    )
+    parser.add_argument(
+        "--list-decisions",
+        action="store_true",
+        help="List all standard decision types and exit",
     )
     parser.add_argument(
         "--recent",
@@ -95,6 +112,27 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # 0. Discovery & Metadata Flags (Side-effect free)
+    if args.list_layers:
+        layers = [layer.value for layer in DecisionLayer]
+        if args.json:
+            print(json.dumps(layers, indent=2))
+        else:
+            print("🛡️  Herdr Schengen Standard Decision Layers (9 Layers):")
+            for idx, layer in enumerate(layers):
+                print(f"  • Layer {idx}: {layer}")
+        return
+
+    if args.list_decisions:
+        decisions = ["AUTO_APPROVED", "MANUAL_DELEGATED", "ALLOWLIST_BYPASS", "TOCTOU_ABORT"]
+        if args.json:
+            print(json.dumps(decisions, indent=2))
+        else:
+            print("📋 Herdr Schengen Standard Decision Types:")
+            for d in decisions:
+                print(f"  • {d}")
+        return
 
     # 1. State File Paths
     if args.paths:

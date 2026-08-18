@@ -411,8 +411,10 @@ def is_managed_git_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
 is_forgejo_safe_command = is_managed_git_safe_command
 
 
-class DecisionLayer:
-    """Standard inspection layers for Herdr Schengen (SmartGate)."""
+from enum import Enum
+
+class DecisionLayer(str, Enum):
+    """Standard 9 inspection layers for Herdr Schengen (SmartGate)."""
     ALLOWLIST = "ALLOWLIST"                   # Layer 0: User-persisted allowlist regex
     MANAGED_GIT_GUARD = "MANAGED_GIT_GUARD"   # Layer 1: Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) policy
     FORGEJO_GUARD = "MANAGED_GIT_GUARD"       # Layer 1 (Alias for backward compatibility)
