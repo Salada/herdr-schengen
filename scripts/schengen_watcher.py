@@ -35,6 +35,10 @@ from guard_db import (
     record_audit_log,
     check_persisted_allowlist,
     get_pattern_analysis,
+    get_recent_audit_logs,
+    search_audit_logs,
+    get_state_file_paths,
+    tail_state_log,
     init_db,
     DB_DIR,
     DB_PATH
@@ -43,6 +47,7 @@ from security_evaluator import (
     audit_shell_command,
     audit_python_code,
     sanitize_output,
+    DecisionLayer,
     DEFAULT_GPT_OSS_MODEL,
     DEFAULT_GPT_OSS_ENDPOINT,
     DEFAULT_REASONING_EFFORT
@@ -70,8 +75,7 @@ def acquire_singleton_lock():
                 running_pid = f.read().strip()
         except Exception:
             pass
-        print(f"🔒 [Singleton Guard] SmartGate / Herdr Schengen is already running (PID: {running_pid}).")
-        print("   Exiting new process to preserve single-instance integrity and prevent duplicate key injection.")
+        print(f"⚠️  Another SmartGate / Herdr Schengen watcher is already running (PID: {running_pid}). Exiting to maintain single gatekeeper.")
         sys.exit(0)
 
 
@@ -95,7 +99,7 @@ def get_running_guard_pid():
 
 
 def show_guard_status():
-    """Display comprehensive status of SmartGate watcher daemon and monitored panes."""
+    """Display live daemon state, Herdr pane classification, and recent SmartGate events."""
     init_db()
     pid = get_running_guard_pid()
     print("=" * 70)
@@ -133,20 +137,14 @@ def show_guard_status():
     # Recent Audit Log Entries
     print(f"\n📜 Recent SmartGate Audit Events (from SQLite3):")
     try:
-        import sqlite3
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("SELECT timestamp, pane_id, decision, safety_reason, raw_command FROM audit_logs ORDER BY id DESC LIMIT 5")
-        rows = cur.fetchall()
+        rows = get_recent_audit_logs(limit=5)
         if not rows:
             print("   (No audit events recorded yet)")
         for r in rows:
-            symbol = "✅" if r["decision"] == "AUTO_APPROVED" else "🚨"
+            symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
             cmd_preview = (r["raw_command"][:60] + "...") if len(r["raw_command"]) > 60 else r["raw_command"]
-            print(f"   {symbol} [{r['timestamp'][:19]}] {r['pane_id']} - {r['decision']} ({r['safety_reason']})")
+            print(f"   {symbol} [{r['timestamp'][:19]}] #{r['id']} {r['pane_id']} - {r['decision']} [Layer: {r['decision_layer']}] ({r['safety_reason']})")
             print(f"      Cmd: {cmd_preview}")
-        conn.close()
     except Exception as e:
         print(f"   (Failed to read audit logs: {e})")
     print("=" * 70)
@@ -325,6 +323,11 @@ def main():
     parser.add_argument("--interval", type=int, default=3, help="Polling interval in seconds (default: 3)")
     parser.add_argument("--auto-exit", action="store_true", default=False, help="Automatically exit after idle timeout (default: False, runs continuously)")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions without injecting keys")
+    parser.add_argument("--recent", "-n", type=int, nargs="?", const=10, default=None, help="Display recent audit logs (default: 10)")
+    parser.add_argument("--search", "-s", type=str, help="Search audit logs by keyword")
+    parser.add_argument("--tail", "-t", type=int, nargs="?", const=20, default=None, help="Tail schengen.log file (default: 20 lines)")
+    parser.add_argument("--paths", "--find-state", action="store_true", help="Print SmartGate state file paths")
+    parser.add_argument("--json", action="store_true", help="Output results in JSON format for agent parsing")
     parser.add_argument("--stats", action="store_true", help="Display pattern analysis stats from DB and exit")
     parser.add_argument("--status", action="store_true", help="Display status of SmartGate daemon and monitored panes")
     parser.add_argument("--use-gpt-oss", action="store_true", default=False, help="Enable private GPT-OSS 120B semantic judge")
@@ -341,6 +344,60 @@ def main():
         return
 
     init_db()
+
+    if args.paths:
+        paths = get_state_file_paths()
+        if args.json:
+            import json
+            print(json.dumps(paths, indent=2))
+        else:
+            print("🗂️  SmartGate / Herdr Schengen State Paths:")
+            for k, v in paths.items():
+                print(f"  • {k:<12}: {v}")
+        return
+
+    if args.tail is not None:
+        log_lines = tail_state_log(args.tail)
+        if args.json:
+            import json
+            print(json.dumps({"lines": log_lines}, indent=2))
+        else:
+            print(f"📜 Last {len(log_lines)} lines of schengen.log:")
+            print("".join(log_lines), end="")
+        return
+
+    if args.search:
+        results = search_audit_logs(args.search)
+        if args.json:
+            import json
+            print(json.dumps(results, indent=2))
+        else:
+            print(f"🔍 Search results for '{args.search}' ({len(results)} found):")
+            for r in results:
+                symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
+                print(f"{symbol} [{r['timestamp'][:19]}] #{r['id']} {r['pane_id']} - {r['decision']} [Layer: {r['decision_layer']}] ({r['safety_reason']})")
+                print(f"   Cmd: {r['raw_command']}")
+        return
+
+    if args.recent is not None:
+        limit = args.recent
+        logs = get_recent_audit_logs(limit=limit)
+        if args.json:
+            import json
+            print(json.dumps(logs, indent=2))
+        else:
+            print(f"📜 Recent SmartGate Audit Events (Limit: {limit}):")
+            print("=" * 90)
+            if not logs:
+                print("   (No audit events found)")
+            for r in logs:
+                symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
+                cmd_prev = (r["raw_command"][:70] + "...") if len(r["raw_command"]) > 70 else r["raw_command"]
+                print(f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}")
+                print(f"   Reason: {r['safety_reason']}")
+                print(f"   Cmd   : {cmd_prev}")
+                print("-" * 90)
+        return
 
     if args.stats:
         stats = get_pattern_analysis()
@@ -437,15 +494,16 @@ def main():
                         is_safe = True
                         reason = wl_reason
                         decision = "ALLOWLIST_BYPASS"
+                        layer = DecisionLayer.ALLOWLIST
                     else:
-                        is_safe, reason = audit_shell_command(
+                        is_safe, reason, layer = audit_shell_command(
                             req_cmd,
                             use_llm_judge=args.use_gpt_oss,
                             reasoning_effort=args.reasoning
                         )
                         decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
 
-                    print(f"⚖️  Safety Evaluation: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}]", flush=True)
+                    print(f"⚖️  Safety Evaluation: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}]", flush=True)
 
                     # 2. Record to SQLite3 DB
                     record_audit_log(
@@ -453,7 +511,8 @@ def main():
                         raw_command=req_cmd,
                         decision=decision,
                         safety_reason=reason,
-                        agent_kind=agent_kind
+                        agent_kind=agent_kind,
+                        decision_layer=layer
                     )
 
                     # 3. Action
@@ -474,9 +533,10 @@ def main():
                     else:
                         print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review.", flush=True)
                         print(f"   • Pane: {pane_id} ({agent_kind})", flush=True)
+                        print(f"   • Layer: {layer}", flush=True)
                         print(f"   • Reason: {reason}", flush=True)
                         print(f"   • Intercepted Command:\n     {req_cmd}", flush=True)
-                        run_cmd(["herdr", "notification", "send", "--title", "SmartGate Alert", "--body", f"Manual approval required on {pane_id}: {reason}"])
+                        run_cmd(["herdr", "notification", "send", "--title", "SmartGate Alert", "--body", f"Manual approval required on {pane_id} [Layer: {layer}]: {reason}"])
                         last_approved_cmd[pane_id] = req_cmd
 
             time.sleep(args.interval)

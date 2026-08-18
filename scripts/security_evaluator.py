@@ -1,15 +1,17 @@
-"""Security evaluation module for Herdr Agent Guard with GPT-OSS 120B Subagent support.
+"""Security evaluation module for Herdr Schengen (SmartGate) across 9 Decision Layers.
 
 Combines:
 1. Shell command parsing & blacklist inspection (with PATH exception)
-2. Python AST static analysis (with Forgejo API whitelist rules)
+2. Python AST static analysis (with Managed Git SCM API whitelist rules)
 3. Sensitive file and secret pattern matching
 4. Hermes sandbox write-protection policy
-5. Multi-turn Tool-Calling Semantic Inspector (GPT-OSS 120B) for dynamic substitutions $(cat ...)
+5. Multi-turn Tool-Calling Semantic Inspector for dynamic substitutions $(cat ...)
 6. Output sanitization & exfiltration inspection
+7. Gray-zone Non-VCS irreversible mutation matrix
 """
 
 import ast
+from enum import Enum
 import json
 import os
 import re
@@ -50,9 +52,17 @@ SENSITIVE_FILE_PATTERN = re.compile(
 # 2. Hermes Sandbox path pattern
 HERMES_SANDBOX_PATTERN = re.compile(r"(\.hermes/sandboxes|hermes_sandbox)", re.IGNORECASE)
 
-# 3. Forgejo (192.168.10.102:3000) allowed endpoint patterns
-FORGEJO_HOST_PATTERN = re.compile(r"https?://192\.168\.10\.102:3000")
-FORGEJO_ISSUES_PATTERN = re.compile(r"https?://192\.168\.10\.102:3000/api/v1/repos/[^/]+/[^/]+/issues")
+# 3. Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) allowed endpoint patterns
+MANAGED_GIT_HOST_PATTERN = re.compile(r"https?://(192\.168\.10\.102:3000|api\.github\.com|gitlab\.com/api|[^/]*gitea[^/]*/api)")
+MANAGED_GIT_ISSUES_PATTERN = re.compile(
+    r"https?://(192\.168\.10\.102:3000/api/v1/repos/[^/]+/[^/]+/issues|"
+    r"api\.github\.com/repos/[^/]+/[^/]+/(issues|pulls)|"
+    r"gitlab\.com/api/v4/projects/[^/]+/issues|"
+    r"[^/]*gitea[^/]*/api/v1/repos/[^/]+/[^/]+/issues)"
+)
+# Backward-compatibility alias
+FORGEJO_HOST_PATTERN = MANAGED_GIT_HOST_PATTERN
+FORGEJO_ISSUES_PATTERN = MANAGED_GIT_ISSUES_PATTERN
 
 # 4. Critical Dangerous Shell Commands (Destructive / Elevation)
 CRITICAL_SHELL_PATTERNS = [
@@ -267,7 +277,8 @@ def audit_dynamic_substitution_with_llm(
     model: str = DEFAULT_GPT_OSS_MODEL,
     api_key: Optional[str] = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-    max_hops: int = 2
+    max_hops: int = 2,
+    raise_on_error: bool = False
 ) -> Tuple[bool, str]:
     """Multi-turn Tool-Calling security inspector using private GPT-OSS 120B or DeepSeek.
     
@@ -371,81 +382,115 @@ def audit_dynamic_substitution_with_llm(
                 except Exception:
                     if "true" in content_str.lower() and "safe" in content_str.lower() and "not" not in content_str.lower():
                         return True, f"[GPT-OSS 120B Inspector] Safe: {content_str[:80]}"
+                    if raise_on_error:
+                        raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
                     return False, f"[GPT-OSS 120B Inspector] Uncertain verdict: {content_str[:80]}; delegating to human"
 
         except Exception as e:
+            if raise_on_error:
+                raise
             # Fail-Safe to Human Review when private LLM inspector is unreachable
             return False, f"Dynamic substitution detected & LLM Inspector offline ({e}); requires human review"
 
+    if raise_on_error:
+        raise RuntimeError("Dynamic substitution inspection could not be completed within max hops")
     return False, "Dynamic substitution inspection could not be completed; requires human review"
 
 
-def is_forgejo_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
-    """Check if curl/shell command is a safe Forgejo operation."""
-    if not FORGEJO_HOST_PATTERN.search(cmd_str):
+def is_managed_git_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
+    """Check if curl/shell command is a safe Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) operation."""
+    if not MANAGED_GIT_HOST_PATTERN.search(cmd_str):
         return False, None
 
     if re.search(r"-X\s*DELETE\b", cmd_str, re.IGNORECASE):
-        return False, "Forgejo HTTP DELETE is forbidden without human review"
+        return False, "Managed Git HTTP DELETE is forbidden without human review"
 
-    if FORGEJO_ISSUES_PATTERN.search(cmd_str):
-        return True, "Allowed Forgejo issues interaction"
+    if MANAGED_GIT_ISSUES_PATTERN.search(cmd_str):
+        return True, "Allowed Managed Git issues/pulls interaction"
 
     if not re.search(r"(-X\s*(POST|PUT|PATCH)|-d\s+|--data)", cmd_str, re.IGNORECASE):
-        return True, "Allowed Forgejo GET request"
+        return True, "Allowed Managed Git GET request"
 
-    if re.search(r"/api/v1/(user|users|repos)", cmd_str) and not re.search(r"(-X\s*DELETE)", cmd_str):
-        return True, "Allowed Forgejo read API query"
+    if re.search(r"/(api/v1|api/v4|repos)/", cmd_str) and not re.search(r"(-X\s*DELETE)", cmd_str):
+        return True, "Allowed Managed Git read API query"
 
-    return False, "Unrecognized mutating request to Forgejo endpoint"
+    return False, "Unrecognized mutating request to Managed Git endpoint"
 
 
-def audit_shell_command(cmd_str: str, use_llm_judge: bool = False, reasoning_effort: str = DEFAULT_REASONING_EFFORT) -> Tuple[bool, str]:
-    """Audit shell command line with PATH, Forgejo rules, dynamic substitution inspection, and AST judge."""
+# Backward compatibility alias
+is_forgejo_safe_command = is_managed_git_safe_command
+
+
+class DecisionLayer(str, Enum):
+    """Standard 9 inspection layers for Herdr Schengen (SmartGate)."""
+    ALLOWLIST = "ALLOWLIST"                   # Layer 0: User-persisted allowlist regex
+    MANAGED_GIT_GUARD = "MANAGED_GIT_GUARD"   # Layer 1: Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) policy
+    FORGEJO_GUARD = "MANAGED_GIT_GUARD"       # Layer 1 (Alias for backward compatibility)
+    SHELL_CRITICAL = "SHELL_CRITICAL"         # Layer 2: Critical destructive shell operations (rm -rf, sudo, git reset --hard)
+    SANDBOX_GUARD = "SANDBOX_GUARD"           # Layer 3: Hermes Docker/microVM Sandbox write isolation
+    PYTHON_AST = "PYTHON_AST"                 # Layer 4: Python static AST analysis (eval/exec, opens, subprocess writes)
+    SECRET_GUARD = "SECRET_GUARD"             # Layer 5: Sensitive file & secret pattern matching (.env, id_rsa, hosts.yml)
+    LLM_INSPECTOR = "LLM_INSPECTOR"           # Layer 6: L2 Tool-Calling LLM Dynamic Parameter Semantic Inspector
+    GRAY_ZONE_MATRIX = "GRAY_ZONE_MATRIX"     # Layer 7: Non-VCS Irreversible Mutation Matrix (ADR-004 / SOP-12)
+    FAST_TRACK_AST = "FAST_TRACK_AST"         # Layer 8: Fast-track static safe development operations
+
+
+def audit_shell_command(
+    cmd_str: str,
+    use_llm_judge: bool = False,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+) -> Tuple[bool, str, str]:
+    """Audit shell command line with PATH, Managed Git rules, dynamic substitution inspection, and AST judge.
+    
+    Returns:
+        (is_safe: bool, reason: str, layer: str)
+    """
     if not cmd_str or not cmd_str.strip():
-        return True, "Safe"
+        return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
-    # 0. Check Forgejo command rules if targeting Forgejo host
-    if FORGEJO_HOST_PATTERN.search(cmd_str):
-        fg_safe, fg_reason = is_forgejo_safe_command(cmd_str)
-        if not fg_safe and fg_reason:
-            return False, f"Forgejo security guard: {fg_reason}"
+    # 0. Check Managed Git command rules if targeting Managed Git host
+    if MANAGED_GIT_HOST_PATTERN.search(cmd_str):
+        mg_safe, mg_reason = is_managed_git_safe_command(cmd_str)
+        if not mg_safe and mg_reason:
+            return False, f"Managed Git security guard: {mg_reason}", DecisionLayer.MANAGED_GIT_GUARD
+        if mg_safe and mg_reason:
+            return True, f"Managed Git security guard: {mg_reason}", DecisionLayer.MANAGED_GIT_GUARD
 
-    # 1. Check critical destructive patterns
-    for pat, desc in CRITICAL_SHELL_PATTERNS:
-        if re.search(pat, cmd_str, re.IGNORECASE):
-            return False, f"Critical risk detected: {desc}"
-
-    # Check system directory access (exclude PATH=... variable assignments)
-    cleaned_cmd = re.sub(r'PATH=["\']?[^"\';\s]+["\']?', '', cmd_str)
-    if re.search(r"\b(cd|ls|cat|rm|cp|mv)\s+/(etc|var|usr|bin|sbin|Library|System)/", cleaned_cmd, re.IGNORECASE):
-        return False, "System directory direct mutation/access"
-
-    # 2. Check Hermes Sandbox WRITE attempts
-    if HERMES_SANDBOX_PATTERN.search(cmd_str):
-        if re.search(r">>?[^|;&\n]*(\.hermes/sandboxes|hermes_sandbox)", cmd_str, re.IGNORECASE):
-            return False, f"Forbidden shell redirection WRITE to Hermes Sandbox: '{cmd_str}'"
-        sub_commands = re.split(r"[;&|]+", cmd_str)
-        for sub_cmd in sub_commands:
-            sub_cmd = sub_cmd.strip()
-            for write_bin in SHELL_WRITE_COMMANDS:
-                if re.search(rf"\b{write_bin}\b.*(\.hermes/sandboxes|hermes_sandbox)", sub_cmd, re.IGNORECASE):
-                    return False, f"Forbidden WRITE command ({write_bin}) targeting Hermes Sandbox: '{sub_cmd}'"
-
-    # 3. Check for inline python execution (Here-doc or -c)
+    # 1. Check for inline python execution (Here-doc or -c)
     heredoc_match = re.search(r"python[0-9.]*\s+-\s*<<\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n([\s\S]*?)\n\s*\1", cmd_str)
     if heredoc_match:
         py_code = heredoc_match.group(2)
         safe, reason = audit_python_code(py_code)
         if not safe:
-            return False, f"Inline Python risk: {reason}"
+            return False, f"Inline Python risk: {reason}", DecisionLayer.PYTHON_AST
 
     dash_c_match = re.search(r"python[0-9.]*\s+-c\s+(['\"])([\s\S]*?)\1", cmd_str)
     if dash_c_match:
         py_code = dash_c_match.group(2)
         safe, reason = audit_python_code(py_code)
         if not safe:
-            return False, f"Python -c inline risk: {reason}"
+            return False, f"Python -c inline risk: {reason}", DecisionLayer.PYTHON_AST
+
+    # 2. Check critical destructive patterns
+    for pat, desc in CRITICAL_SHELL_PATTERNS:
+        if re.search(pat, cmd_str, re.IGNORECASE):
+            return False, f"Critical risk detected: {desc}", DecisionLayer.SHELL_CRITICAL
+
+    # Check system directory access (exclude PATH=... variable assignments)
+    cleaned_cmd = re.sub(r'PATH=["\']?[^"\';\s]+["\']?', '', cmd_str)
+    if re.search(r"\b(cd|ls|cat|rm|cp|mv)\s+/(etc|var|usr|bin|sbin|Library|System)/", cleaned_cmd, re.IGNORECASE):
+        return False, "System directory direct mutation/access", DecisionLayer.SHELL_CRITICAL
+
+    # 3. Check Hermes Sandbox WRITE attempts
+    if HERMES_SANDBOX_PATTERN.search(cmd_str):
+        if re.search(r">>?[^|;&\n]*(\.hermes/sandboxes|hermes_sandbox)", cmd_str, re.IGNORECASE):
+            return False, f"Forbidden shell redirection WRITE to Hermes Sandbox: '{cmd_str}'", DecisionLayer.SANDBOX_GUARD
+        sub_commands = re.split(r"[;&|]+", cmd_str)
+        for sub_cmd in sub_commands:
+            sub_cmd = sub_cmd.strip()
+            for write_bin in SHELL_WRITE_COMMANDS:
+                if re.search(rf"\b{write_bin}\b.*(\.hermes/sandboxes|hermes_sandbox)", sub_cmd, re.IGNORECASE):
+                    return False, f"Forbidden WRITE command ({write_bin}) targeting Hermes Sandbox: '{sub_cmd}'", DecisionLayer.SANDBOX_GUARD
 
     # 4. Check sensitive file reading or network exfiltration
     if SENSITIVE_FILE_PATTERN.search(cmd_str) and not FORGEJO_HOST_PATTERN.search(cmd_str):
@@ -454,24 +499,25 @@ def audit_shell_command(cmd_str: str, use_llm_judge: bool = False, reasoning_eff
             sub_cmd = sub_cmd.strip()
             for read_bin in READ_COMMANDS:
                 if re.search(rf"\b{read_bin}\b", sub_cmd, re.IGNORECASE) and SENSITIVE_FILE_PATTERN.search(sub_cmd):
-                    return False, f"Attempting to READ sensitive file: '{sub_cmd}'"
+                    return False, f"Attempting to READ sensitive file: '{sub_cmd}'", DecisionLayer.SECRET_GUARD
             for net_bin in NETWORK_EXFIL_COMMANDS:
                 if re.search(rf"\b{net_bin}\b", sub_cmd, re.IGNORECASE) and SENSITIVE_FILE_PATTERN.search(sub_cmd):
-                    return False, f"Network command touching sensitive path: '{sub_cmd}'"
+                    return False, f"Network command touching sensitive path: '{sub_cmd}'", DecisionLayer.SECRET_GUARD
 
     # 5. Check dynamic command substitution $(cat ...) or `cat ...`
     if DYNAMIC_SUBSTITUTION_PATTERN.search(cmd_str):
         # Trigger L2 Multi-turn Tool-Calling Semantic Inspector with 5 Guardrails
-        return audit_dynamic_substitution_with_llm(cmd_str, reasoning_effort=reasoning_effort)
+        is_safe, reason = audit_dynamic_substitution_with_llm(cmd_str, reasoning_effort=reasoning_effort)
+        return is_safe, reason, DecisionLayer.LLM_INSPECTOR
 
     # 6. Check Non-VCS Irreversible Mutation & Gray Zone Matrix (ADR-004 / SOP-12)
     gz_verdict, gz_reason, gz_payload = evaluate_gray_zone_operation(cmd_str)
     if gz_verdict == Verdict.BLOCK:
-        return False, f"Non-VCS Gray-Zone Guard [BLOCK]: {gz_reason}"
+        return False, f"Non-VCS Gray-Zone Guard [BLOCK]: {gz_reason}", DecisionLayer.GRAY_ZONE_MATRIX
     if gz_verdict == Verdict.PROMPT and gz_payload:
-        return False, format_decision_guidance(gz_payload)
+        return False, format_decision_guidance(gz_payload), DecisionLayer.GRAY_ZONE_MATRIX
 
-    return True, "Safe"
+    return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
 
 def sanitize_output(output_str: str) -> str:
