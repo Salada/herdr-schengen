@@ -98,6 +98,15 @@ DYNAMIC_SUBSTITUTION_PATTERN = re.compile(
     re.VERBOSE | re.IGNORECASE
 )
 
+# 7b. Resolvable Static Dynamic Substitution Patterns $(cat ...), $(< ...), `cat ...`
+STATIC_RESOLVABLE_SUBSTITUTION_PATTERN = re.compile(
+    r"""(
+        \$\(\s*(?:cat|<)\s+([^)$|;&`]+?)\s*\)|
+        `\s*cat\s+([^`$|;&]+?)\s*`
+    )""",
+    re.VERBOSE | re.IGNORECASE
+)
+
 # 8. Dangerous Python AST modules & functions
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
@@ -146,8 +155,8 @@ def safe_read_file_content(file_path: str, max_bytes: int = 8192) -> Tuple[bool,
         if SENSITIVE_FILE_PATTERN.search(path_str):
             return False, f"Refused read: Path contains sensitive credentials '{path_str}'"
 
-        # Guard: Never read system root directories
-        if re.search(r"^/(etc|var|System|Library|dev|proc|sys)/", path_str):
+        # Guard: Never read system root directories (including macOS /private/etc, /private/var logs)
+        if re.search(r"^/(?:etc|System|Library|dev|proc|sys|private/etc|var/(?!folders/|tmp/)|private/var/(?!folders/|tmp/))", path_str, re.IGNORECASE):
             return False, f"Refused read: System/device directory path '{path_str}'"
 
         if not clean_path.exists():
@@ -162,6 +171,62 @@ def safe_read_file_content(file_path: str, max_bytes: int = 8192) -> Tuple[bool,
             return True, content
     except Exception as e:
         return False, f"Safe read error: {e}"
+
+
+def resolve_dynamic_substitutions_locally(
+    cmd_str: str,
+    max_hops: int = 2
+) -> Tuple[bool, str, Optional[str], Optional[str]]:
+    """Deterministically resolve static local dynamic substitutions (e.g. $(cat file), `cat file`, $(< file))
+    using safe_read_file_content with 5 Anti-Loop Guardrails.
+    
+    Returns:
+        (is_resolved: bool, resulting_cmd_or_error: str, layer_if_error: Optional[str], error_reason: Optional[str])
+    """
+    current_cmd = cmd_str
+    visited_files = set()
+
+    for hop in range(max_hops):
+        matches = list(STATIC_RESOLVABLE_SUBSTITUTION_PATTERN.finditer(current_cmd))
+        if not matches:
+            break
+
+        # Process matches right-to-left to preserve slice indices
+        for match in reversed(matches):
+            full_sub = match.group(0)
+            raw_arg = (match.group(2) or match.group(3) or "").strip()
+            if not raw_arg:
+                return False, current_cmd, DecisionLayer.LLM_INSPECTOR, f"Empty file argument in dynamic substitution '{full_sub}'"
+
+            try:
+                sub_files = shlex.split(raw_arg)
+            except Exception:
+                sub_files = raw_arg.split()
+
+            combined_chunks = []
+            for fpath in sub_files:
+                norm_path = str(Path(fpath.strip().strip("'\"")).expanduser().resolve())
+                if norm_path in visited_files:
+                    return False, current_cmd, DecisionLayer.LLM_INSPECTOR, f"Circular reference loop detected for '{fpath}'"
+                visited_files.add(norm_path)
+
+                success, content = safe_read_file_content(fpath)
+                if not success:
+                    if SENSITIVE_FILE_PATTERN.search(fpath) or "sensitive" in content.lower() or "secret" in content.lower():
+                        err_layer = DecisionLayer.SECRET_GUARD
+                    elif re.search(r"^/(etc|var|System|Library|dev|proc|sys|private/(etc|var))/", fpath) or "system" in content.lower():
+                        err_layer = DecisionLayer.SHELL_CRITICAL
+                    else:
+                        err_layer = DecisionLayer.LLM_INSPECTOR
+                    return False, current_cmd, err_layer, f"Dynamic substitution blocked on '{fpath}': {content}"
+
+                clean_lines = " ".join(content.strip().splitlines())
+                combined_chunks.append(clean_lines)
+
+            replacement = " ".join(combined_chunks)
+            current_cmd = current_cmd[:match.start()] + replacement + current_cmd[match.end():]
+
+    return True, current_cmd, None, None
 
 
 class PythonASTAuditor(ast.NodeVisitor):
@@ -439,16 +504,12 @@ class DecisionLayer(str, Enum):
     FAST_TRACK_AST = "FAST_TRACK_AST"         # Layer 8: Fast-track static safe development operations
 
 
-def audit_shell_command(
+def _audit_static_shell_command(
     cmd_str: str,
     use_llm_judge: bool = False,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
 ) -> Tuple[bool, str, str]:
-    """Audit shell command line with PATH, Managed Git rules, dynamic substitution inspection, and AST judge.
-    
-    Returns:
-        (is_safe: bool, reason: str, layer: str)
-    """
+    """Audit static shell command line with PATH, Managed Git rules, and AST judge."""
     if not cmd_str or not cmd_str.strip():
         return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
@@ -482,7 +543,7 @@ def audit_shell_command(
 
     # Check system directory access (exclude PATH=... variable assignments)
     cleaned_cmd = re.sub(r'PATH=["\']?[^"\';\s]+["\']?', '', cmd_str)
-    if re.search(r"\b(cd|ls|cat|rm|cp|mv)\s+/(etc|var|usr|bin|sbin|Library|System)/", cleaned_cmd, re.IGNORECASE):
+    if re.search(r"\b(cd|ls|cat|rm|cp|mv)\s+/(?:etc|usr|bin|sbin|Library|System|private/etc|var/(?!folders/|tmp/)|private/var/(?!folders/|tmp/))\b", cleaned_cmd, re.IGNORECASE):
         return False, "System directory direct mutation/access", DecisionLayer.SHELL_CRITICAL
 
     # 3. Check Hermes Sandbox WRITE attempts
@@ -508,12 +569,6 @@ def audit_shell_command(
                 if re.search(rf"\b{net_bin}\b", sub_cmd, re.IGNORECASE) and SENSITIVE_FILE_PATTERN.search(sub_cmd):
                     return False, f"Network command touching sensitive path: '{sub_cmd}'", DecisionLayer.SECRET_GUARD
 
-    # 5. Check dynamic command substitution $(cat ...) or `cat ...`
-    if DYNAMIC_SUBSTITUTION_PATTERN.search(cmd_str):
-        # Trigger L2 Multi-turn Tool-Calling Semantic Inspector with 5 Guardrails
-        is_safe, reason = audit_dynamic_substitution_with_llm(cmd_str, reasoning_effort=reasoning_effort)
-        return is_safe, reason, DecisionLayer.LLM_INSPECTOR
-
     # 6. Check Non-VCS Irreversible Mutation & Gray Zone Matrix (ADR-004 / SOP-12)
     gz_verdict, gz_reason, gz_payload = evaluate_gray_zone_operation(cmd_str)
     if gz_verdict == Verdict.BLOCK:
@@ -522,6 +577,41 @@ def audit_shell_command(
         return False, format_decision_guidance(gz_payload), DecisionLayer.GRAY_ZONE_MATRIX
 
     return True, "Safe", DecisionLayer.FAST_TRACK_AST
+
+
+def audit_shell_command(
+    cmd_str: str,
+    use_llm_judge: bool = False,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+) -> Tuple[bool, str, str]:
+    """Audit shell command line with PATH, Managed Git rules, dynamic substitution inspection, and AST judge.
+    
+    Returns:
+        (is_safe: bool, reason: str, layer: str)
+    """
+    if not cmd_str or not cmd_str.strip():
+        return True, "Safe", DecisionLayer.FAST_TRACK_AST
+
+    # 5. Check dynamic command substitution $(cat ...) or `cat ...`
+    if DYNAMIC_SUBSTITUTION_PATTERN.search(cmd_str):
+        # 5a. Attempt deterministic local resolution with 5 Anti-Loop Guardrails
+        resolved, res_cmd, err_layer, err_reason = resolve_dynamic_substitutions_locally(cmd_str)
+        if not resolved:
+            return False, err_reason or "Dynamic substitution security guard triggered", err_layer or DecisionLayer.LLM_INSPECTOR
+
+        # 5b. If dynamic substitutions still remain (complex expressions like $(find ...), $(awk ...))
+        if DYNAMIC_SUBSTITUTION_PATTERN.search(res_cmd):
+            is_safe, reason = audit_dynamic_substitution_with_llm(res_cmd, reasoning_effort=reasoning_effort)
+            return is_safe, reason, DecisionLayer.LLM_INSPECTOR
+
+        # 5c. All substitutions resolved -> audit resulting static command
+        exp_safe, exp_reason, exp_layer = _audit_static_shell_command(res_cmd, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
+        if exp_safe:
+            return True, f"Dynamic substitution verified safe ({sanitize_output(res_cmd)[:60]}): {exp_reason}", DecisionLayer.FAST_TRACK_AST
+        else:
+            return False, f"Dynamic substitution expanded to unsafe command: {exp_reason}", exp_layer
+
+    return _audit_static_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
 
 
 def sanitize_output(output_str: str) -> str:

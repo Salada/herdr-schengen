@@ -51,18 +51,60 @@ class TestDynamicSubstitution(unittest.TestCase):
         self.assertFalse(DYNAMIC_SUBSTITUTION_PATTERN.search("ln -sfn src dst"))
         self.assertFalse(DYNAMIC_SUBSTITUTION_PATTERN.search("mkdir -p ~/new_dir"))
 
-    def test_static_command_evaluation(self):
-        safe, reason, layer = audit_shell_command("cp /tmp/file1.txt /tmp/file2.txt")
-        self.assertTrue(safe, f"Expected static cp in /tmp to be safe, got: {reason}")
-        self.assertEqual(layer, "FAST_TRACK_AST")
+    def test_deterministic_dynamic_substitution_resolution(self):
+        # 1. Safe dynamic substitution with temporary manifest
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f_target:
+            f_target.write("hello world")
+            target_path = f_target.name
 
-        safe, reason, layer = audit_shell_command("ln -sfn ~/.agents/skills/foo ~/.config/foo")
-        self.assertTrue(safe, f"Expected static ln to be safe, got: {reason}")
-        self.assertEqual(layer, "FAST_TRACK_AST")
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f_manifest:
+            f_manifest.write(target_path)
+            manifest_path = f_manifest.name
 
-        safe, reason, layer = audit_shell_command("rm -rf /")
-        self.assertFalse(safe, f"Expected rm -rf / to be blocked, got: {reason}")
-        self.assertEqual(layer, "SHELL_CRITICAL")
+        try:
+            # Test $(cat ...)
+            safe, reason, layer = audit_shell_command(f"cat $(cat {manifest_path})")
+            self.assertTrue(safe, f"Expected safe $(cat ...) resolution, got: {reason}")
+            self.assertEqual(layer, "FAST_TRACK_AST")
+
+            # Test $(< ...)
+            safe, reason, layer = audit_shell_command(f"cat $(< {manifest_path})")
+            self.assertTrue(safe, f"Expected safe $(< ...) resolution, got: {reason}")
+            self.assertEqual(layer, "FAST_TRACK_AST")
+
+            # Test `cat ...`
+            safe, reason, layer = audit_shell_command(f"cat `cat {manifest_path}`")
+            self.assertTrue(safe, f"Expected safe `cat ...` resolution, got: {reason}")
+            self.assertEqual(layer, "FAST_TRACK_AST")
+        finally:
+            if os.path.exists(target_path):
+                os.unlink(target_path)
+            if os.path.exists(manifest_path):
+                os.unlink(manifest_path)
+
+    def test_dynamic_substitution_security_blocks(self):
+        # 1. Direct .env access via dynamic substitution
+        safe, reason, layer = audit_shell_command("cat $(cat .env)")
+        self.assertFalse(safe, "Expected cat $(cat .env) to be blocked")
+        self.assertEqual(layer, "SECRET_GUARD")
+
+        # 2. System path access via dynamic substitution
+        safe, reason, layer = audit_shell_command("cat $(cat /etc/shadow)")
+        self.assertFalse(safe, "Expected cat $(cat /etc/shadow) to be blocked")
+        self.assertIn(layer, ("SHELL_CRITICAL", "SECRET_GUARD"))
+
+        # 3. Dynamic substitution expanding to destructive command
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f_manifest:
+            f_manifest.write("/ /var")
+            manifest_path = f_manifest.name
+
+        try:
+            safe, reason, layer = audit_shell_command(f"rm -rf $(cat {manifest_path})")
+            self.assertFalse(safe, "Expected rm -rf expansion to be blocked")
+            self.assertEqual(layer, "SHELL_CRITICAL")
+        finally:
+            if os.path.exists(manifest_path):
+                os.unlink(manifest_path)
 
 
 if __name__ == "__main__":
