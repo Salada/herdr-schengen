@@ -261,12 +261,16 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
         return OperationType.APPEND, target
 
     # 3. Mutating System API / CLI / REST
-    if re.search(r"\b(tccutil|defaults\s+write|launchctl\s+(bootstrap|bootout|load|unload)|security\s+(add|delete))\b", clean_cmd):
+    if re.search(r"\b(tccutil|defaults\s+(write|delete)|launchctl\s+(bootstrap|bootout|load|unload|kill|disable|enable)|security\s+(add|delete|set|import)|scselect|systemsetup|pmset|networksetup|plutil\s+(-replace|-remove)|scutil\s+--set)\b", clean_cmd):
         return OperationType.MUTATING_API, clean_cmd.split()[0]
 
     if re.search(r"\bcurl\b.*-X\s*(POST|PUT|DELETE|PATCH)", clean_cmd):
         url_match = re.search(r"https?://[^\s\"']+", clean_cmd)
-        target = url_match.group(0) if url_match else "REST_API"
+        url_str = url_match.group(0) if url_match else ""
+        # Local LLM Inference endpoints (OpenAI-compatible) are stateless inference requests
+        if re.search(r"https?://(127\.0\.0\.1|localhost)(:\d+)?/v1/(chat/completions|completions|embeddings)", url_str):
+            return OperationType.READ, url_str
+        target = url_str if url_str else "REST_API"
         return OperationType.MUTATING_API, target
 
     # 4. Standard File Commands

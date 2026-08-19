@@ -43,6 +43,55 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
+        # macOS Disk & Partition destruction
+        critical_macos_cmds = [
+            "diskutil eraseVolume APFS Untitled disk3s1",
+            "diskutil eraseDisk JHFS+ Backup /dev/disk4",
+            "diskutil partitionDisk disk2 GPT APFS Data 0b",
+            "diskutil apfs deleteVolume disk3s5",
+            "diskutil apfs deleteContainer disk3",
+            "diskutil zeroDisk disk2",
+            "newfs_apfs -v Test /dev/rdisk3s2",
+            "newfs_hfs -v Macintosh /dev/rdisk2s1",
+            "gpt destroy /dev/disk3",
+            "asr restore --source /tmp/img.dmg --target /Volumes/Untitled --erase",
+            "tmutil deletelocalsnapshots 2026-08-19-120000",
+            "csrutil disable",
+            "spctl --master-disable",
+            "bputil -k",
+            "nvram -c",
+            "bless --mount /Volumes/OS --setBoot",
+            "dscl . -delete /Users/testuser",
+            "sysadminctl -deleteUser admin2",
+            "security delete-keychain login.keychain",
+            "security delete-generic-password -s myapp",
+            "pfctl -d",
+            "networksetup -removeallnetworkservices",
+        ]
+        for cmd in critical_macos_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' to be blocked as critical, but got safe={safe}")
+            self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL, f"Expected SHELL_CRITICAL layer for '{cmd}'")
+
+    def test_macos_safe_commands_allowed(self):
+        safe_macos_cmds = [
+            "diskutil list",
+            "diskutil info /dev/disk1s1",
+            "diskutil rename disk3s1 BackupDrive",
+            "tmutil listlocalsnapshots /",
+            "csrutil status",
+            "spctl --status",
+            "nvram -p",
+            "defaults read com.apple.finder",
+            "feedback_survey_skip",
+            "edit_file /Users/kyjbusan/.local/share/chezmoi/dot_zshenv.tmpl",
+            'git -C ~/.local/share/chezmoi commit -m "fix(zshenv): fix template whitespace newline rendering for secrets"',
+        ]
+        for cmd in safe_macos_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' to be allowed, but got blocked: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
     def test_sandbox_guard_layer(self):
         safe, reason, layer = audit_shell_command("echo 'hack' > ~/.hermes/sandboxes/docker/default/home/exploit.sh")
         self.assertFalse(safe)
