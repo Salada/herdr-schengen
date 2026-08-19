@@ -28,6 +28,7 @@ from gray_zone_evaluator import (
     format_decision_guidance,
     ResourceTier,
     OperationType,
+    classify_resource_tier,
 )
 
 # 1. Sensitive file patterns (Secrets & Credentials)
@@ -38,10 +39,11 @@ SENSITIVE_FILE_PATTERN = re.compile(
     rf"""(
         {SEP}\.env(\.[a-zA-Z0-9_-]+)?{END_SEP}|
         id_[a-zA-Z0-9_-]+|
-        {SEP}credentials(\.json|\.yml|\.ini)?{END_SEP}|
-        {SEP}secrets?(\.json|\.yml|\.toml)?{END_SEP}|
+        {SEP}credentials(\.json|\.ya?ml|\.ini|\.toml|\.txt)?{END_SEP}|
+        {SEP}\.?secrets?(\.json|\.ya?ml|\.toml|\.ini|\.env|\.txt){END_SEP}|
+        {SEP}\.secrets(/|{END_SEP})|
         \.(pem|key|pfx|pkcs12){END_SEP}|
-        hosts\.yml|
+        hosts\.ya?ml|
         \.netrc|
         \.aws/credentials|
         \.kube/config
@@ -64,7 +66,7 @@ MANAGED_GIT_ISSUES_PATTERN = re.compile(
 FORGEJO_HOST_PATTERN = MANAGED_GIT_HOST_PATTERN
 FORGEJO_ISSUES_PATTERN = MANAGED_GIT_ISSUES_PATTERN
 
-# 4. Critical Dangerous Shell Commands (Destructive / Elevation)
+# 4. Critical Dangerous Shell Commands (Destructive / Elevation / macOS System Guard)
 CRITICAL_SHELL_PATTERNS = [
     (r"\brm\s+(-[rfRF]+\s+|[^\s]*[rfRF])", "Destructive file deletion (rm -rf)"),
     (r"\bsudo\b", "Privilege escalation (sudo)"),
@@ -74,13 +76,46 @@ CRITICAL_SHELL_PATTERNS = [
     (r"\bgit\s+push(\s+--force|\s+-f)?\b", "Remote Git push / overwrite"),
     (r"\bgit\s+reset\s+--hard\b", "Destructive Git reset"),
     (r"\bgit\s+clean\s+-[fF]", "Destructive Git clean"),
-    (r"\b(mkfs|dd|fdisk|parted)\b", "Disk / Partition manipulation"),
+    # Disk, Volume, & Filesystem Manipulation (Linux & macOS)
+    (
+        r"\bdiskutil\s+(eraseVolume|eraseDisk|partitionDisk|reformat|zeroDisk|randomDisk|secureErase|splitPartition|mergePartitions|apfs\s+(deleteVolume|deleteContainer|deleteSnapshot|eraseVolume)|cs\s+delete|appleRAID\s+delete)\b|"
+        r"\b(mkfs|newfs_[a-z0-9_]+|dd|fdisk|pdisk|parted|gpt)\b|"
+        r"\basr\s+restore\b.*(--erase|-erase)|"
+        r"\btmutil\s+(delete|deletelocalsnapshots|deleteappliancesnapshot)\b",
+        "Destructive disk / volume formatting and partitioning"
+    ),
+    # macOS System Security, Integrity, & Firmware (SIP, NVRAM, Gatekeeper, Bootloader)
+    (
+        r"\bcsrutil\s+(disable|clear|authenticated-root\s+disable)\b|"
+        r"\bspctl\s+(--master-disable|--disable)\b|"
+        r"\bbputil\s+(-k|-s|-p)\b|"
+        r"\bnvram\s+(-c|-d\b|[a-zA-Z0-9_-]+=[^\s]+)|"
+        r"\bbless\s+(--mount|--setBoot|--folder)\b",
+        "macOS System security / firmware integrity mutation"
+    ),
+    # macOS Directory Services & User Account Deletion / Password Mutation
+    (
+        r"\bdscl\s+[\w\./-]+\s+(-delete|-passwd|-create)\b|"
+        r"\bsysadminctl\s+-(deleteUser|resetPasswordFor)\b",
+        "macOS User account / Directory Services mutation"
+    ),
+    # macOS Keychain & Certificate Deletion
+    (
+        r"\bsecurity\s+(delete-keychain|delete-generic-password|delete-internet-password|delete-certificate|delete-identity|remove-identity-preference|create-keychain)\b",
+        "macOS Keychain & credentials deletion"
+    ),
+    # macOS Firewall & Network Disruption
+    (
+        r"\bpfctl\s+(-f|-F\s+all|-d\b)|"
+        r"\bnetworksetup\s+(-setdnsservers|-setsearchdomains|-setmanual|-removeallnetworkservices|-ordernetworkservices)\b",
+        "macOS Firewall / Network disruption"
+    ),
 ]
 
 # 5. Commands that READ or EXFILTRATE files
 READ_COMMANDS = {
     "cat", "head", "tail", "grep", "less", "more", "awk", "sed",
-    "strings", "base64", "xxd", "jq", "source", "."
+    "strings", "base64", "xxd", "jq", "source"
 }
 NETWORK_EXFIL_COMMANDS = {"curl", "wget", "nc", "ncat", "socat", "scp", "rsync", "ssh"}
 
@@ -326,14 +361,22 @@ def audit_python_code(code_str: str) -> Tuple[bool, str]:
     """Parse and audit Python source code with Forgejo whitelist."""
     try:
         tree = ast.parse(code_str)
-        auditor = PythonASTAuditor(raw_code=code_str)
-        auditor.visit(tree)
-        auditor.evaluate_network_calls()
-        if not auditor.is_safe:
-            return False, "; ".join(auditor.reasons)
-        return True, "Python AST: Safe"
+        effective_code = code_str
     except SyntaxError as e:
-        return False, f"Python SyntaxError during AST audit: {e}"
+        # Fallback: attempt parsing unwrapped lines if terminal soft-wrapped the single-line string
+        try:
+            unwrapped = " ".join(line.strip() for line in code_str.splitlines())
+            tree = ast.parse(unwrapped)
+            effective_code = unwrapped
+        except SyntaxError:
+            return False, f"Python SyntaxError during AST audit: {e}"
+
+    auditor = PythonASTAuditor(raw_code=effective_code)
+    auditor.visit(tree)
+    auditor.evaluate_network_calls()
+    if not auditor.is_safe:
+        return False, "; ".join(auditor.reasons)
+    return True, "Python AST: Safe"
 
 
 def audit_dynamic_substitution_with_llm(
@@ -513,7 +556,24 @@ def _audit_static_shell_command(
     if not cmd_str or not cmd_str.strip():
         return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
-    # 0. Check Managed Git command rules if targeting Managed Git host
+    # 0. Check CLI feedback survey skip
+    if cmd_str == "feedback_survey_skip":
+        return True, "Auto-skipping CLI feedback survey ([0] Skip)", DecisionLayer.FAST_TRACK_AST
+
+    # 0a. Check AGY File Edit dialog commands (edit_file <path>)
+    if cmd_str.startswith("edit_file "):
+        target_path = cmd_str[len("edit_file "):].strip()
+        if HERMES_SANDBOX_PATTERN.search(target_path):
+            return False, f"Forbidden file edit targeting Hermes Sandbox: '{target_path}'", DecisionLayer.SANDBOX_GUARD
+        if SENSITIVE_FILE_PATTERN.search(target_path) and "dot_zshenv.tmpl" not in target_path and ".zshenv.local" not in target_path:
+            return False, f"Attempting to edit sensitive credential file: '{target_path}'", DecisionLayer.SECRET_GUARD
+        # Check gray zone classification for the target path
+        gz_tier = classify_resource_tier(target_path)
+        if gz_tier == ResourceTier.T4_CRITICAL:
+            return False, f"Critical OS/Secret resource edit blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
+        return True, f"Verified safe file edit: '{target_path}'", DecisionLayer.FAST_TRACK_AST
+
+    # 0b. Check Managed Git command rules if targeting Managed Git host
     if MANAGED_GIT_HOST_PATTERN.search(cmd_str):
         mg_safe, mg_reason = is_managed_git_safe_command(cmd_str)
         if not mg_safe and mg_reason:
