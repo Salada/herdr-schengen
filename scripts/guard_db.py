@@ -39,9 +39,14 @@ def init_db():
             agent_kind TEXT,
             raw_command TEXT NOT NULL,
             normalized_pattern TEXT NOT NULL,
-            decision TEXT NOT NULL, -- 'AUTO_APPROVED' | 'MANUAL_DELEGATED' | 'ALLOWLIST_BYPASS'
+            decision TEXT NOT NULL, -- 'AUTO_APPROVED' | 'MANUAL_DELEGATED' | 'ALLOWLIST_BYPASS' | 'SHADOW_BLOCKED'
             safety_reason TEXT NOT NULL,
-            decision_layer TEXT DEFAULT 'FAST_TRACK_AST'
+            decision_layer TEXT DEFAULT 'FAST_TRACK_AST',
+            origin TEXT DEFAULT 'A', -- 'H' (Human) | 'A' (Agent) | 'I' (Injected) | 'E' (Emergent)
+            consequence TEXT DEFAULT 'NONE', -- 'NONE' | 'DEST' | 'EXFIL' | 'INT' | 'AVAIL' | 'PERS'
+            mechanism TEXT DEFAULT 'none',
+            gate_state TEXT DEFAULT 'ENFORCE', -- 'ENFORCE' | 'OBSERVE' | 'DEGRADED'
+            shadow_mode INTEGER DEFAULT 0 -- 0: false, 1: true
         );
 
         CREATE TABLE IF NOT EXISTS pattern_stats (
@@ -81,11 +86,21 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_escalations(status);
         CREATE INDEX IF NOT EXISTS idx_pending_pane ON pending_escalations(pane_id);
         """)
-        # Migration: Ensure decision_layer column exists in older schemas
+        # Migration: Ensure columns exist in older schemas (Idempotent schema evolution)
         cursor.execute("PRAGMA table_info(audit_logs)")
         columns = [c[1] for c in cursor.fetchall()]
         if "decision_layer" not in columns:
             cursor.execute("ALTER TABLE audit_logs ADD COLUMN decision_layer TEXT DEFAULT 'FAST_TRACK_AST'")
+        if "origin" not in columns:
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN origin TEXT DEFAULT 'A'")
+        if "consequence" not in columns:
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN consequence TEXT DEFAULT 'NONE'")
+        if "mechanism" not in columns:
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN mechanism TEXT DEFAULT 'none'")
+        if "gate_state" not in columns:
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN gate_state TEXT DEFAULT 'ENFORCE'")
+        if "shadow_mode" not in columns:
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN shadow_mode INTEGER DEFAULT 0")
 
         # Migration: Ensure session_id column exists in pending_escalations
         cursor.execute("PRAGMA table_info(pending_escalations)")
@@ -95,6 +110,8 @@ def init_db():
 
         # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_origin ON audit_logs(origin);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_consequence ON audit_logs(consequence);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_session ON pending_escalations(session_id);")
         conn.commit()
 
@@ -125,8 +142,13 @@ def record_audit_log(
     safety_reason: str,
     agent_kind: Optional[str] = "unknown",
     decision_layer: str = "FAST_TRACK_AST",
+    origin: str = "A",
+    consequence: str = "NONE",
+    mechanism: str = "none",
+    gate_state: str = "ENFORCE",
+    shadow_mode: bool = False,
 ):
-    """Record an audit entry and update pattern frequency statistics."""
+    """Record an audit entry with 2D Taxonomy and update pattern frequency statistics."""
     init_db()
     norm_pattern = normalize_command(raw_command)
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -136,8 +158,12 @@ def record_audit_log(
         # 1. Insert audit log
         cursor.execute(
             """
-            INSERT INTO audit_logs (timestamp, pane_id, agent_kind, raw_command, normalized_pattern, decision, safety_reason, decision_layer)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO audit_logs (
+                timestamp, pane_id, agent_kind, raw_command, normalized_pattern,
+                decision, safety_reason, decision_layer, origin, consequence,
+                mechanism, gate_state, shadow_mode
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 now_iso,
@@ -148,6 +174,11 @@ def record_audit_log(
                 decision,
                 safety_reason,
                 decision_layer,
+                origin,
+                consequence,
+                mechanism,
+                gate_state,
+                1 if shadow_mode else 0,
             ),
         )
 

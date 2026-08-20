@@ -309,6 +309,87 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         cleaned = cleanup_escalations(pane_id=test_pane, new_status="CANCELLED")
         self.assertIsInstance(cleaned, int)
 
+    def test_2d_taxonomy_emission(self):
+        """Verify that audit_shell_command_with_taxonomy correctly extracts 2D taxonomy."""
+        from security_evaluator import (
+            audit_shell_command_with_taxonomy,
+            Origin,
+            Consequence,
+            GateState,
+        )
+
+        # 1. Critical destructive command -> Consequence.DESTRUCTION
+        safe_crit, reason_crit, layer_crit, tax_crit = audit_shell_command_with_taxonomy("rm -rf /")
+        self.assertFalse(safe_crit)
+        self.assertEqual(tax_crit["origin"], Origin.AGENT.value)
+        self.assertEqual(tax_crit["consequence"], Consequence.DESTRUCTION.value)
+        self.assertEqual(tax_crit["mechanism"], "rm-rf")
+        self.assertEqual(tax_crit["gate_state"], GateState.ENFORCE.value)
+        self.assertFalse(tax_crit["shadow_mode"])
+
+        # 2. Secret reading -> Consequence.EXFILTRATION
+        safe_sec, reason_sec, layer_sec, tax_sec = audit_shell_command_with_taxonomy("cat .env")
+        self.assertFalse(safe_sec)
+        self.assertEqual(tax_sec["consequence"], Consequence.EXFILTRATION.value)
+        self.assertEqual(tax_sec["mechanism"], "secret-path")
+
+        # 3. Benign command -> Consequence.NONE
+        safe_ok, reason_ok, layer_ok, tax_ok = audit_shell_command_with_taxonomy("git status")
+        self.assertTrue(safe_ok)
+        self.assertEqual(tax_ok["consequence"], Consequence.NONE.value)
+        self.assertEqual(tax_ok["mechanism"], "fast-track-verified")
+
+    def test_shadow_mode_kill_switch(self):
+        """Verify that SCHENGEN_SHADOW_MODE=1 allows execution while logging counterfactual block."""
+        from security_evaluator import audit_shell_command_with_taxonomy, GateState
+
+        old_env = os.environ.get("SCHENGEN_SHADOW_MODE")
+        try:
+            os.environ["SCHENGEN_SHADOW_MODE"] = "1"
+            safe_shadow, reason_shadow, layer_shadow, tax_shadow = audit_shell_command_with_taxonomy("rm -rf /")
+            # In shadow mode, dangerous command must return is_safe=True to allow pass-through
+            self.assertTrue(safe_shadow)
+            self.assertIn("Counterfactual BLOCK", reason_shadow)
+            self.assertEqual(tax_shadow["gate_state"], GateState.OBSERVE.value)
+            self.assertTrue(tax_shadow["shadow_mode"])
+            self.assertTrue(tax_shadow["counterfactual_block"])
+        finally:
+            if old_env is not None:
+                os.environ["SCHENGEN_SHADOW_MODE"] = old_env
+            else:
+                os.environ.pop("SCHENGEN_SHADOW_MODE", None)
+
+    def test_guard_db_taxonomy_columns_and_idempotency(self):
+        """Verify SQLite3 schema includes 2D taxonomy and record_audit_log stores it."""
+        from guard_db import record_audit_log, get_recent_audit_logs, get_db_connection
+
+        test_pane = "wTest:pTax"
+        test_cmd = "rm -rf /tmp/test_taxonomy_target"
+        record_audit_log(
+            pane_id=test_pane,
+            raw_command=test_cmd,
+            decision="SHADOW_BLOCKED",
+            safety_reason="Unit test counterfactual shadow block",
+            agent_kind="agy",
+            decision_layer="SHELL_CRITICAL",
+            origin="A",
+            consequence="DEST",
+            mechanism="rm-rf",
+            gate_state="OBSERVE",
+            shadow_mode=True,
+        )
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT origin, consequence, mechanism, gate_state, shadow_mode FROM audit_logs WHERE pane_id = ? ORDER BY id DESC LIMIT 1", (test_pane,))
+            row = cursor.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["origin"], "A")
+            self.assertEqual(row["consequence"], "DEST")
+            self.assertEqual(row["mechanism"], "rm-rf")
+            self.assertEqual(row["gate_state"], "OBSERVE")
+            self.assertEqual(row["shadow_mode"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

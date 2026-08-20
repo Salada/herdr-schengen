@@ -533,6 +533,37 @@ def is_managed_git_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
 is_forgejo_safe_command = is_managed_git_safe_command
 
 
+class Origin(str, Enum):
+    """Origin axis of 2D Taxonomy: who authored/triggered the command."""
+    HUMAN = "H"         # Explicit human user direction
+    AGENT = "A"         # Autonomous agent reasoning
+    INJECTED = "I"      # Prompt injection / untrusted third-party payload
+    EMERGENT = "E"      # Latent / unbound variable disaster
+
+
+class Consequence(str, Enum):
+    """Consequence axis of 2D Taxonomy: what security boundary is threatened."""
+    NONE = "NONE"       # Benign operation without harmful side-effects
+    DESTRUCTION = "DEST" # Data loss / filesystem deletion / disk wipe
+    EXFILTRATION = "EXFIL" # Confidentiality breach / credential egress
+    INTEGRITY = "INT"   # Silent tampering / config pollution / corruption
+    AVAILABILITY = "AVAIL" # DoS / resource exhaustion / fork bombs
+    PERSISTENCE = "PERS" # Privilege escalation / backdoor / unauthorized ssh key
+
+
+class GateState(str, Enum):
+    """Schengen Gate operation posture."""
+    ENFORCE = "ENFORCE"   # Active blocking & gatekeeping
+    OBSERVE = "OBSERVE"   # Shadow mode: counterfactual evaluation without blocking
+    DEGRADED = "DEGRADED" # Fail-open for local safe reads, fail-closed for egress/mutations
+
+
+def is_shadow_mode() -> bool:
+    """Check if SCHENGEN_SHADOW_MODE kill-switch environment variable is active."""
+    val = os.environ.get("SCHENGEN_SHADOW_MODE", "0").strip().lower()
+    return val in ("1", "true", "yes", "on", "shadow", "observe")
+
+
 class DecisionLayer(str, Enum):
     """Standard 9 inspection layers for Herdr Schengen (SmartGate)."""
     ALLOWLIST = "ALLOWLIST"                   # Layer 0: User-persisted allowlist regex
@@ -673,6 +704,91 @@ def audit_shell_command(
             return False, f"Dynamic substitution expanded to unsafe command: {exp_reason}", exp_layer
 
     return _audit_static_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
+
+
+def derive_taxonomy(
+    cmd_str: str,
+    layer: DecisionLayer,
+    is_safe: bool,
+    reason: str,
+    origin: Origin = Origin.AGENT
+) -> Dict[str, Any]:
+    """Derive 2D Taxonomy (Origin x Consequence + Mechanism) from evaluation result."""
+    shadow = is_shadow_mode()
+    gate_state = GateState.OBSERVE if shadow else GateState.ENFORCE
+
+    # Determine Consequence
+    if layer in (DecisionLayer.SHELL_CRITICAL,):
+        consequence = Consequence.DESTRUCTION
+    elif layer in (DecisionLayer.SECRET_GUARD,):
+        consequence = Consequence.EXFILTRATION
+    elif layer in (DecisionLayer.SANDBOX_GUARD, DecisionLayer.PYTHON_AST):
+        consequence = Consequence.INTEGRITY
+    elif layer in (DecisionLayer.GRAY_ZONE_MATRIX,):
+        consequence = Consequence.DESTRUCTION
+    elif layer in (DecisionLayer.MANAGED_GIT_GUARD,):
+        consequence = Consequence.DESTRUCTION if "DELETE" in reason else Consequence.NONE
+    elif layer in (DecisionLayer.ALLOWLIST,):
+        consequence = Consequence.NONE
+        origin = Origin.HUMAN
+    elif is_safe:
+        consequence = Consequence.NONE
+    else:
+        consequence = Consequence.DESTRUCTION
+
+    # Determine Mechanism
+    mechanism = "none"
+    if "rm -rf" in reason or "rm -r" in cmd_str:
+        mechanism = "rm-rf"
+    elif "sudo" in reason or "su " in cmd_str:
+        mechanism = "sudo"
+    elif "chmod" in reason or "chown" in reason:
+        mechanism = "perm-mutation"
+    elif "git push" in reason or "git reset" in reason:
+        mechanism = "git-mutation"
+    elif "Dynamic substitution" in reason or "$(" in cmd_str:
+        mechanism = "subshell-substitution"
+    elif "sensitive credential" in reason or ".env" in cmd_str:
+        mechanism = "secret-path"
+    elif "Sandbox" in reason:
+        mechanism = "sandbox-write"
+    elif "Python" in reason or "python" in cmd_str:
+        mechanism = "python-ast"
+    elif "Gray-Zone" in reason:
+        mechanism = "non-vcs-gray-zone"
+    elif is_safe:
+        mechanism = "fast-track-verified"
+
+    return {
+        "origin": origin.value if isinstance(origin, Origin) else str(origin),
+        "consequence": consequence.value if isinstance(consequence, Consequence) else str(consequence),
+        "mechanism": mechanism,
+        "gate_state": gate_state.value if isinstance(gate_state, GateState) else str(gate_state),
+        "shadow_mode": shadow,
+        "counterfactual_block": (not is_safe) and shadow,
+    }
+
+
+def audit_shell_command_with_taxonomy(
+    cmd_str: str,
+    use_llm_judge: bool = False,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    origin: Origin = Origin.AGENT
+) -> Tuple[bool, str, DecisionLayer, Dict[str, Any]]:
+    """Audit shell command and return safety, reason, layer, and 2D taxonomy metadata.
+    
+    If SCHENGEN_SHADOW_MODE=1 is active, dangerous commands return is_safe=True with
+    counterfactual logging metadata.
+    """
+    is_safe, reason, layer = audit_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
+    taxonomy = derive_taxonomy(cmd_str, layer, is_safe, reason, origin=origin)
+    
+    # Shadow Mode Handling
+    if is_shadow_mode() and not is_safe:
+        shadow_reason = f"[SHADOW_OBSERVE: Counterfactual BLOCK] {reason}"
+        return True, shadow_reason, layer, taxonomy
+
+    return is_safe, reason, layer, taxonomy
 
 
 def sanitize_output(output_str: str) -> str:

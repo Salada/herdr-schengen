@@ -55,9 +55,15 @@ from guard_db import (
 )
 from security_evaluator import (
     audit_shell_command,
+    audit_shell_command_with_taxonomy,
+    derive_taxonomy,
     audit_python_code,
     sanitize_output,
     DecisionLayer,
+    Origin,
+    Consequence,
+    GateState,
+    is_shadow_mode,
     DEFAULT_GPT_OSS_MODEL,
     DEFAULT_GPT_OSS_ENDPOINT,
     DEFAULT_REASONING_EFFORT
@@ -684,15 +690,21 @@ def main():
                     reason = wl_reason
                     decision = "ALLOWLIST_BYPASS"
                     layer = DecisionLayer.ALLOWLIST
+                    tax = derive_taxonomy(req_cmd, layer, is_safe, reason, origin=Origin.HUMAN)
                 else:
-                    is_safe, reason, layer = audit_shell_command(
+                    is_safe, reason, layer, tax = audit_shell_command_with_taxonomy(
                         req_cmd,
                         use_llm_judge=args.use_gpt_oss,
-                        reasoning_effort=args.reasoning
+                        reasoning_effort=args.reasoning,
+                        origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN
                     )
-                    decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
+                    if tax.get("counterfactual_block"):
+                        decision = "SHADOW_BLOCKED"
+                    else:
+                        decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
 
-                print(f"⚖️  Safety Evaluation: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}]", flush=True)
+                state_tag = f"[{tax.get('gate_state', 'ENFORCE')}]"
+                print(f"⚖️  Safety Evaluation {state_tag}: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}, Origin: {tax.get('origin')}, Conseq: {tax.get('consequence')}]", flush=True)
 
                 # 2. Record to SQLite3 DB
                 record_audit_log(
@@ -701,7 +713,12 @@ def main():
                     decision=decision,
                     safety_reason=reason,
                     agent_kind=agent_kind,
-                    decision_layer=layer
+                    decision_layer=layer,
+                    origin=tax.get("origin", "A"),
+                    consequence=tax.get("consequence", "NONE"),
+                    mechanism=tax.get("mechanism", "none"),
+                    gate_state=tax.get("gate_state", "ENFORCE"),
+                    shadow_mode=tax.get("shadow_mode", False),
                 )
 
                 # 3. Action
