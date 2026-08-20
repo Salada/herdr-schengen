@@ -5,9 +5,9 @@
 - **Deciders**: SaladaQoo (Human Lead), Antigravity (AGY Commander), Hermes (Governance Reviewer)
 - **Consulted**: `ciso-reviewer`, `devops-reviewer`, `english-reviewer`
 - **Related Documents**:
-  - [AGENTS.md (OrgManaged/dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/AGENTS.md) (Rules 10-13)
-  - [SOP-11: Unbiased Peer Review Protocol (dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/dot_agents/rules/sops/sop-11-unbiased-peer-review-protocol.md)
-  - [salada-git-forgejo-policy.md (common-llm-wiki)](http://192.168.10.102:3000/OrgManaged/common-llm-wiki/src/branch/main/docs/salada-git-forgejo-policy.md)
+  - [ADR-001: Runtime & Architecture Selection](./adr-001-runtime-architecture-python-vs-go.md)
+  - [ADR-003: AGY Native Task Integration & Singleton Governance](./adr-003-agy-native-task-integration-and-singleton-governance.md)
+  - [ADR-004: Non-VCS Irreversible Mutation Governance](./adr-004-non-vcs-irreversible-mutation-governance.md)
 
 ---
 
