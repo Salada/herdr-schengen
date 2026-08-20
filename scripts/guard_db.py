@@ -60,8 +60,25 @@ def init_db():
             is_active INTEGER DEFAULT 1
         );
 
+        CREATE TABLE IF NOT EXISTS pending_escalations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pane_id TEXT NOT NULL,
+            agent_kind TEXT DEFAULT 'unknown',
+            raw_command TEXT NOT NULL,
+            command_hash TEXT NOT NULL,
+            safety_reason TEXT NOT NULL,
+            decision_layer TEXT NOT NULL,
+            status TEXT DEFAULT 'PENDING', -- 'PENDING' | 'DELIVERED' | 'RESOLVED' | 'STALE_EXPIRED' | 'CANCELLED'
+            started_at TEXT NOT NULL,
+            delivered_at TEXT,
+            last_transitioned_at TEXT NOT NULL,
+            UNIQUE(pane_id, command_hash)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp);
         CREATE INDEX IF NOT EXISTS idx_audit_pattern ON audit_logs(normalized_pattern);
+        CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_escalations(status);
+        CREATE INDEX IF NOT EXISTS idx_pending_pane ON pending_escalations(pane_id);
         """)
         # Migration: Ensure decision_layer column exists in older schemas
         cursor.execute("PRAGMA table_info(audit_logs)")
@@ -254,6 +271,185 @@ def get_state_file_paths() -> Dict[str, str]:
         "lock_file": str(DB_DIR / "schengen.lock"),
         "log_file": str(DB_DIR / "schengen.log"),
     }
+
+
+def enqueue_pending_escalation(
+    pane_id: str,
+    raw_command: str,
+    safety_reason: str,
+    decision_layer: str,
+    agent_kind: str = "agy",
+) -> int:
+    """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once)."""
+    import hashlib
+    init_db()
+    cmd_hash = hashlib.sha256(raw_command.encode("utf-8")).hexdigest()[:16]
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO pending_escalations (
+                pane_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, last_transitioned_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+            ON CONFLICT(pane_id, command_hash) DO UPDATE SET
+                status = 'PENDING',
+                safety_reason = excluded.safety_reason,
+                decision_layer = excluded.decision_layer,
+                last_transitioned_at = excluded.last_transitioned_at
+        """, (pane_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, now_iso, now_iso))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_pending_escalations(
+    pane_id: Optional[str] = None,
+    include_delivered: bool = False,
+    max_age_hours: float = 24.0,
+) -> List[Dict]:
+    """Retrieve active pending escalations. Automatically filters out entries older than max_age_hours."""
+    init_db()
+    now = datetime.now(timezone.utc)
+    statuses = "('PENDING', 'DELIVERED')" if include_delivered else "('PENDING')"
+    query = f"SELECT id, pane_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, delivered_at, last_transitioned_at FROM pending_escalations WHERE status IN {statuses}"
+    params = []
+    if pane_id:
+        query += " AND pane_id = ?"
+        params.append(pane_id)
+    query += " ORDER BY id ASC"
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+
+    valid_escalations = []
+    stale_ids = []
+    for r in rows:
+        try:
+            started = datetime.fromisoformat(r["started_at"])
+            age_hours = (now - started).total_seconds() / 3600.0
+            if age_hours > max_age_hours:
+                stale_ids.append(r["id"])
+            else:
+                valid_escalations.append(r)
+        except Exception:
+            valid_escalations.append(r)
+
+    if stale_ids:
+        cleanup_escalations(escalation_ids=stale_ids, new_status="STALE_EXPIRED", reason="Exceeded maximum age threshold")
+
+    return valid_escalations
+
+
+def mark_escalation_delivered(escalation_id: int):
+    """Mark an escalation as delivered to the agent/user interface."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE pending_escalations
+            SET status = 'DELIVERED', delivered_at = ?, last_transitioned_at = ?
+            WHERE id = ? AND status = 'PENDING'
+        """, (now_iso, now_iso, escalation_id))
+        conn.commit()
+
+
+def resolve_escalation(
+    pane_id: str,
+    command_hash: Optional[str] = None,
+    escalation_id: Optional[int] = None,
+    resolution_status: str = "RESOLVED",
+):
+    """Mark escalation(s) as resolved or cancelled after user/agent action (ACK)."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if escalation_id:
+            cursor.execute("""
+                UPDATE pending_escalations
+                SET status = ?, last_transitioned_at = ?
+                WHERE id = ?
+            """, (resolution_status, now_iso, escalation_id))
+        elif command_hash:
+            cursor.execute("""
+                UPDATE pending_escalations
+                SET status = ?, last_transitioned_at = ?
+                WHERE pane_id = ? AND command_hash = ? AND status IN ('PENDING', 'DELIVERED')
+            """, (resolution_status, now_iso, pane_id, command_hash))
+        else:
+            cursor.execute("""
+                UPDATE pending_escalations
+                SET status = ?, last_transitioned_at = ?
+                WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')
+            """, (resolution_status, now_iso, pane_id))
+        conn.commit()
+
+
+def cleanup_escalations(
+    escalation_ids: Optional[List[int]] = None,
+    pane_id: Optional[str] = None,
+    older_than_hours: Optional[float] = None,
+    new_status: str = "STALE_EXPIRED",
+    purge_deleted: bool = False,
+    reason: str = "",
+) -> int:
+    """Clean up stale or cancelled escalations by transitioning status or purging old resolved rows."""
+    init_db()
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if purge_deleted:
+            # Purge terminal status rows older than 7 days
+            cutoff_iso = (now - timedelta(days=7)).isoformat()
+            cursor.execute("""
+                DELETE FROM pending_escalations
+                WHERE status IN ('RESOLVED', 'STALE_EXPIRED', 'CANCELLED')
+                  AND last_transitioned_at < ?
+            """, (cutoff_iso,))
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
+
+        if escalation_ids:
+            placeholders = ",".join("?" * len(escalation_ids))
+            cursor.execute(f"""
+                UPDATE pending_escalations
+                SET status = ?, last_transitioned_at = ?
+                WHERE id IN ({placeholders})
+            """, [new_status, now_iso] + escalation_ids)
+            affected = cursor.rowcount
+            conn.commit()
+            return affected
+
+        if older_than_hours is not None:
+            cutoff_iso = (now - timedelta(hours=older_than_hours)).isoformat()
+            cursor.execute("""
+                UPDATE pending_escalations
+                SET status = ?, last_transitioned_at = ?
+                WHERE status IN ('PENDING', 'DELIVERED')
+                  AND started_at < ?
+            """, (new_status, now_iso, cutoff_iso))
+            affected = cursor.rowcount
+            conn.commit()
+            return affected
+
+        if pane_id:
+            cursor.execute("""
+                UPDATE pending_escalations
+                SET status = ?, last_transitioned_at = ?
+                WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')
+            """, (new_status, now_iso, pane_id))
+            affected = cursor.rowcount
+            conn.commit()
+            return affected
+
+    return 0
 
 
 def tail_state_log(lines: int = 20) -> List[str]:

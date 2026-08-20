@@ -308,7 +308,22 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
         target = url_str if url_str else "REST_API"
         return OperationType.MUTATING_API, target
 
-    # 4. Standard File Commands
+    # 4. Handle Compound Statements (&&, ||, ;)
+    sub_cmds = [sc.strip() for sc in re.split(r"[;&|]+", clean_cmd) if sc.strip()]
+    if len(sub_cmds) > 1:
+        # Ignore shell no-op / control builtins (e.g. true, false, exit 0, echo)
+        filtered = [sc for sc in sub_cmds if sc not in ("true", "false", "exit 0", ":")]
+        if not filtered:
+            return OperationType.READ, None
+        
+        # Evaluate each sub-command and return the highest risk operation
+        for sc in filtered:
+            sub_op, sub_target = classify_operation(sc)
+            if sub_op in (OperationType.DELETE, OperationType.TRUNCATE, OperationType.MUTATING_API, OperationType.OVERWRITE, OperationType.MOVE):
+                return sub_op, sub_target
+        return OperationType.READ, None
+
+    # Single command token parsing
     try:
         tokens = shlex.split(clean_cmd)
     except Exception:
@@ -317,33 +332,43 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
     if not tokens:
         return OperationType.READ, None
 
-    cmd_verb = tokens[0]
+    # Filter out redirection syntax and error suppressions (2>/dev/null, >/dev/null)
+    cleaned_tokens = []
+    for t in tokens:
+        if t in ("2>/dev/null", ">/dev/null", "2>&1", "1>/dev/null", "2>", ">", ">>"):
+            continue
+        cleaned_tokens.append(t)
+
+    if not cleaned_tokens:
+        return OperationType.READ, None
+
+    cmd_verb = cleaned_tokens[0]
 
     if cmd_verb in ("rm", "unlink", "shred", "trash"):
         # Delete
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        targets = [t for t in cleaned_tokens[1:] if not t.startswith("-")]
         return OperationType.DELETE, (targets[-1] if targets else None)
 
     if cmd_verb in ("mv",):
         # Move / Rename
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        targets = [t for t in cleaned_tokens[1:] if not t.startswith("-")]
         return OperationType.MOVE, (targets[0] if targets else None)
 
     if cmd_verb in ("cp", "install", "rsync"):
         # Overwrite / Write
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        targets = [t for t in cleaned_tokens[1:] if not t.startswith("-")]
         return OperationType.OVERWRITE, (targets[-1] if targets else None)
 
     if cmd_verb in ("cat", "head", "tail", "grep", "rg", "find", "ls", "less", "file", "stat", "git"):
         # Read
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        targets = [t for t in cleaned_tokens[1:] if not t.startswith("-")]
         return OperationType.READ, (targets[0] if targets else None)
 
     # 5. Heavy Execution
     if cmd_verb in ("make", "cargo", "pytest", "npm", "pnpm", "bun", "docker", "mise"):
         return OperationType.HEAVY_EXEC, cmd_verb
 
-    return OperationType.READ, (tokens[1] if len(tokens) > 1 else None)
+    return OperationType.READ, (cleaned_tokens[1] if len(cleaned_tokens) > 1 else None)
 
 
 def evaluate_gray_zone_operation(

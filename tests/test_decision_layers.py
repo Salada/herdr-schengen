@@ -240,6 +240,53 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         self.assertTrue(safe)
         self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
+    def test_escalation_queue_lifecycle_and_cleanup(self):
+        from guard_db import (
+            enqueue_pending_escalation,
+            get_pending_escalations,
+            mark_escalation_delivered,
+            resolve_escalation,
+            cleanup_escalations,
+        )
+        test_pane = "wTest:p1"
+        test_cmd = "rm -rf /untrusted/test/danger"
+
+        # 1. Enqueue
+        esc_id = enqueue_pending_escalation(
+            pane_id=test_pane,
+            raw_command=test_cmd,
+            safety_reason="Unit test risk detection",
+            decision_layer="SHELL_CRITICAL",
+            agent_kind="agy",
+        )
+        self.assertIsInstance(esc_id, int)
+
+        # 2. Query pending
+        pending = get_pending_escalations(pane_id=test_pane)
+        self.assertTrue(len(pending) >= 1)
+        target_item = next((item for item in pending if item["pane_id"] == test_pane), None)
+        self.assertIsNotNone(target_item)
+        self.assertEqual(target_item["status"], "PENDING")
+        self.assertIn("started_at", target_item)
+        self.assertIn("last_transitioned_at", target_item)
+
+        # 3. Mark delivered
+        mark_escalation_delivered(target_item["id"])
+        delivered_list = get_pending_escalations(pane_id=test_pane, include_delivered=True)
+        del_item = next((item for item in delivered_list if item["id"] == target_item["id"]), None)
+        self.assertIsNotNone(del_item)
+        self.assertEqual(del_item["status"], "DELIVERED")
+        self.assertIsNotNone(del_item["delivered_at"])
+
+        # 4. Resolve / ACK
+        resolve_escalation(pane_id=test_pane, escalation_id=target_item["id"])
+        pending_after_res = get_pending_escalations(pane_id=test_pane)
+        self.assertFalse(any(item["id"] == target_item["id"] for item in pending_after_res))
+
+        # 5. Cleanup / Purge
+        cleaned = cleanup_escalations(pane_id=test_pane, new_status="CANCELLED")
+        self.assertIsInstance(cleaned, int)
+
 
 if __name__ == "__main__":
     unittest.main()

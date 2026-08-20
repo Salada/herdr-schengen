@@ -23,6 +23,9 @@ from guard_db import (
     get_state_file_paths,
     tail_state_log,
     init_db,
+    get_pending_escalations,
+    resolve_escalation,
+    cleanup_escalations,
 )
 from security_evaluator import DecisionLayer
 
@@ -110,6 +113,21 @@ def main():
         action="store_true",
         help="Output structured JSON results for agent parsing",
     )
+    parser.add_argument(
+        "--pending",
+        action="store_true",
+        help="Display active pending escalations requiring human/agent review",
+    )
+    parser.add_argument(
+        "--cleanup-pending",
+        action="store_true",
+        help="Clean up stale pending escalations (marks expired/stale entries)",
+    )
+    parser.add_argument(
+        "--purge-old",
+        action="store_true",
+        help="Purge resolved/cancelled/expired escalations older than 7 days from DB",
+    )
 
     args = parser.parse_args()
 
@@ -132,6 +150,41 @@ def main():
             print("📋 Herdr Schengen Persisted Audit Decision Types:")
             for d in decisions:
                 print(f"  • {d}")
+        return
+
+    # Pending Escalations Management
+    if args.cleanup_pending:
+        count = cleanup_escalations(pane_id=args.pane, older_than_hours=24.0, new_status="STALE_EXPIRED")
+        if args.json:
+            print(json.dumps({"cleaned_count": count, "status": "ok"}))
+        else:
+            print(f"🧹 Cleaned up {count} stale pending escalation(s) -> STALE_EXPIRED.")
+        return
+
+    if args.purge_old:
+        purged = cleanup_escalations(purge_deleted=True)
+        if args.json:
+            print(json.dumps({"purged_count": purged, "status": "ok"}))
+        else:
+            print(f"🗑️  Purged {purged} old resolved/stale escalation record(s) older than 7 days.")
+        return
+
+    if args.pending:
+        pending = get_pending_escalations(pane_id=args.pane, include_delivered=True)
+        if args.json:
+            print(json.dumps(pending, indent=2))
+        else:
+            print(f"🚨 Active Pending Escalations Queue ({len(pending)} pending):")
+            print("=" * 90)
+            if not pending:
+                print("   (No active pending escalations)")
+            for item in pending:
+                print(f"• Escalation #{item['id']} [Pane: {item['pane_id']}] Status: {item['status']}")
+                print(f"  Layer  : {item['decision_layer']}")
+                print(f"  Reason : {item['safety_reason']}")
+                print(f"  Started: {item['started_at']}")
+                print(f"  Command: {item['raw_command']}")
+                print("-" * 90)
         return
 
     # 1. State File Paths

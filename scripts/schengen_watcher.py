@@ -45,6 +45,11 @@ from guard_db import (
     get_state_file_paths,
     tail_state_log,
     init_db,
+    enqueue_pending_escalation,
+    get_pending_escalations,
+    mark_escalation_delivered,
+    resolve_escalation,
+    cleanup_escalations,
     DB_DIR,
     DB_PATH
 )
@@ -718,8 +723,17 @@ def main():
                     else:
                         print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
                     last_approved_cmd[pane_id] = req_cmd
+                    resolve_escalation(pane_id=pane_id)
                 else:
-                    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review.", flush=True)
+                    # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
+                    esc_id = enqueue_pending_escalation(
+                        pane_id=pane_id,
+                        raw_command=req_cmd,
+                        safety_reason=reason,
+                        decision_layer=layer,
+                        agent_kind=agent_kind
+                    )
+                    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}).", flush=True)
                     print(f"   • Pane: {pane_id} ({agent_kind})", flush=True)
                     print(f"   • Layer: {layer}", flush=True)
                     print(f"   • Reason: {reason}", flush=True)
