@@ -560,18 +560,19 @@ def _audit_static_shell_command(
     if cmd_str == "feedback_survey_skip":
         return True, "Auto-skipping CLI feedback survey ([0] Skip)", DecisionLayer.FAST_TRACK_AST
 
-    # 0a. Check AGY File Edit dialog commands (edit_file <path>)
-    if cmd_str.startswith("edit_file "):
-        target_path = cmd_str[len("edit_file "):].strip()
+    # 0a. Check AGY File Edit / Creation dialog commands (edit_file <path>, create_file <path>)
+    if cmd_str.startswith("edit_file ") or cmd_str.startswith("create_file "):
+        op_type = "creation" if cmd_str.startswith("create_file ") else "edit"
+        target_path = cmd_str.split(" ", 1)[1].strip()
         if HERMES_SANDBOX_PATTERN.search(target_path):
-            return False, f"Forbidden file edit targeting Hermes Sandbox: '{target_path}'", DecisionLayer.SANDBOX_GUARD
+            return False, f"Forbidden file {op_type} targeting Hermes Sandbox: '{target_path}'", DecisionLayer.SANDBOX_GUARD
         if SENSITIVE_FILE_PATTERN.search(target_path) and "dot_zshenv.tmpl" not in target_path and ".zshenv.local" not in target_path:
-            return False, f"Attempting to edit sensitive credential file: '{target_path}'", DecisionLayer.SECRET_GUARD
+            return False, f"Attempting to perform file {op_type} on sensitive credential file: '{target_path}'", DecisionLayer.SECRET_GUARD
         # Check gray zone classification for the target path
         gz_tier = classify_resource_tier(target_path)
         if gz_tier == ResourceTier.T4_CRITICAL:
-            return False, f"Critical OS/Secret resource edit blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
-        return True, f"Verified safe file edit: '{target_path}'", DecisionLayer.FAST_TRACK_AST
+            return False, f"Critical OS/Secret resource {op_type} blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
+        return True, f"Verified safe file {op_type}: '{target_path}'", DecisionLayer.FAST_TRACK_AST
 
     # 0b. Check Managed Git command rules if targeting Managed Git host
     if MANAGED_GIT_HOST_PATTERN.search(cmd_str):
