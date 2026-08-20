@@ -295,12 +295,12 @@ def handle_sighup(signum, frame):
 
 
 def verify_module_integrity(module_obj) -> bool:
-    """Verify that Python source file exists, parses to valid AST, contains required guard symbols, and is tracked before reload."""
+    """Verify that Python source file exists, parses to valid AST, is tracked by Git, and matches committed Git HEAD blob hash."""
     try:
         mod_file = getattr(module_obj, "__file__", None)
         if not mod_file:
             return False
-        mod_path = Path(mod_file)
+        mod_path = Path(mod_file).resolve()
         if mod_path.suffix == ".pyc":
             mod_path = mod_path.with_suffix(".py")
         if not mod_path.is_file():
@@ -312,34 +312,42 @@ def verify_module_integrity(module_obj) -> bool:
         # 1. Syntax check
         ast.parse(content)
 
-        # 2. Critical symbol signature verification to prevent null-stubbing attacks
-        mod_name = getattr(module_obj, "__name__", "")
-        if "security_evaluator" in mod_name:
-            if "def audit_shell_command" not in content or "DecisionLayer" not in content:
-                return False
-        elif "guard_db" in mod_name:
-            if "def record_audit_log" not in content or "def init_db" not in content:
-                return False
-        elif "gray_zone_evaluator" in mod_name:
-            if "def evaluate_gray_zone_operation" not in content or "ResourceTier" not in content:
-                return False
+        # 2. Cryptographic SCM Git Blob Verification against committed HEAD
+        parent_dir = mod_path.parent
+        res = subprocess.run(
+            ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        if res.returncode != 0 or res.stdout.strip() != "true":
+            return False
 
-        # 3. SCM Git tracking check if running within a Git workspace
-        try:
-            parent_dir = mod_path.parent
-            res = subprocess.run(
-                ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
-                capture_output=True, text=True, check=False, timeout=1.0
-            )
-            if res.returncode == 0 and res.stdout.strip() == "true":
-                ls_res = subprocess.run(
-                    ["git", "-C", str(parent_dir), "ls-files", str(mod_path.name)],
-                    capture_output=True, text=True, check=False, timeout=1.0
-                )
-                if not ls_res.stdout.strip():
-                    return False
-        except Exception:
-            pass
+        rel_res = subprocess.run(
+            ["git", "-C", str(parent_dir), "ls-files", "--full-name", str(mod_path)],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        rel_path = rel_res.stdout.strip()
+        if not rel_path:
+            return False
+
+        head_blob_res = subprocess.run(
+            ["git", "-C", str(parent_dir), "rev-parse", f"HEAD:{rel_path}"],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        if head_blob_res.returncode != 0:
+            return False
+        head_blob_hash = head_blob_res.stdout.strip()
+
+        file_blob_res = subprocess.run(
+            ["git", "-C", str(parent_dir), "hash-object", str(mod_path)],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        if file_blob_res.returncode != 0:
+            return False
+        file_blob_hash = file_blob_res.stdout.strip()
+
+        # If file has uncommitted tampering / does not match HEAD blob, reject reload
+        if head_blob_hash != file_blob_hash:
+            return False
 
         return True
     except Exception:

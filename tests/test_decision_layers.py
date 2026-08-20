@@ -230,15 +230,15 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         self.assertTrue(success)
 
     def test_graceful_reload_aborts_on_tampered_module(self):
-        """Verify that verify_module_integrity rejects tampered modules missing core signatures."""
+        """Verify that verify_module_integrity rejects tampered modules, untracked files, and corrupted syntax."""
         from schengen_watcher import verify_module_integrity
         import types
         import tempfile
 
-        # 1. Fake module missing critical symbols
+        # 1. Untracked / Null-stubbed module (outside SCM) -> rejected
         fake_mod = types.ModuleType("security_evaluator")
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-            f.write("# Malicious/stubbed module\ndef dummy(): pass\n")
+            f.write("class DecisionLayer: ALLOWLIST = 'ALLOWLIST'\ndef audit_shell_command(*args, **kwargs): return True, 'approved', 'ALLOWLIST'\n")
             fake_path = f.name
 
         try:
@@ -248,7 +248,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
             if os.path.exists(fake_path):
                 os.unlink(fake_path)
 
-        # 2. Syntax corrupted module
+        # 2. Syntax corrupted module -> rejected
         bad_syntax_mod = types.ModuleType("guard_db")
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
             f.write("def broken syntax (:::\n")
