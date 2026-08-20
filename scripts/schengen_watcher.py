@@ -191,14 +191,18 @@ def verify_agy_runtime_environment():
 
 
 def is_parent_alive(initial_ppid: int) -> bool:
-    """Check if the parent process that launched this watcher task is still alive and not reparented to init/launchd."""
-    curr_ppid = os.getppid()
-    if curr_ppid == 1 or curr_ppid != initial_ppid:
-        return False
+    """Check if the parent process or Herdr multiplexer environment is still alive."""
+    if initial_ppid > 1:
+        try:
+            os.kill(initial_ppid, 0)
+            return True
+        except (ProcessLookupError, OSError):
+            pass
+    # Fallback: verify Herdr environment is responsive
     try:
-        os.kill(initial_ppid, 0)
-        return True
-    except (ProcessLookupError, OSError):
+        res = subprocess.run(["herdr", "pane", "list"], capture_output=True, timeout=5)
+        return res.returncode == 0
+    except Exception:
         return False
 
 
@@ -276,6 +280,9 @@ def find_blocked_panes(agent_filter="agy", exclude_panes=None):
                 "Accept this file edit?",
                 "Accept this change?",
                 "Pending edit",
+                "Allow creation of this file?",
+                "Allow creation",
+                "Yes, allow creation",
                 "How's the CLI experience so far?",
                 "[0] Skip",
                 "Press enter to continue",
@@ -288,10 +295,6 @@ def find_blocked_panes(agent_filter="agy", exclude_panes=None):
 
 def parse_permission_request(visible_text):
     """Extract command/script/file-edit/survey from diverse approval dialogs across AGY prompts."""
-    # Pattern 0: CLI Experience Survey / Feedback Dialog ([0] Skip)
-    if "How's the CLI experience so far?" in visible_text or "[0] Skip" in visible_text:
-        return "feedback_survey_skip"
-
     # Pattern 1: Standard AGY Requesting permission dialog
     m1 = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", visible_text)
     if m1:
@@ -309,6 +312,16 @@ def parse_permission_request(visible_text):
             m_file = re.search(r"(/[^\s]+\.[a-zA-Z0-9_\-\.]+)\s+[+-]\d+", visible_text)
         file_path = m_file.group(1).strip() if m_file else "unknown_file"
         return f"edit_file {file_path}"
+
+    # Pattern 3b: AGY File Creation Confirmation Dialog (Allow creation of this file?)
+    if "Allow creation of this file?" in visible_text or "Allow creation" in visible_text or "Yes, allow creation" in visible_text:
+        m_file = re.search(r"WriteToFile\(([^\)]+)\)", visible_text)
+        if not m_file:
+            m_file = re.search(r"Creating file:\s*([^\n\s]+)", visible_text)
+        if not m_file:
+            m_file = re.search(r"(/[^\s]+\.[a-zA-Z0-9_\-\.]+)", visible_text)
+        file_path = m_file.group(1).strip() if m_file else "unknown_file"
+        return f"create_file {file_path}"
 
     # Pattern 4: Do you want to run '...'?
     m3 = re.search(r"Do you want to run\s*['\"`]([\s\S]*?)['\"`]\?", visible_text)
@@ -328,6 +341,11 @@ def parse_permission_request(visible_text):
         bash_match = re.findall(r"●\s*Bash\(([\s\S]*?)\)", visible_text)
         if bash_match:
             return bash_match[-1].strip()
+
+    # Pattern 7: CLI Experience Survey / Feedback Dialog ([0] Skip) strictly checked at the bottom
+    tail_text = "\n".join(visible_text.splitlines()[-15:])
+    if re.search(r"How's the CLI experience so far\?[\s\S]*?\[0\]\s*Skip", tail_text):
+        return "feedback_survey_skip"
 
     return None
 

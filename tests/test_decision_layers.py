@@ -85,6 +85,7 @@ class TestDecisionLayers(unittest.TestCase):
             "defaults read com.apple.finder",
             "feedback_survey_skip",
             "edit_file /Users/kyjbusan/.local/share/chezmoi/dot_zshenv.tmpl",
+            "create_file /Users/kyjbusan/.local/share/chezmoi/docs/adr/ADR-003-destructive-intent.md",
             'git -C ~/.local/share/chezmoi commit -m "fix(zshenv): fix template whitespace newline rendering for secrets"',
         ]
         for cmd in safe_macos_cmds:
