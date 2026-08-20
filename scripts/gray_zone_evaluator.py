@@ -248,15 +248,18 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
     """Parse shell command string to determine OperationType (R, A, W, T, D, M, X, E) and primary target."""
     clean_cmd = cmd_str.strip()
 
+    # Strip quoted strings to avoid false-positive redirection matching on email brackets (<...>) or string literals
+    unquoted_cmd = re.sub(r'([\'"])(?:(?!\1)[^\\]|\\.)*\1', '""', clean_cmd)
+
     # 1. Truncate (> file.ext without >>)
-    if re.search(r"(?<![>12&])>\s*[^>&]+", clean_cmd):
-        match = re.search(r"(?<![>12&])>\s*([^\s>&|]+)", clean_cmd)
+    if re.search(r"(?<![>12&])>\s*[^>&]+", unquoted_cmd):
+        match = re.search(r"(?<![>12&])>\s*([^\s>&|]+)", unquoted_cmd)
         target = match.group(1) if match else None
         return OperationType.TRUNCATE, target
 
     # 2. Append (>> file.ext)
-    if ">>" in clean_cmd:
-        match = re.search(r">>\s*([^\s>&|]+)", clean_cmd)
+    if ">>" in unquoted_cmd:
+        match = re.search(r">>\s*([^\s>&|]+)", unquoted_cmd)
         target = match.group(1) if match else None
         return OperationType.APPEND, target
 

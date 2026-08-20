@@ -68,7 +68,7 @@ FORGEJO_ISSUES_PATTERN = MANAGED_GIT_ISSUES_PATTERN
 
 # 4. Critical Dangerous Shell Commands (Destructive / Elevation / macOS System Guard)
 CRITICAL_SHELL_PATTERNS = [
-    (r"\brm\s+(-[rfRF]+\s+|[^\s]*[rfRF])", "Destructive file deletion (rm -rf)"),
+    (r"(?<!\bgit\s)\brm\s+(-[rfRF]+\s+|[^\s]*[rfRF])", "Destructive file deletion (rm -rf)"),
     (r"\bsudo\b", "Privilege escalation (sudo)"),
     (r"\bsu\b", "User switching (su)"),
     (r"\bchmod\s+[0-7x+rw-]+", "Permission modification (chmod)"),

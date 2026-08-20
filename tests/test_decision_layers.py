@@ -211,6 +211,28 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         lines = tail_state_log(lines=5)
         self.assertIsInstance(lines, list)
 
+    def test_scoped_lock_naming_and_path(self):
+        from schengen_watcher import get_lock_file_path, sanitize_target_name
+        self.assertEqual(sanitize_target_name("wS:pF"), "wS_pF")
+        self.assertEqual(sanitize_target_name("auto"), "auto")
+        self.assertEqual(sanitize_target_name("tab/pane-1"), "tab_pane-1")
+
+        lock_auto = get_lock_file_path("auto")
+        self.assertTrue(str(lock_auto).endswith("schengen_auto.lock"))
+
+        lock_pane = get_lock_file_path("wS:pF")
+        self.assertTrue(str(lock_pane).endswith("schengen_wS_pF.lock"))
+
+    def test_graceful_reload_execution(self):
+        from schengen_watcher import execute_graceful_reload
+        # Calling execute_graceful_reload() should succeed without throwing exceptions
+        try:
+            execute_graceful_reload()
+            reloaded = True
+        except Exception as e:
+            reloaded = False
+        self.assertTrue(reloaded)
+
 
 if __name__ == "__main__":
     unittest.main()
