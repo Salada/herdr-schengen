@@ -117,24 +117,56 @@ class DecisionGuidancePayload:
     reason: str
 
 
-def is_git_clean_and_committed(path: Path) -> bool:
-    """Check if the path resides in a git repository and has a clean, committed working tree."""
+def is_inside_git_work_tree(path: Path) -> bool:
+    """Check if the path or any of its existing ancestors resides inside a Git repository work tree."""
     try:
-        target_dir = path if path.is_dir() else path.parent
-        if not target_dir.exists():
+        cur = path if path.is_dir() else path.parent
+        while cur != cur.parent:
+            if cur.exists():
+                if (cur / ".git").exists():
+                    return True
+                res = subprocess.run(
+                    ["git", "-C", str(cur), "rev-parse", "--is-inside-work-tree"],
+                    capture_output=True, text=True, check=False
+                )
+                if res.returncode == 0 and res.stdout.strip() == "true":
+                    return True
+            cur = cur.parent
+        return False
+    except Exception:
+        return False
+
+
+def is_git_clean_and_committed(path: Path) -> bool:
+    """Check if the path resides in a git repository and has a clean, committed working tree.
+    
+    If the target file does not exist yet but resides in a Git repository work-tree,
+    it represents a new file creation within a version-controlled workspace (T2).
+    """
+    try:
+        cur = path if path.is_dir() else path.parent
+        # Find nearest existing directory ancestor
+        while not cur.exists() and cur != cur.parent:
+            cur = cur.parent
+
+        if not cur.exists():
             return False
-        
+
         # Check if inside git work tree
         is_git = subprocess.run(
-            ["git", "-C", str(target_dir), "rev-parse", "--is-inside-work-tree"],
+            ["git", "-C", str(cur), "rev-parse", "--is-inside-work-tree"],
             capture_output=True, text=True, check=False
         )
         if is_git.returncode != 0 or is_git.stdout.strip() != "true":
             return False
 
-        # Check working tree status for the target path
+        # If file does not exist yet, creating it inside a git work tree is safe version-controlled workflow (T2)
+        if not path.exists():
+            return True
+
+        # Check working tree status for existing target path
         status = subprocess.run(
-            ["git", "-C", str(target_dir), "status", "--porcelain", str(path)],
+            ["git", "-C", str(cur), "status", "--porcelain", str(path)],
             capture_output=True, text=True, check=False
         )
         # If porcelain status is empty, it is clean and committed
@@ -225,7 +257,7 @@ def classify_resource_tier(target_str: str, context: Optional[Dict] = None) -> R
     if "/.local/share/chezmoi" in canon_str:
         return ResourceTier.T2_VERSION_CONTROLLED
 
-    if canon.exists() and is_git_clean_and_committed(canon):
+    if is_git_clean_and_committed(canon):
         return ResourceTier.T2_VERSION_CONTROLLED
 
     # 7. Durable Gray Zone Assets (T3)

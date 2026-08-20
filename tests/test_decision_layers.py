@@ -233,6 +233,13 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
             reloaded = False
         self.assertTrue(reloaded)
 
+    def test_new_file_creation_in_git_repo_fast_track(self):
+        """Verify that creating a new file in a git repo via redirection (cat << 'EOF' > new_file) is classified as T2 Fast-Track."""
+        cmd = "cat << 'EOF' > ~/code/herdr-schengen/docs/adr-999-unit-test-creation.md\n# Test ADR\nEOF"
+        safe, reason, layer = audit_shell_command(cmd)
+        self.assertTrue(safe)
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
 
 if __name__ == "__main__":
     unittest.main()
