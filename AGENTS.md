@@ -34,6 +34,10 @@
    - ❌ **Never** stack multiple concurrent tasks or PR revisions directly in the default `~/code/herdr-schengen/` working tree.
    - ✅ **Always** spawn a dedicated worktree (`git worktree add -b feat/<name> ~/code/herdr-schengen-worktrees/<name> main`) for each new feature/PR to eliminate cross-PR file pollution, diff collision, and reviewer confusion.
 
+7. **Proactive Escalation Polling & Idle Defense Mandate**:
+   - ❌ **Never** remain passive when worker panes are actively executing long-running or potentially dangerous workflows.
+   - ✅ **Always** arm a proactive wakeup heartbeat timer (`schedule DurationSeconds=120, TimerCondition="any"`) before entering idle state, and drain the SQLite queue (`schengen_history.py --pending`) upon every wake turn to ensure blocked escalations are surfaced immediately.
+
 ---
 
 ## 🗺️ 2. Architecture & Decision Records (ADR SSOT)

@@ -76,6 +76,18 @@ python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --stop
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --stats
 ```
 
+### 8. Proactive Escalation Heartbeat & Drain Rule (Agent Skill Directive)
+> **🚨 Proactive Escalation Polling & Idle Defense Mandate**:
+> - **Idle Wakeup Timer via `schedule` tool**: Whenever an orchestrator AGY session enters an idle or long-waiting phase while other sibling/worker panes (`dev`, `wS:pF`) are active, the agent **MUST arm a periodic or one-shot heartbeat timer** using the native agent tool:
+>   ```json
+>   schedule(DurationSeconds=120, Prompt="Check pending escalations queue and drain blocked panes", TimerCondition="any")
+>   ```
+> - **Turn-Start Queue Drain Hook**: At the beginning of **EVERY** turn or timer wakeup, the agent MUST execute:
+>   ```bash
+>   python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --pending
+>   ```
+> - **Immediate Delegation**: If any active `PENDING` escalation is discovered for a living session, the agent must immediately evaluate and prompt the human / auto-resolve rather than waiting passively.
+
 ---
 
 ## 🧭 Core Governance Architecture & Decision Layers
