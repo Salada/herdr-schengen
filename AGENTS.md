@@ -30,6 +30,10 @@
 5. **Bot Git Attribution Policy**:
    - Always commit using `bot-agy-macmini <bot-agy-macmini@noreply.localhost>` and include required trailers (`Co-authored-by`, `Agent`, `Op`, `Effort`).
 
+6. **Mandatory Isolated Worktree & Feature Branch Mandate**:
+   - ❌ **Never** stack multiple concurrent tasks or PR revisions directly in the default `~/code/herdr-schengen/` working tree.
+   - ✅ **Always** spawn a dedicated worktree (`git worktree add -b feat/<name> ~/code/herdr-schengen-worktrees/<name> main`) for each new feature/PR to eliminate cross-PR file pollution, diff collision, and reviewer confusion.
+
 ---
 
 ## 🗺️ 2. Architecture & Decision Records (ADR SSOT)
