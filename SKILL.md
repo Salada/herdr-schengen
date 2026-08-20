@@ -76,11 +76,13 @@ python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --stop
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --stats
 ```
 
-### 8. Proactive Escalation Heartbeat & Drain Rule (Agent Skill Directive)
-> **🚨 Proactive Escalation Polling & Idle Defense Mandate**:
-> - **Idle Wakeup Timer via `schedule` tool**: Whenever an orchestrator AGY session enters an idle or long-waiting phase while other sibling/worker panes (`dev`, `wS:pF`) are active, the agent **MUST arm a periodic or one-shot heartbeat timer** using the native agent tool:
+### 8. Proactive Escalation Heartbeat & Exponential Drain Rule (Agent Skill Directive)
+> **🚨 Proactive Escalation Polling & Exponential Idle Defense Mandate**:
+> - **Exponential Wakeup Timer via `schedule` tool**: Whenever an orchestrator AGY session enters an idle phase while waiting for sibling/worker panes (`dev`, `wS:pF`), the agent **MUST arm a heartbeat timer** using the native agent tool with exponential intervals:
+>   - **Interval Progression**: `60s` $\rightarrow$ `60s` $\rightarrow$ `120s` $\rightarrow$ `240s` $\rightarrow$ `360s` $\rightarrow$ ... (Exponential Backoff with upper cap of **30 minutes / 1800s**).
+>   - **Reset on Event**: Any detected escalation, user message, or worker activity resets the heartbeat interval back to `60s`.
 >   ```json
->   schedule(DurationSeconds=120, Prompt="Check pending escalations queue and drain blocked panes", TimerCondition="any")
+>   schedule(DurationSeconds=60, Prompt="Check pending escalations queue and drain blocked panes", TimerCondition="any")
 >   ```
 > - **Turn-Start Queue Drain Hook**: At the beginning of **EVERY** turn or timer wakeup, the agent MUST execute:
 >   ```bash
