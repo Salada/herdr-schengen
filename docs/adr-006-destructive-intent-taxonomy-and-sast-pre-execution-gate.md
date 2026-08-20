@@ -4,7 +4,15 @@
 - **Date**: 2026-08-21
 - **Deciders**: SaladaQoo (Human Lead), Antigravity (AGY Orchestrator), Hermes DevOps Lead (`devops-hermes`), Hermes CISO (`ciso-hermes`)
 - **Consulted**: `ciso-reviewer`, `devops-reviewer`, `english-reviewer`
-- **Related Documents**: `ADR-001`, `ADR-002`, `ADR-003`, `ADR-004`, `ADR-005`, `AGENTS.md` (Rules 10-13), `SOP-11`, `SOP-12`
+- **Related Documents**:
+  - [ADR-001: Runtime & Architecture Selection](./adr-001-runtime-architecture-python-vs-go.md)
+  - [ADR-002: Dynamic Tool-Calling Semantic Inspector](./adr-002-dynamic-substitution-tool-calling-inspector.md)
+  - [ADR-003: AGY Native Task Integration](./adr-003-agy-native-task-integration-and-singleton-governance.md)
+  - [ADR-004: Non-VCS Irreversible Mutation Governance](./adr-004-non-vcs-irreversible-mutation-governance.md)
+  - [ADR-005: Autonomous Orchestration & Deadlock Defense](./adr-005-autonomous-orchestration-and-deadlock-defense.md)
+  - [AGENTS.md (OrgManaged/dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/AGENTS.md) (Rules 10-13)
+  - [SOP-11: Unbiased Peer Review Protocol (dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/dot_agents/rules/sops/sop-11-unbiased-peer-review-protocol.md)
+  - [SOP-12: Non-VCS Irreversible Mutation Governance (dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/dot_agents/rules/sops/sop-12-non-vcs-gray-zone-governance.md)
 
 ---
 
@@ -138,6 +146,7 @@ Replaces flat intent tagging with an **Origin × Consequence + Mechanism** 3-axi
 ---
 
 ## 6. References
-- `ADR-004: Non-VCS Irreversible Mutation Governance`
-- `ADR-005: Autonomous Multi-Agent Orchestration & Deadlock Defense Protocol`
-- `AGENTS.md: Rules 10-13`
+- [ADR-004: Non-VCS Irreversible Mutation Governance](./adr-004-non-vcs-irreversible-mutation-governance.md)
+- [ADR-005: Autonomous Multi-Agent Orchestration & Deadlock Defense Protocol](./adr-005-autonomous-orchestration-and-deadlock-defense.md)
+- [AGENTS.md (OrgManaged/dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/AGENTS.md)
+- [SOP-12: Non-VCS Irreversible Mutation Governance (dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/dot_agents/rules/sops/sop-12-non-vcs-gray-zone-governance.md)
