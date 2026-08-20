@@ -62,7 +62,7 @@ In a multi-agent Herdr multiplexer environment, multiple AGY agent sessions oper
 
 ## 📜 6. References & Cross-Links
 
-- [ADR-003: AGY Native Task Integration & Singleton Governance](file:///Users/kyjbusan/code/herdr-schengen/docs/adr-003-agy-native-task-integration-and-singleton-governance.md)
-- [ADR-004: Non-VCS Irreversible Mutation Governance](file:///Users/kyjbusan/code/herdr-schengen/docs/adr-004-non-vcs-irreversible-mutation-governance.md)
-- [ADR-006: Destructive Intent Taxonomy & Hybrid SAST Pre-Execution Gate](file:///Users/kyjbusan/code/herdr-schengen/docs/adr-006-destructive-intent-taxonomy-and-sast-pre-execution-gate.md)
-- [Herdr Schengen SKILL.md](file:///Users/kyjbusan/.agents/skills/herdr-schengen/SKILL.md)
+- [ADR-003: AGY Native Task Integration & Singleton Governance](./adr-003-agy-native-task-integration-and-singleton-governance.md)
+- [ADR-004: Non-VCS Irreversible Mutation Governance](./adr-004-non-vcs-irreversible-mutation-governance.md)
+- [ADR-006: Destructive Intent Taxonomy & Hybrid SAST Pre-Execution Gate](./adr-006-destructive-intent-taxonomy-and-sast-pre-execution-gate.md)
+- [Herdr Schengen SKILL.md](../SKILL.md)

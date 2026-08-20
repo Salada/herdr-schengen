@@ -4,7 +4,10 @@
 - **Date**: 2026-08-19
 - **Deciders**: SaladaQoo (Human Lead), Antigravity (AGY Commander), Hermes (Governance Reviewer)
 - **Consulted**: `ciso-reviewer`, `devops-reviewer`, `english-reviewer`
-- **Related Documents**: `AGENTS.md` (Rules 10-13), `SOP-11`, `salada-git-forgejo-policy.md`
+- **Related Documents**:
+  - [AGENTS.md (OrgManaged/dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/AGENTS.md) (Rules 10-13)
+  - [SOP-11: Unbiased Peer Review Protocol (dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/dot_agents/rules/sops/sop-11-unbiased-peer-review-protocol.md)
+  - [salada-git-forgejo-policy.md (common-llm-wiki)](http://192.168.10.102:3000/OrgManaged/common-llm-wiki/src/branch/main/docs/salada-git-forgejo-policy.md)
 
 ---
 
