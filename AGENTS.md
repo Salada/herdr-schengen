@@ -14,7 +14,9 @@
    - Do not create external documentation dependencies or hard-link assumptions to other repositories.
 
 2. **Dual-Sync Contract with Runtime Skills**:
-   - When modifying files in `~/code/herdr-schengen/` (scripts, docs, SKILL.md), always mirror them to `~/.agents/skills/herdr-schengen/` and `~/.gemini/skills/herdr-schengen/`.
+   - The source Git repository (`~/code/herdr-schengen/`) is the absolute SSOT.
+   - When modifying files (scripts, docs, SKILL.md), always write, test, and commit them in `~/code/herdr-schengen/`, then mirror to `~/.agents/skills/herdr-schengen/` and `~/.gemini/skills/herdr-schengen/`.
+   - **Ephemeral Runtime Testing**: Live debugging directly in `~/.agents/skills/` is permitted only for immediate hypothesis verification, but final code must be authored, tested, and committed inside `~/code/herdr-schengen/` (never blind reverse-copied).
 
 3. **In-Process Graceful Reload via SIGHUP (0ms Downtime)**:
    - When modifying rule sets or evaluators, do NOT kill the daemon process. Use `python3 scripts/schengen_watcher.py --reload` to trigger an instant in-process hot reload via `importlib.reload()` and `SIGHUP`.
