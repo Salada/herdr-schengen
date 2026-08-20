@@ -329,13 +329,37 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         self.assertEqual(tax_crit["gate_state"], GateState.ENFORCE.value)
         self.assertFalse(tax_crit["shadow_mode"])
 
+        # 1b. Destructive git rm -> Consequence.DESTRUCTION
+        safe_grm, reason_grm, layer_grm, tax_grm = audit_shell_command_with_taxonomy("git rm -rf src/")
+        self.assertFalse(safe_grm)
+        self.assertEqual(tax_grm["consequence"], Consequence.DESTRUCTION.value)
+        self.assertEqual(tax_grm["mechanism"], "git-destructive")
+
         # 2. Secret reading -> Consequence.EXFILTRATION
         safe_sec, reason_sec, layer_sec, tax_sec = audit_shell_command_with_taxonomy("cat .env")
         self.assertFalse(safe_sec)
         self.assertEqual(tax_sec["consequence"], Consequence.EXFILTRATION.value)
         self.assertEqual(tax_sec["mechanism"], "secret-path")
 
-        # 3. Benign command -> Consequence.NONE
+        # 3. Privilege escalation -> Consequence.PERSISTENCE
+        safe_sudo, reason_sudo, layer_sudo, tax_sudo = audit_shell_command_with_taxonomy("sudo whoami")
+        self.assertFalse(safe_sudo)
+        self.assertEqual(tax_sudo["consequence"], Consequence.PERSISTENCE.value)
+        self.assertEqual(tax_sudo["mechanism"], "privilege-escalation")
+
+        # 4. Permission mutation -> Consequence.INTEGRITY
+        safe_chmod, reason_chmod, layer_chmod, tax_chmod = audit_shell_command_with_taxonomy("chmod 777 /tmp/script.sh")
+        self.assertFalse(safe_chmod)
+        self.assertEqual(tax_chmod["consequence"], Consequence.INTEGRITY.value)
+        self.assertEqual(tax_chmod["mechanism"], "perm-mutation")
+
+        # 5. Fork bomb / DoS -> Consequence.AVAILABILITY
+        safe_dos, reason_dos, layer_dos, tax_dos = audit_shell_command_with_taxonomy(":(){ :|:& };:")
+        self.assertFalse(safe_dos)
+        self.assertEqual(tax_dos["consequence"], Consequence.AVAILABILITY.value)
+        self.assertEqual(tax_dos["mechanism"], "dos-fork-bomb")
+
+        # 6. Benign command -> Consequence.NONE
         safe_ok, reason_ok, layer_ok, tax_ok = audit_shell_command_with_taxonomy("git status")
         self.assertTrue(safe_ok)
         self.assertEqual(tax_ok["consequence"], Consequence.NONE.value)

@@ -69,6 +69,7 @@ FORGEJO_ISSUES_PATTERN = MANAGED_GIT_ISSUES_PATTERN
 # 4. Critical Dangerous Shell Commands (Destructive / Elevation / macOS System Guard)
 CRITICAL_SHELL_PATTERNS = [
     (r"(?<!\bgit\s)\brm\s+(-[rfRF]+\s+|[^\s]*[rfRF])", "Destructive file deletion (rm -rf)"),
+    (r"\bgit\s+rm\s+(?!.*--cached)(-[rfRF]+\s+|[^\s]*[rfRF])", "Destructive Git rm on working tree"),
     (r"\bsudo\b", "Privilege escalation (sudo)"),
     (r"\bsu\b", "User switching (su)"),
     (r"\bchmod\s+[0-7x+rw-]+", "Permission modification (chmod)"),
@@ -76,6 +77,7 @@ CRITICAL_SHELL_PATTERNS = [
     (r"\bgit\s+push(\s+--force|\s+-f)?\b", "Remote Git push / overwrite"),
     (r"\bgit\s+reset\s+--hard\b", "Destructive Git reset"),
     (r"\bgit\s+clean\s+-[fF]", "Destructive Git clean"),
+    (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Denial of Service / Fork bomb"),
     # Disk, Volume, & Filesystem Manipulation (Linux & macOS)
     (
         r"\bdiskutil\s+(eraseVolume|eraseDisk|partitionDisk|reformat|zeroDisk|randomDisk|secureErase|splitPartition|mergePartitions|apfs\s+(deleteVolume|deleteContainer|deleteSnapshot|eraseVolume)|cs\s+delete|appleRAID\s+delete)\b|"
@@ -713,51 +715,104 @@ def derive_taxonomy(
     reason: str,
     origin: Origin = Origin.AGENT
 ) -> Dict[str, Any]:
-    """Derive 2D Taxonomy (Origin x Consequence + Mechanism) from evaluation result."""
+    """Derive 2D Taxonomy (Origin x Consequence + Mechanism) from evaluation result.
+    
+    Origin:
+      - 'H' (Human): User-persisted allowlist bypass or explicit human prompt
+      - 'A' (Agent): Default autonomous agent execution in terminal
+      - 'I' (Injected): Reserved for Layer 6 LLM Inspector & adversarial prompt injection
+      - 'E' (Emergent): Reserved for Phase 1 SAST Scoped ShellCheck (unbound variables)
+      
+    Consequence:
+      - 'NONE': Safe benign operations
+      - 'DEST': File/directory deletion, disk formatting, git reset --hard
+      - 'EXFIL': Credential egress, sensitive file reading, unauthorized network push
+      - 'INT': Permission modification (chmod/chown), SIP mutation, sandbox tampering
+      - 'AVAIL': Fork bomb, network disruption, system process termination
+      - 'PERS': Sudo elevation, user account creation/deletion
+    """
     shadow = is_shadow_mode()
     gate_state = GateState.OBSERVE if shadow else GateState.ENFORCE
 
-    # Determine Consequence
-    if layer in (DecisionLayer.SHELL_CRITICAL,):
-        consequence = Consequence.DESTRUCTION
-    elif layer in (DecisionLayer.SECRET_GUARD,):
+    # Determine Consequence and Mechanism with pattern-level precision
+    if is_safe:
+        consequence = Consequence.NONE
+        mechanism = "user-allowlist" if layer == DecisionLayer.ALLOWLIST else "fast-track-verified"
+        if layer == DecisionLayer.ALLOWLIST:
+            origin = Origin.HUMAN
+    elif layer == DecisionLayer.SECRET_GUARD:
         consequence = Consequence.EXFILTRATION
-    elif layer in (DecisionLayer.SANDBOX_GUARD, DecisionLayer.PYTHON_AST):
+        mechanism = "secret-path"
+    elif layer == DecisionLayer.SANDBOX_GUARD:
         consequence = Consequence.INTEGRITY
-    elif layer in (DecisionLayer.GRAY_ZONE_MATRIX,):
+        mechanism = "sandbox-write"
+    elif layer == DecisionLayer.PYTHON_AST:
+        if "external" in reason.lower() or "network" in reason.lower():
+            consequence = Consequence.EXFILTRATION
+            mechanism = "python-network"
+        else:
+            consequence = Consequence.INTEGRITY
+            mechanism = "python-ast"
+    elif layer == DecisionLayer.GRAY_ZONE_MATRIX:
+        if "DELETE" in reason or "rm " in cmd_str:
+            consequence = Consequence.DESTRUCTION
+            mechanism = "gray-zone-delete"
+        elif "TRUNCATE" in reason:
+            consequence = Consequence.DESTRUCTION
+            mechanism = "gray-zone-truncate"
+        elif "READ" in reason:
+            consequence = Consequence.EXFILTRATION
+            mechanism = "gray-zone-read"
+        elif "MUTATING_API" in reason:
+            consequence = Consequence.INTEGRITY
+            mechanism = "gray-zone-api"
+        elif "HEAVY_EXEC" in reason:
+            consequence = Consequence.AVAILABILITY
+            mechanism = "gray-zone-exec"
+        else:
+            consequence = Consequence.DESTRUCTION
+            mechanism = "non-vcs-gray-zone"
+    elif layer == DecisionLayer.MANAGED_GIT_GUARD:
+        if "DELETE" in reason or "DELETE" in cmd_str:
+            consequence = Consequence.DESTRUCTION
+            mechanism = "git-api-delete"
+        else:
+            consequence = Consequence.INTEGRITY
+            mechanism = "git-api-mutation"
+    elif layer == DecisionLayer.SHELL_CRITICAL:
+        if re.search(r"\b(sudo|su)\b", cmd_str, re.IGNORECASE):
+            consequence = Consequence.PERSISTENCE
+            mechanism = "privilege-escalation"
+        elif re.search(r"\b(chmod|chown)\b", cmd_str, re.IGNORECASE):
+            consequence = Consequence.INTEGRITY
+            mechanism = "perm-mutation"
+        elif re.search(r"\b(csrutil|spctl|bputil|nvram|bless)\b", cmd_str, re.IGNORECASE):
+            consequence = Consequence.INTEGRITY
+            mechanism = "firmware-sip-mutation"
+        elif re.search(r"\b(dscl|sysadminctl)\b", cmd_str, re.IGNORECASE):
+            consequence = Consequence.PERSISTENCE
+            mechanism = "user-account-mutation"
+        elif re.search(r"\b(pfctl|networksetup)\b", cmd_str, re.IGNORECASE):
+            consequence = Consequence.AVAILABILITY
+            mechanism = "network-disruption"
+        elif re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", cmd_str) or re.search(r"\b(killall|pkill)\s+-9\s+(launchd|init|systemd|Dock|Finder)", cmd_str):
+            consequence = Consequence.AVAILABILITY
+            mechanism = "dos-fork-bomb"
+        elif re.search(r"\bgit\s+(push\s+--force|reset\s+--hard|clean\s+-[fF]|rm\s+-[rfRF]+)", cmd_str):
+            consequence = Consequence.DESTRUCTION
+            mechanism = "git-destructive"
+        elif re.search(r"\b(diskutil\s+(erase|partition|zero)|mkfs|dd|gpt\s+destroy|asr\s+restore|tmutil\s+delete)", cmd_str):
+            consequence = Consequence.DESTRUCTION
+            mechanism = "disk-format-wipe"
+        else:
+            consequence = Consequence.DESTRUCTION
+            mechanism = "rm-rf"
+    elif layer == DecisionLayer.LLM_INSPECTOR:
         consequence = Consequence.DESTRUCTION
-    elif layer in (DecisionLayer.MANAGED_GIT_GUARD,):
-        consequence = Consequence.DESTRUCTION if "DELETE" in reason else Consequence.NONE
-    elif layer in (DecisionLayer.ALLOWLIST,):
-        consequence = Consequence.NONE
-        origin = Origin.HUMAN
-    elif is_safe:
-        consequence = Consequence.NONE
+        mechanism = "subshell-substitution"
     else:
         consequence = Consequence.DESTRUCTION
-
-    # Determine Mechanism
-    mechanism = "none"
-    if "rm -rf" in reason or "rm -r" in cmd_str:
-        mechanism = "rm-rf"
-    elif "sudo" in reason or "su " in cmd_str:
-        mechanism = "sudo"
-    elif "chmod" in reason or "chown" in reason:
-        mechanism = "perm-mutation"
-    elif "git push" in reason or "git reset" in reason:
-        mechanism = "git-mutation"
-    elif "Dynamic substitution" in reason or "$(" in cmd_str:
-        mechanism = "subshell-substitution"
-    elif "sensitive credential" in reason or ".env" in cmd_str:
-        mechanism = "secret-path"
-    elif "Sandbox" in reason:
-        mechanism = "sandbox-write"
-    elif "Python" in reason or "python" in cmd_str:
-        mechanism = "python-ast"
-    elif "Gray-Zone" in reason:
-        mechanism = "non-vcs-gray-zone"
-    elif is_safe:
-        mechanism = "fast-track-verified"
+        mechanism = "none"
 
     return {
         "origin": origin.value if isinstance(origin, Origin) else str(origin),

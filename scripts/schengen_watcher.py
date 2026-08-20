@@ -15,6 +15,7 @@ Key Architecture:
 """
 
 import argparse
+import ast
 import fcntl
 import json
 import os
@@ -293,27 +294,59 @@ def handle_sighup(signum, frame):
     _RELOAD_REQUESTED = True
 
 
-def execute_graceful_reload():
-    """Dynamically reload evaluator modules and rulesets in-place without restarting process."""
-    global gray_zone_evaluator, security_evaluator
-    global audit_shell_command, audit_python_code, sanitize_output, DecisionLayer
+def verify_module_integrity(module_obj) -> bool:
+    """Verify that Python source file exists, is non-empty, and parses to valid AST before reload."""
     try:
+        mod_file = getattr(module_obj, "__file__", None)
+        if not mod_file:
+            return False
+        mod_path = Path(mod_file)
+        if mod_path.suffix == ".pyc":
+            mod_path = mod_path.with_suffix(".py")
+        if not mod_path.is_file():
+            return False
+        content = mod_path.read_text(encoding="utf-8")
+        if not content.strip():
+            return False
+        ast.parse(content)
+        return True
+    except Exception:
+        return False
+
+
+def execute_graceful_reload():
+    """Dynamically reload evaluator modules and rulesets in-place with AST integrity verification."""
+    global gray_zone_evaluator, security_evaluator
+    global audit_shell_command, audit_shell_command_with_taxonomy, derive_taxonomy, audit_python_code, sanitize_output, DecisionLayer
+    try:
+        # Pre-reload AST integrity verification
+        for mod in (guard_db, gray_zone_evaluator, security_evaluator):
+            if not verify_module_integrity(mod):
+                print(f"🛑 [GRACEFUL_RELOAD_ABORTED] Module integrity/AST verification failed for {getattr(mod, '__name__', str(mod))}. Rejecting reload.", flush=True)
+                return False
+
         importlib.reload(guard_db)
         importlib.reload(gray_zone_evaluator)
         importlib.reload(security_evaluator)
         from security_evaluator import (
             audit_shell_command as _asc,
+            audit_shell_command_with_taxonomy as _asct,
+            derive_taxonomy as _dt,
             audit_python_code as _apc,
             sanitize_output as _so,
             DecisionLayer as _dl
         )
         audit_shell_command = _asc
+        audit_shell_command_with_taxonomy = _asct
+        derive_taxonomy = _dt
         audit_python_code = _apc
         sanitize_output = _so
         DecisionLayer = _dl
         print(f"✨ [GRACEFUL_RELOAD] Successfully reloaded guard modules and rulesets in-process at {datetime.now(timezone.utc).isoformat()}.", flush=True)
+        return True
     except Exception as e:
         print(f"⚠️  [GRACEFUL_RELOAD_ERROR] Failed to reload modules: {e}", flush=True)
+        return False
 
 
 def verify_agy_runtime_environment():
