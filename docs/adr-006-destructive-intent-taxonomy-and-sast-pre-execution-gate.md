@@ -10,9 +10,6 @@
   - [ADR-003: AGY Native Task Integration](./adr-003-agy-native-task-integration-and-singleton-governance.md)
   - [ADR-004: Non-VCS Irreversible Mutation Governance](./adr-004-non-vcs-irreversible-mutation-governance.md)
   - [ADR-005: Autonomous Orchestration & Deadlock Defense](./adr-005-autonomous-orchestration-and-deadlock-defense.md)
-  - [AGENTS.md (OrgManaged/dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/AGENTS.md) (Rules 10-13)
-  - [SOP-11: Unbiased Peer Review Protocol (dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/dot_agents/rules/sops/sop-11-unbiased-peer-review-protocol.md)
-  - [SOP-12: Non-VCS Irreversible Mutation Governance (dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/dot_agents/rules/sops/sop-12-non-vcs-gray-zone-governance.md)
 
 ---
 
@@ -146,7 +143,7 @@ Replaces flat intent tagging with an **Origin × Consequence + Mechanism** 3-axi
 ---
 
 ## 6. References
+- [ADR-003: AGY Native Task Integration & Singleton Governance](./adr-003-agy-native-task-integration-and-singleton-governance.md)
 - [ADR-004: Non-VCS Irreversible Mutation Governance](./adr-004-non-vcs-irreversible-mutation-governance.md)
 - [ADR-005: Autonomous Multi-Agent Orchestration & Deadlock Defense Protocol](./adr-005-autonomous-orchestration-and-deadlock-defense.md)
-- [AGENTS.md (OrgManaged/dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/AGENTS.md)
-- [SOP-12: Non-VCS Irreversible Mutation Governance (dotfiles)](http://192.168.10.102:3000/OrgManaged/dotfiles/src/branch/main/dot_agents/rules/sops/sop-12-non-vcs-gray-zone-governance.md)
+- [ADR-007: Graceful Dynamic Reload & Target-Scoped Lockfiles](./adr-007-graceful-dynamic-reload-and-target-scoped-lockfiles.md)
