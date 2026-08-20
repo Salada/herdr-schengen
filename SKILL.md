@@ -15,14 +15,22 @@ description: Herdr Schengen (SmartGate) - Autonomous border-free flow with stric
 
 ## 🚀 Quick Start & AGY Execution Models
 
-### 1. AGY-Native Clearance (Method A, Primary Model)
-When invoked within an AGY session, `schengen_watcher.py` runs as a streaming background task holding the single-session authority (`fcntl.flock` on `schengen.lock`). Safe commands are cleared instantly via 1ms AST, while intercepted border risks stream directly to the AGY session for conversational escalation.
+### 1. AGY-Native Session Clearance & Auto-Recovery Mandate (Method A, Primary Model)
+> **🚨 Mandatory Session-Bound Governance (ADR-003 / SOP-13)**:
+> - **Session-Bound Lifetime**: Schengen watcher **MUST** run as a tracked background task (`run_command` / `task-<id>`) directly within the orchestrating **AGY agent session**. It must never run detached or orphaned.
+> - **Proactive Auto-Recovery**: Whenever the watcher daemon terminates (due to crash, patch reload, or task completion), the active AGY agent session **MUST immediately re-launch the daemon** (`--target auto`) before proceeding with other work.
+> - **Graceful Dynamic Reload**: When patching code or updating rulesets, **NEVER** kill the daemon. Always invoke `python3 .../schengen_watcher.py --reload` to trigger in-process `SIGHUP` reload via `importlib.reload()`.
+
 ```bash
-# Main command (AGY-native streaming mode)
+# Main command (AGY-native streaming background task mode)
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto
 
-# Alias command
-python3 ~/.agents/skills/herdr-schengen/scripts/trusted_clearance.py --target auto
+# In-process graceful hot reload (Zero downtime, no daemon restart)
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload
+
+# Target-specific graceful reload or stop
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload --target wS:pF
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --stop --target wS:pF
 ```
 
 ### 2. Enable Private Tool-Calling Semantic Inspector
