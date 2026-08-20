@@ -30,6 +30,7 @@ from gray_zone_evaluator import (
     OperationType,
     classify_resource_tier,
 )
+from shellcheck_evaluator import audit_shell_with_shellcheck
 
 # 1. Sensitive file patterns (Secrets & Credentials)
 SEP = r"(^|[\s/\"'@:=])"
@@ -567,10 +568,11 @@ def is_shadow_mode() -> bool:
 
 
 class DecisionLayer(str, Enum):
-    """Standard 9 inspection layers for Herdr Schengen (SmartGate)."""
+    """Standard inspection layers for Herdr Schengen (SmartGate)."""
     ALLOWLIST = "ALLOWLIST"                   # Layer 0: User-persisted allowlist regex
     MANAGED_GIT_GUARD = "MANAGED_GIT_GUARD"   # Layer 1: Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) policy
     FORGEJO_GUARD = "MANAGED_GIT_GUARD"       # Layer 1 (Alias for backward compatibility)
+    SAST_SHELLCHECK = "SAST_SHELLCHECK"       # Layer 2a: SAST ShellCheck variable hazard pre-filter (SC2115, SC2154)
     SHELL_CRITICAL = "SHELL_CRITICAL"         # Layer 2: Critical destructive shell operations (rm -rf, sudo, git reset --hard)
     SANDBOX_GUARD = "SANDBOX_GUARD"           # Layer 3: Hermes Docker/microVM Sandbox write isolation
     PYTHON_AST = "PYTHON_AST"                 # Layer 4: Python static AST analysis (eval/exec, opens, subprocess writes)
@@ -629,6 +631,11 @@ def _audit_static_shell_command(
         safe, reason = audit_python_code(py_code)
         if not safe:
             return False, f"Python -c inline risk: {reason}", DecisionLayer.PYTHON_AST
+
+    # 1b. Check ShellCheck SAST for variable hazards (SC2115, SC2154)
+    sc_safe, sc_reason, sc_details = audit_shell_with_shellcheck(cmd_str)
+    if not sc_safe:
+        return False, sc_reason, DecisionLayer.SAST_SHELLCHECK
 
     # 2. Check critical destructive patterns
     for pat, desc in CRITICAL_SHELL_PATTERNS:
@@ -779,6 +786,13 @@ def derive_taxonomy(
         else:
             consequence = Consequence.INTEGRITY
             mechanism = "git-api-mutation"
+    elif layer == DecisionLayer.SAST_SHELLCHECK:
+        consequence = Consequence.DESTRUCTION
+        origin = Origin.EMERGENT
+        if "SC2115" in reason or "2115" in reason:
+            mechanism = "unbound-variable-sc2115"
+        else:
+            mechanism = "unbound-variable-sc2154"
     elif layer == DecisionLayer.SHELL_CRITICAL:
         if re.search(r"\b(sudo|su)\b", cmd_str, re.IGNORECASE):
             consequence = Consequence.PERSISTENCE
