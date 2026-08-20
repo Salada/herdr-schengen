@@ -117,24 +117,56 @@ class DecisionGuidancePayload:
     reason: str
 
 
-def is_git_clean_and_committed(path: Path) -> bool:
-    """Check if the path resides in a git repository and has a clean, committed working tree."""
+def is_inside_git_work_tree(path: Path) -> bool:
+    """Check if the path or any of its existing ancestors resides inside a Git repository work tree."""
     try:
-        target_dir = path if path.is_dir() else path.parent
-        if not target_dir.exists():
+        cur = path if path.is_dir() else path.parent
+        while cur != cur.parent:
+            if cur.exists():
+                if (cur / ".git").exists():
+                    return True
+                res = subprocess.run(
+                    ["git", "-C", str(cur), "rev-parse", "--is-inside-work-tree"],
+                    capture_output=True, text=True, check=False
+                )
+                if res.returncode == 0 and res.stdout.strip() == "true":
+                    return True
+            cur = cur.parent
+        return False
+    except Exception:
+        return False
+
+
+def is_git_clean_and_committed(path: Path) -> bool:
+    """Check if the path resides in a git repository and has a clean, committed working tree.
+    
+    If the target file does not exist yet but resides in a Git repository work-tree,
+    it represents a new file creation within a version-controlled workspace (T2).
+    """
+    try:
+        cur = path if path.is_dir() else path.parent
+        # Find nearest existing directory ancestor
+        while not cur.exists() and cur != cur.parent:
+            cur = cur.parent
+
+        if not cur.exists():
             return False
-        
+
         # Check if inside git work tree
         is_git = subprocess.run(
-            ["git", "-C", str(target_dir), "rev-parse", "--is-inside-work-tree"],
+            ["git", "-C", str(cur), "rev-parse", "--is-inside-work-tree"],
             capture_output=True, text=True, check=False
         )
         if is_git.returncode != 0 or is_git.stdout.strip() != "true":
             return False
 
-        # Check working tree status for the target path
+        # If file does not exist yet, creating it inside a git work tree is safe version-controlled workflow (T2)
+        if not path.exists():
+            return True
+
+        # Check working tree status for existing target path
         status = subprocess.run(
-            ["git", "-C", str(target_dir), "status", "--porcelain", str(path)],
+            ["git", "-C", str(cur), "status", "--porcelain", str(path)],
             capture_output=True, text=True, check=False
         )
         # If porcelain status is empty, it is clean and committed
@@ -225,7 +257,7 @@ def classify_resource_tier(target_str: str, context: Optional[Dict] = None) -> R
     if "/.local/share/chezmoi" in canon_str:
         return ResourceTier.T2_VERSION_CONTROLLED
 
-    if canon.exists() and is_git_clean_and_committed(canon):
+    if is_git_clean_and_committed(canon):
         return ResourceTier.T2_VERSION_CONTROLLED
 
     # 7. Durable Gray Zone Assets (T3)
@@ -248,15 +280,18 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
     """Parse shell command string to determine OperationType (R, A, W, T, D, M, X, E) and primary target."""
     clean_cmd = cmd_str.strip()
 
+    # Strip quoted strings to avoid false-positive redirection matching on email brackets (<...>) or string literals
+    unquoted_cmd = re.sub(r'([\'"])(?:(?!\1)[^\\]|\\.)*\1', '""', clean_cmd)
+
     # 1. Truncate (> file.ext without >>)
-    if re.search(r"(?<![>12&])>\s*[^>&]+", clean_cmd):
-        match = re.search(r"(?<![>12&])>\s*([^\s>&|]+)", clean_cmd)
+    if re.search(r"(?<![>12&])>\s*[^>&]+", unquoted_cmd):
+        match = re.search(r"(?<![>12&])>\s*([^\s>&|]+)", unquoted_cmd)
         target = match.group(1) if match else None
         return OperationType.TRUNCATE, target
 
     # 2. Append (>> file.ext)
-    if ">>" in clean_cmd:
-        match = re.search(r">>\s*([^\s>&|]+)", clean_cmd)
+    if ">>" in unquoted_cmd:
+        match = re.search(r">>\s*([^\s>&|]+)", unquoted_cmd)
         target = match.group(1) if match else None
         return OperationType.APPEND, target
 
@@ -273,7 +308,22 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
         target = url_str if url_str else "REST_API"
         return OperationType.MUTATING_API, target
 
-    # 4. Standard File Commands
+    # 4. Handle Compound Statements (&&, ||, ;)
+    sub_cmds = [sc.strip() for sc in re.split(r"[;&|]+", clean_cmd) if sc.strip()]
+    if len(sub_cmds) > 1:
+        # Ignore shell no-op / control builtins (e.g. true, false, exit 0, echo)
+        filtered = [sc for sc in sub_cmds if sc not in ("true", "false", "exit 0", ":")]
+        if not filtered:
+            return OperationType.READ, None
+        
+        # Evaluate each sub-command and return the highest risk operation
+        for sc in filtered:
+            sub_op, sub_target = classify_operation(sc)
+            if sub_op in (OperationType.DELETE, OperationType.TRUNCATE, OperationType.MUTATING_API, OperationType.OVERWRITE, OperationType.MOVE):
+                return sub_op, sub_target
+        return OperationType.READ, None
+
+    # Single command token parsing
     try:
         tokens = shlex.split(clean_cmd)
     except Exception:
@@ -282,33 +332,43 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
     if not tokens:
         return OperationType.READ, None
 
-    cmd_verb = tokens[0]
+    # Filter out redirection syntax and error suppressions (2>/dev/null, >/dev/null)
+    cleaned_tokens = []
+    for t in tokens:
+        if t in ("2>/dev/null", ">/dev/null", "2>&1", "1>/dev/null", "2>", ">", ">>"):
+            continue
+        cleaned_tokens.append(t)
+
+    if not cleaned_tokens:
+        return OperationType.READ, None
+
+    cmd_verb = cleaned_tokens[0]
 
     if cmd_verb in ("rm", "unlink", "shred", "trash"):
         # Delete
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        targets = [t for t in cleaned_tokens[1:] if not t.startswith("-")]
         return OperationType.DELETE, (targets[-1] if targets else None)
 
     if cmd_verb in ("mv",):
         # Move / Rename
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        targets = [t for t in cleaned_tokens[1:] if not t.startswith("-")]
         return OperationType.MOVE, (targets[0] if targets else None)
 
     if cmd_verb in ("cp", "install", "rsync"):
         # Overwrite / Write
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        targets = [t for t in cleaned_tokens[1:] if not t.startswith("-")]
         return OperationType.OVERWRITE, (targets[-1] if targets else None)
 
     if cmd_verb in ("cat", "head", "tail", "grep", "rg", "find", "ls", "less", "file", "stat", "git"):
         # Read
-        targets = [t for t in tokens[1:] if not t.startswith("-")]
+        targets = [t for t in cleaned_tokens[1:] if not t.startswith("-")]
         return OperationType.READ, (targets[0] if targets else None)
 
     # 5. Heavy Execution
     if cmd_verb in ("make", "cargo", "pytest", "npm", "pnpm", "bun", "docker", "mise"):
         return OperationType.HEAVY_EXEC, cmd_verb
 
-    return OperationType.READ, (tokens[1] if len(tokens) > 1 else None)
+    return OperationType.READ, (cleaned_tokens[1] if len(cleaned_tokens) > 1 else None)
 
 
 def evaluate_gray_zone_operation(

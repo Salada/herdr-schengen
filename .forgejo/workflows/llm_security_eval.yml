@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '0 0 * * 1'   # Weekly every Monday at 00:00 UTC
+  push:
+    branches: [ main, "feat/*", "fix/*" ]
   pull_request:
     branches: [ main ]
 

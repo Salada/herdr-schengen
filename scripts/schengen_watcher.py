@@ -15,6 +15,7 @@ Key Architecture:
 """
 
 import argparse
+import ast
 import fcntl
 import json
 import os
@@ -31,6 +32,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+import importlib
+import guard_db
+import gray_zone_evaluator
+import security_evaluator
+
 from guard_db import (
     record_audit_log,
     check_persisted_allowlist,
@@ -40,14 +46,25 @@ from guard_db import (
     get_state_file_paths,
     tail_state_log,
     init_db,
+    enqueue_pending_escalation,
+    get_pending_escalations,
+    mark_escalation_delivered,
+    resolve_escalation,
+    cleanup_escalations,
     DB_DIR,
     DB_PATH
 )
 from security_evaluator import (
     audit_shell_command,
+    audit_shell_command_with_taxonomy,
+    derive_taxonomy,
     audit_python_code,
     sanitize_output,
     DecisionLayer,
+    Origin,
+    Consequence,
+    GateState,
+    is_shadow_mode,
     DEFAULT_GPT_OSS_MODEL,
     DEFAULT_GPT_OSS_ENDPOINT,
     DEFAULT_REASONING_EFFORT
@@ -56,39 +73,104 @@ from security_evaluator import (
 LOCK_FILE = DB_DIR / "schengen.lock"
 LOG_FILE = DB_DIR / "schengen.log"
 
+# Global reload trigger flag
+_RELOAD_REQUESTED = False
 
-def acquire_singleton_lock():
-    """Acquire strict singleton lock using fcntl.flock to prevent concurrent instances."""
+
+def sanitize_target_name(target: str) -> str:
+    """Normalize target string for safe lockfile naming (e.g. 'wS:pF' -> 'wS_pF')."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", target.strip())
+
+
+def get_lock_file_path(target: str = "auto") -> Path:
+    """Return target-specific scoped lockfile path."""
+    sanitized = sanitize_target_name(target)
+    return DB_DIR / f"schengen_{sanitized}.lock"
+
+
+def get_legacy_lock_file_path() -> Path:
+    """Return legacy global lockfile path for backward compatibility."""
+    return DB_DIR / "schengen.lock"
+
+
+def list_active_guard_locks() -> list:
+    """Discover all active guard lockfiles and their running PIDs."""
     DB_DIR.mkdir(parents=True, exist_ok=True)
+    active = []
+
+    lock_files = list(DB_DIR.glob("schengen_*.lock"))
+    legacy = get_legacy_lock_file_path()
+    if legacy.exists() and legacy not in lock_files:
+        lock_files.append(legacy)
+
+    for lf in lock_files:
+        if lf.name == "schengen.lock":
+            target_label = "legacy_global"
+        else:
+            target_label = lf.stem.replace("schengen_", "", 1)
+
+        pid = None
+        try:
+            with open(lf, "r") as f:
+                content = f.read().strip()
+                if content and content.isdigit():
+                    cand_pid = int(content)
+                    os.kill(cand_pid, 0)
+                    pid = cand_pid
+        except Exception:
+            pid = None
+
+        if pid is not None:
+            active.append((target_label, lf, pid))
+        else:
+            try:
+                lf.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    return active
+
+
+def acquire_scoped_lock(target: str = "auto"):
+    """Acquire strict scoped singleton lock using fcntl.flock to prevent concurrent instances on the same target."""
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    lock_file = get_lock_file_path(target)
     try:
-        lock_fd = open(LOCK_FILE, "a+")
+        lock_fd = open(lock_file, "a+")
         fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         lock_fd.seek(0)
         lock_fd.truncate()
         lock_fd.write(f"{os.getpid()}\n")
         lock_fd.flush()
-        return lock_fd
+        return lock_fd, lock_file
     except (IOError, BlockingIOError):
         running_pid = "unknown"
         try:
-            with open(LOCK_FILE, "r") as f:
+            with open(lock_file, "r") as f:
                 running_pid = f.read().strip()
         except Exception:
             pass
-        print(f"⚠️  Another SmartGate / Herdr Schengen watcher is already running (PID: {running_pid}). Exiting to maintain single gatekeeper.")
+        print(f"⚠️  Another SmartGate / Herdr Schengen watcher is already running for target '{target}' (PID: {running_pid}). Exiting.")
         sys.exit(0)
 
 
-def get_running_guard_pid():
-    """Return PID of running guard if active and alive, else None."""
-    if not LOCK_FILE.exists():
-        return None
+def get_running_guard_pid(target: str = "auto"):
+    """Return PID of running guard for specific target if active and alive, else None."""
+    lock_file = get_lock_file_path(target)
+    if not lock_file.exists():
+        if target == "auto":
+            legacy = get_legacy_lock_file_path()
+            if legacy.exists():
+                lock_file = legacy
+            else:
+                return None
+        else:
+            return None
     try:
-        with open(LOCK_FILE, "r") as f:
+        with open(lock_file, "r") as f:
             pid_str = f.read().strip()
         if pid_str and pid_str.isdigit():
             pid = int(pid_str)
-            # Check if process is alive
             os.kill(pid, 0)
             return pid
     except (ProcessLookupError, OSError):
@@ -99,21 +181,19 @@ def get_running_guard_pid():
 
 
 def show_guard_status():
-    """Display live daemon state, Herdr pane classification, and recent SmartGate events."""
+    """Display live daemon state for all scopes, Herdr pane classification, and recent SmartGate events."""
     init_db()
-    pid = get_running_guard_pid()
+    active_daemons = list_active_guard_locks()
+
     print("=" * 70)
     print("🛡️  Herdr SmartGate / Schengen Status Report")
     print("=" * 70)
-    if pid:
-        print(f"● Status: ACTIVE (Running)")
-        print(f"● PID: {pid}")
-        print(f"● Lockfile: {LOCK_FILE}")
-        print(f"● Logfile: {LOG_FILE}")
+    if active_daemons:
+        print(f"● Status: ACTIVE ({len(active_daemons)} daemon(s) running)")
+        for tgt, lpath, dpid in active_daemons:
+            print(f"   • Target: [{tgt:<12}] | PID: {dpid:<7} | Lock: {lpath.name}")
     else:
-        print(f"○ Status: INACTIVE (Stopped)")
-        if LOCK_FILE.exists():
-            print(f"⚠️ Stale lockfile found at {LOCK_FILE}")
+        print("○ Status: INACTIVE (No active Schengen daemons)")
 
     # Active Herdr Panes
     all_panes = get_all_panes()
@@ -150,28 +230,163 @@ def show_guard_status():
     print("=" * 70)
 
 
-def stop_running_guard():
-    """Stop currently running guard process using PID file."""
-    if not LOCK_FILE.exists():
+def stop_running_guard(target=None):
+    """Stop running guard process for a specific target, or all guards if target is 'all' or None."""
+    active_daemons = list_active_guard_locks()
+    if not active_daemons:
         print("ℹ️  No running SmartGate / Herdr Schengen process found.")
         return
+
+    targets_to_stop = []
+    if target and target not in ("all", "*"):
+        norm_target = sanitize_target_name(target)
+        for tgt, lpath, dpid in active_daemons:
+            if tgt == norm_target or (target == "auto" and tgt in ("auto", "legacy_global")):
+                targets_to_stop.append((tgt, lpath, dpid))
+        if not targets_to_stop:
+            print(f"ℹ️  No running Schengen daemon found for target '{target}'.")
+            return
+    else:
+        targets_to_stop = active_daemons
+
+    for tgt, lpath, dpid in targets_to_stop:
+        try:
+            os.kill(dpid, signal.SIGTERM)
+            print(f"🛑 Terminated SmartGate daemon for target '{tgt}' (PID: {dpid}).")
+            lpath.unlink(missing_ok=True)
+        except ProcessLookupError:
+            print(f"ℹ️  Daemon for '{tgt}' (PID: {dpid}) was already terminated. Removing stale lock.")
+            lpath.unlink(missing_ok=True)
+        except Exception as e:
+            print(f"❌ Failed to stop daemon for '{tgt}' (PID: {dpid}): {e}")
+
+
+def reload_running_guard(target=None):
+    """Send SIGHUP signal to trigger graceful in-process module reloading without killing the daemon."""
+    active_daemons = list_active_guard_locks()
+    if not active_daemons:
+        print("ℹ️  No running SmartGate / Herdr Schengen daemon found to reload.")
+        return
+
+    targets_to_reload = []
+    if target and target not in ("all", "*"):
+        norm_target = sanitize_target_name(target)
+        for tgt, lpath, dpid in active_daemons:
+            if tgt == norm_target or (target == "auto" and tgt in ("auto", "legacy_global")):
+                targets_to_reload.append((tgt, lpath, dpid))
+        if not targets_to_reload:
+            print(f"ℹ️  No running Schengen daemon found for target '{target}'.")
+            return
+    else:
+        targets_to_reload = active_daemons
+
+    for tgt, lpath, dpid in targets_to_reload:
+        try:
+            os.kill(dpid, signal.SIGHUP)
+            print(f"🔄 Sent SIGHUP dynamic reload signal to daemon '{tgt}' (PID: {dpid}). Modules will reload instantly.")
+        except Exception as e:
+            print(f"❌ Failed to signal reload for '{tgt}' (PID: {dpid}): {e}")
+
+
+def handle_sighup(signum, frame):
+    """Signal handler for SIGHUP: sets flag to trigger dynamic in-process reload on next iteration."""
+    global _RELOAD_REQUESTED
+    _RELOAD_REQUESTED = True
+
+
+def verify_module_integrity(module_obj) -> bool:
+    """Verify that Python source file exists, parses to valid AST, is tracked by Git, and matches committed Git HEAD blob hash."""
     try:
-        with open(LOCK_FILE, "r") as f:
-            pid_str = f.read().strip()
-        if pid_str and pid_str.isdigit():
-            pid = int(pid_str)
-            os.kill(pid, signal.SIGTERM)
-            print(f"🛑 Successfully terminated SmartGate / Herdr Schengen process (PID: {pid}).")
-            if LOCK_FILE.exists():
-                LOCK_FILE.unlink()
-        else:
-            print("ℹ️  Lock file was empty or invalid.")
-    except ProcessLookupError:
-        print("ℹ️  Process was already terminated. Removing stale lock file.")
-        if LOCK_FILE.exists():
-            LOCK_FILE.unlink()
+        mod_file = getattr(module_obj, "__file__", None)
+        if not mod_file:
+            return False
+        mod_path = Path(mod_file).resolve()
+        if mod_path.suffix == ".pyc":
+            mod_path = mod_path.with_suffix(".py")
+        if not mod_path.is_file():
+            return False
+        content = mod_path.read_text(encoding="utf-8")
+        if not content.strip():
+            return False
+        
+        # 1. Syntax check
+        ast.parse(content)
+
+        # 2. Cryptographic SCM Git Blob Verification against committed HEAD
+        parent_dir = mod_path.parent
+        res = subprocess.run(
+            ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        if res.returncode != 0 or res.stdout.strip() != "true":
+            return False
+
+        rel_res = subprocess.run(
+            ["git", "-C", str(parent_dir), "ls-files", "--full-name", str(mod_path)],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        rel_path = rel_res.stdout.strip()
+        if not rel_path:
+            return False
+
+        head_blob_res = subprocess.run(
+            ["git", "-C", str(parent_dir), "rev-parse", f"HEAD:{rel_path}"],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        if head_blob_res.returncode != 0:
+            return False
+        head_blob_hash = head_blob_res.stdout.strip()
+
+        file_blob_res = subprocess.run(
+            ["git", "-C", str(parent_dir), "hash-object", str(mod_path)],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        if file_blob_res.returncode != 0:
+            return False
+        file_blob_hash = file_blob_res.stdout.strip()
+
+        # If file has uncommitted tampering / does not match HEAD blob, reject reload
+        if head_blob_hash != file_blob_hash:
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def execute_graceful_reload():
+    """Dynamically reload evaluator modules and rulesets in-place with AST integrity verification."""
+    global gray_zone_evaluator, security_evaluator
+    global audit_shell_command, audit_shell_command_with_taxonomy, derive_taxonomy, audit_python_code, sanitize_output, DecisionLayer
+    try:
+        # Pre-reload AST integrity verification
+        for mod in (guard_db, gray_zone_evaluator, security_evaluator):
+            if not verify_module_integrity(mod):
+                print(f"🛑 [GRACEFUL_RELOAD_ABORTED] Module integrity/AST verification failed for {getattr(mod, '__name__', str(mod))}. Rejecting reload.", flush=True)
+                return False
+
+        importlib.reload(guard_db)
+        importlib.reload(gray_zone_evaluator)
+        importlib.reload(security_evaluator)
+        from security_evaluator import (
+            audit_shell_command as _asc,
+            audit_shell_command_with_taxonomy as _asct,
+            derive_taxonomy as _dt,
+            audit_python_code as _apc,
+            sanitize_output as _so,
+            DecisionLayer as _dl
+        )
+        audit_shell_command = _asc
+        audit_shell_command_with_taxonomy = _asct
+        derive_taxonomy = _dt
+        audit_python_code = _apc
+        sanitize_output = _so
+        DecisionLayer = _dl
+        print(f"✨ [GRACEFUL_RELOAD] Successfully reloaded guard modules and rulesets in-process at {datetime.now(timezone.utc).isoformat()}.", flush=True)
+        return True
     except Exception as e:
-        print(f"❌ Failed to stop SmartGate process: {e}")
+        print(f"⚠️  [GRACEFUL_RELOAD_ERROR] Failed to reload modules: {e}", flush=True)
+        return False
 
 
 def verify_agy_runtime_environment():
@@ -351,6 +566,7 @@ def parse_permission_request(visible_text):
 
 
 def main():
+    global _RELOAD_REQUESTED
     parser = argparse.ArgumentParser(description="Herdr SmartGate / Schengen Trusted Clearance Watcher (AGY Exclusive)")
     parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto' (default: auto - monitors all active & future panes)")
     parser.add_argument("--agent-filter", choices=["agy", "all"], default="agy", help="Target agent filter (default: agy only)")
@@ -367,11 +583,16 @@ def main():
     parser.add_argument("--status", action="store_true", help="Display status of SmartGate daemon and monitored panes")
     parser.add_argument("--use-gpt-oss", action="store_true", default=False, help="Enable private GPT-OSS 120B semantic judge")
     parser.add_argument("--reasoning", choices=["off", "low", "medium", "high"], default=DEFAULT_REASONING_EFFORT, help="Reasoning effort for guard watcher (default: low)")
-    parser.add_argument("--stop", action="store_true", help="Stop currently running guard process and exit")
+    parser.add_argument("--stop", action="store_true", help="Stop running guard process for target (or all) and exit")
+    parser.add_argument("--reload", action="store_true", help="Gracefully reload modules/rulesets on running guard without restarting process")
     args = parser.parse_args()
 
     if args.stop:
-        stop_running_guard()
+        stop_running_guard(target=args.target if args.target != "auto" else None)
+        return
+
+    if args.reload:
+        reload_running_guard(target=args.target if args.target != "auto" else None)
         return
 
     if args.status:
@@ -382,19 +603,18 @@ def main():
 
     if args.paths:
         paths = get_state_file_paths()
+        paths["scoped_lock_file"] = str(get_lock_file_path(args.target))
         if args.json:
-            import json
             print(json.dumps(paths, indent=2))
         else:
             print("🗂️  SmartGate / Herdr Schengen State Paths:")
             for k, v in paths.items():
-                print(f"  • {k:<12}: {v}")
+                print(f"  • {k:<18}: {v}")
         return
 
     if args.tail is not None:
         log_lines = tail_state_log(args.tail)
         if args.json:
-            import json
             print(json.dumps({"lines": log_lines}, indent=2))
         else:
             print(f"📜 Last {len(log_lines)} lines of schengen.log:")
@@ -404,7 +624,6 @@ def main():
     if args.search:
         results = search_audit_logs(args.search)
         if args.json:
-            import json
             print(json.dumps(results, indent=2))
         else:
             print(f"🔍 Search results for '{args.search}' ({len(results)} found):")
@@ -418,7 +637,6 @@ def main():
         limit = args.recent
         logs = get_recent_audit_logs(limit=limit)
         if args.json:
-            import json
             print(json.dumps(logs, indent=2))
         else:
             print(f"📜 Recent SmartGate Audit Events (Limit: {limit}):")
@@ -453,21 +671,29 @@ def main():
     # Track parent PID for orphan prevention
     initial_ppid = os.getppid()
 
-    # Acquire strict singleton lock
-    lock_fd = acquire_singleton_lock()
+    # Register SIGHUP for graceful dynamic in-process reload
+    signal.signal(signal.SIGHUP, handle_sighup)
+
+    # Acquire scoped singleton lock
+    lock_fd, lock_file_path = acquire_scoped_lock(args.target)
 
     # Auto-detect self pane for strict exclusion (prevents self-recursive approval)
     self_pane = detect_self_pane_id()
     excluded = set(args.exclude_pane)
     if self_pane:
         excluded.add(self_pane)
-    print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning})", flush=True)
+    print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning}, lock={lock_file_path.name})", flush=True)
 
     last_approved_cmd = {}
     idle_count = 0
 
     try:
         while True:
+            # Check for dynamic reload trigger (SIGHUP)
+            if _RELOAD_REQUESTED:
+                _RELOAD_REQUESTED = False
+                execute_graceful_reload()
+
             # P1 Guard against orphan process: verify parent AGY session is alive
             if not is_parent_alive(initial_ppid):
                 print(f"🛑 [SCHENGEN_LIFECYCLE] Parent AGY session (PID {initial_ppid}) terminated. Exiting SmartGate watcher to prevent orphan auto-approval.", flush=True)
@@ -537,15 +763,21 @@ def main():
                     reason = wl_reason
                     decision = "ALLOWLIST_BYPASS"
                     layer = DecisionLayer.ALLOWLIST
+                    tax = derive_taxonomy(req_cmd, layer, is_safe, reason, origin=Origin.HUMAN)
                 else:
-                    is_safe, reason, layer = audit_shell_command(
+                    is_safe, reason, layer, tax = audit_shell_command_with_taxonomy(
                         req_cmd,
                         use_llm_judge=args.use_gpt_oss,
-                        reasoning_effort=args.reasoning
+                        reasoning_effort=args.reasoning,
+                        origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN
                     )
-                    decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
+                    if tax.get("counterfactual_block"):
+                        decision = "SHADOW_BLOCKED"
+                    else:
+                        decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
 
-                print(f"⚖️  Safety Evaluation: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}]", flush=True)
+                state_tag = f"[{tax.get('gate_state', 'ENFORCE')}]"
+                print(f"⚖️  Safety Evaluation {state_tag}: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}, Origin: {tax.get('origin')}, Conseq: {tax.get('consequence')}]", flush=True)
 
                 # 2. Record to SQLite3 DB
                 record_audit_log(
@@ -554,7 +786,12 @@ def main():
                     decision=decision,
                     safety_reason=reason,
                     agent_kind=agent_kind,
-                    decision_layer=layer
+                    decision_layer=layer,
+                    origin=tax.get("origin", "A"),
+                    consequence=tax.get("consequence", "NONE"),
+                    mechanism=tax.get("mechanism", "none"),
+                    gate_state=tax.get("gate_state", "ENFORCE"),
+                    shadow_mode=tax.get("shadow_mode", False),
                 )
 
                 # 3. Action
@@ -576,8 +813,19 @@ def main():
                     else:
                         print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
                     last_approved_cmd[pane_id] = req_cmd
+                    resolve_escalation(pane_id=pane_id)
                 else:
-                    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review.", flush=True)
+                    # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
+                    session_uuid = pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
+                    esc_id = enqueue_pending_escalation(
+                        pane_id=pane_id,
+                        raw_command=req_cmd,
+                        safety_reason=reason,
+                        decision_layer=layer,
+                        agent_kind=agent_kind,
+                        session_id=session_uuid,
+                    )
+                    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).", flush=True)
                     print(f"   • Pane: {pane_id} ({agent_kind})", flush=True)
                     print(f"   • Layer: {layer}", flush=True)
                     print(f"   • Reason: {reason}", flush=True)
@@ -590,8 +838,8 @@ def main():
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
-            if LOCK_FILE.exists():
-                LOCK_FILE.unlink()
+            if lock_file_path.exists():
+                lock_file_path.unlink()
         except Exception:
             pass
 
