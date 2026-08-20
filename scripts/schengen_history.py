@@ -170,7 +170,21 @@ def main():
         return
 
     if args.pending:
-        pending = get_pending_escalations(pane_id=args.pane, include_delivered=True)
+        # Query active Herdr session map for dynamic liveness validation
+        active_map = {}
+        try:
+            res = subprocess.run(["herdr", "pane", "list"], capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                p_data = json.loads(res.stdout)
+                for p in p_data.get("result", {}).get("panes", []):
+                    pid = p.get("pane_id")
+                    sess_uuid = p.get("agent_session", {}).get("value") if isinstance(p.get("agent_session"), dict) else None
+                    if pid:
+                        active_map[pid] = sess_uuid
+        except Exception:
+            active_map = None
+
+        pending = get_pending_escalations(pane_id=args.pane, include_delivered=True, active_session_map=active_map)
         if args.json:
             print(json.dumps(pending, indent=2))
         else:
@@ -179,7 +193,8 @@ def main():
             if not pending:
                 print("   (No active pending escalations)")
             for item in pending:
-                print(f"• Escalation #{item['id']} [Pane: {item['pane_id']}] Status: {item['status']}")
+                sess_info = f"Session: {item.get('session_id', 'unknown')}"
+                print(f"• Escalation #{item['id']} [Pane: {item['pane_id']} | {sess_info}] Status: {item['status']}")
                 print(f"  Layer  : {item['decision_layer']}")
                 print(f"  Reason : {item['safety_reason']}")
                 print(f"  Started: {item['started_at']}")

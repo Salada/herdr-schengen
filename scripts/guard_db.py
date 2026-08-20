@@ -63,12 +63,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS pending_escalations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             pane_id TEXT NOT NULL,
+            session_id TEXT, -- Unique Herdr Agent Session UUID (e.g. 63be805c-d36e-4767-a0f1-f7ce847987ce)
             agent_kind TEXT DEFAULT 'unknown',
             raw_command TEXT NOT NULL,
             command_hash TEXT NOT NULL,
             safety_reason TEXT NOT NULL,
             decision_layer TEXT NOT NULL,
-            status TEXT DEFAULT 'PENDING', -- 'PENDING' | 'DELIVERED' | 'RESOLVED' | 'STALE_EXPIRED' | 'CANCELLED'
+            status TEXT DEFAULT 'PENDING', -- 'PENDING' | 'DELIVERED' | 'RESOLVED' | 'STALE_EXPIRED' | 'CANCELLED' | 'SESSION_MISMATCH'
             started_at TEXT NOT NULL,
             delivered_at TEXT,
             last_transitioned_at TEXT NOT NULL,
@@ -86,8 +87,15 @@ def init_db():
         if "decision_layer" not in columns:
             cursor.execute("ALTER TABLE audit_logs ADD COLUMN decision_layer TEXT DEFAULT 'FAST_TRACK_AST'")
 
-        # Create layer index after ensuring column exists
+        # Migration: Ensure session_id column exists in pending_escalations
+        cursor.execute("PRAGMA table_info(pending_escalations)")
+        p_columns = [c[1] for c in cursor.fetchall()]
+        if "session_id" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN session_id TEXT")
+
+        # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_session ON pending_escalations(session_id);")
         conn.commit()
 
 
@@ -279,6 +287,7 @@ def enqueue_pending_escalation(
     safety_reason: str,
     decision_layer: str,
     agent_kind: str = "agy",
+    session_id: Optional[str] = None,
 ) -> int:
     """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once)."""
     import hashlib
@@ -290,29 +299,40 @@ def enqueue_pending_escalation(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO pending_escalations (
-                pane_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, last_transitioned_at
+                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, last_transitioned_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
             ON CONFLICT(pane_id, command_hash) DO UPDATE SET
+                session_id = excluded.session_id,
                 status = 'PENDING',
                 safety_reason = excluded.safety_reason,
                 decision_layer = excluded.decision_layer,
                 last_transitioned_at = excluded.last_transitioned_at
-        """, (pane_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, now_iso, now_iso))
+        """, (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, now_iso, now_iso))
+        last_id = cursor.lastrowid
+        if not last_id:
+            cursor.execute("SELECT id FROM pending_escalations WHERE pane_id = ? AND command_hash = ?", (pane_id, cmd_hash))
+            row = cursor.fetchone()
+            last_id = row["id"] if row else 0
         conn.commit()
-        return cursor.lastrowid
+        return last_id
 
 
 def get_pending_escalations(
     pane_id: Optional[str] = None,
     include_delivered: bool = False,
-    max_age_hours: float = 24.0,
+    active_session_map: Optional[Dict[str, Optional[str]]] = None,
 ) -> List[Dict]:
-    """Retrieve active pending escalations. Automatically filters out entries older than max_age_hours."""
+    """Retrieve active pending escalations.
+    
+    If active_session_map is provided (mapping pane_id -> current_session_uuid):
+    - Verifies whether the pane is still alive. If dead, marks PANE_DEAD / CANCELLED.
+    - Verifies whether the session UUID matches. If mismatched (e.g. pane recycled days later),
+      marks SESSION_MISMATCH and filters it out automatically.
+    """
     init_db()
-    now = datetime.now(timezone.utc)
     statuses = "('PENDING', 'DELIVERED')" if include_delivered else "('PENDING')"
-    query = f"SELECT id, pane_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, delivered_at, last_transitioned_at FROM pending_escalations WHERE status IN {statuses}"
+    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, delivered_at, last_transitioned_at FROM pending_escalations WHERE status IN {statuses}"
     params = []
     if pane_id:
         query += " AND pane_id = ?"
@@ -324,21 +344,35 @@ def get_pending_escalations(
         cursor.execute(query, params)
         rows = [dict(r) for r in cursor.fetchall()]
 
-    valid_escalations = []
-    stale_ids = []
-    for r in rows:
-        try:
-            started = datetime.fromisoformat(r["started_at"])
-            age_hours = (now - started).total_seconds() / 3600.0
-            if age_hours > max_age_hours:
-                stale_ids.append(r["id"])
-            else:
-                valid_escalations.append(r)
-        except Exception:
-            valid_escalations.append(r)
+    if active_session_map is None:
+        return rows
 
-    if stale_ids:
-        cleanup_escalations(escalation_ids=stale_ids, new_status="STALE_EXPIRED", reason="Exceeded maximum age threshold")
+    valid_escalations = []
+    mismatched_ids = []
+    dead_pane_ids = []
+
+    for r in rows:
+        pid = r["pane_id"]
+        expected_session = r.get("session_id")
+
+        if pid not in active_session_map:
+            # Pane no longer exists in Herdr
+            dead_pane_ids.append(r["id"])
+            continue
+
+        current_session = active_session_map.get(pid)
+        # If both records have session UUIDs and they do not match, it's a recycled pane / ghost session
+        if expected_session and current_session and expected_session != current_session:
+            mismatched_ids.append(r["id"])
+            continue
+
+        valid_escalations.append(r)
+
+    if mismatched_ids:
+        cleanup_escalations(escalation_ids=mismatched_ids, new_status="SESSION_MISMATCH", reason="Herdr pane was recycled with a new agent session UUID")
+
+    if dead_pane_ids:
+        cleanup_escalations(escalation_ids=dead_pane_ids, new_status="CANCELLED", reason="Herdr pane closed or terminated")
 
     return valid_escalations
 

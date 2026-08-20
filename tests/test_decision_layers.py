@@ -251,39 +251,61 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         test_pane = "wTest:p1"
         test_cmd = "rm -rf /untrusted/test/danger"
 
-        # 1. Enqueue
+        # 1. Enqueue with session_id
+        test_session_uuid = "test-session-uuid-12345"
         esc_id = enqueue_pending_escalation(
             pane_id=test_pane,
             raw_command=test_cmd,
             safety_reason="Unit test risk detection",
             decision_layer="SHELL_CRITICAL",
             agent_kind="agy",
+            session_id=test_session_uuid,
         )
         self.assertIsInstance(esc_id, int)
 
-        # 2. Query pending
-        pending = get_pending_escalations(pane_id=test_pane)
+        # 2. Query pending with matching active_session_map
+        active_map_matching = {test_pane: test_session_uuid}
+        pending = get_pending_escalations(pane_id=test_pane, active_session_map=active_map_matching)
         self.assertTrue(len(pending) >= 1)
         target_item = next((item for item in pending if item["pane_id"] == test_pane), None)
         self.assertIsNotNone(target_item)
         self.assertEqual(target_item["status"], "PENDING")
+        self.assertEqual(target_item.get("session_id"), test_session_uuid)
         self.assertIn("started_at", target_item)
         self.assertIn("last_transitioned_at", target_item)
 
-        # 3. Mark delivered
-        mark_escalation_delivered(target_item["id"])
-        delivered_list = get_pending_escalations(pane_id=test_pane, include_delivered=True)
-        del_item = next((item for item in delivered_list if item["id"] == target_item["id"]), None)
+        # 2b. Test Recycled Pane (Mismatched session UUID -> auto-filtered as SESSION_MISMATCH)
+        active_map_recycled = {test_pane: "different-new-session-uuid-9999"}
+        pending_recycled = get_pending_escalations(pane_id=test_pane, active_session_map=active_map_recycled)
+        self.assertEqual(len(pending_recycled), 0)
+
+        # 3. Re-enqueue for delivery test
+        esc_id2 = enqueue_pending_escalation(
+            pane_id=test_pane,
+            raw_command=test_cmd,
+            safety_reason="Unit test risk detection 2",
+            decision_layer="SHELL_CRITICAL",
+            agent_kind="agy",
+            session_id=test_session_uuid,
+        )
+        delivered_list = get_pending_escalations(pane_id=test_pane, include_delivered=True, active_session_map=active_map_matching)
+        target_item2 = next((item for item in delivered_list if item["id"] == esc_id2), None)
+        self.assertIsNotNone(target_item2)
+
+        # 4. Mark delivered
+        mark_escalation_delivered(target_item2["id"])
+        del_list = get_pending_escalations(pane_id=test_pane, include_delivered=True, active_session_map=active_map_matching)
+        del_item = next((item for item in del_list if item["id"] == target_item2["id"]), None)
         self.assertIsNotNone(del_item)
         self.assertEqual(del_item["status"], "DELIVERED")
         self.assertIsNotNone(del_item["delivered_at"])
 
-        # 4. Resolve / ACK
-        resolve_escalation(pane_id=test_pane, escalation_id=target_item["id"])
-        pending_after_res = get_pending_escalations(pane_id=test_pane)
-        self.assertFalse(any(item["id"] == target_item["id"] for item in pending_after_res))
+        # 5. Resolve / ACK
+        resolve_escalation(pane_id=test_pane, escalation_id=target_item2["id"])
+        pending_after_res = get_pending_escalations(pane_id=test_pane, active_session_map=active_map_matching)
+        self.assertFalse(any(item["id"] == target_item2["id"] for item in pending_after_res))
 
-        # 5. Cleanup / Purge
+        # 6. Cleanup / Purge
         cleaned = cleanup_escalations(pane_id=test_pane, new_status="CANCELLED")
         self.assertIsInstance(cleaned, int)
 

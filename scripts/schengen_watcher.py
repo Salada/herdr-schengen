@@ -726,14 +726,16 @@ def main():
                     resolve_escalation(pane_id=pane_id)
                 else:
                     # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
+                    session_uuid = pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
                     esc_id = enqueue_pending_escalation(
                         pane_id=pane_id,
                         raw_command=req_cmd,
                         safety_reason=reason,
                         decision_layer=layer,
-                        agent_kind=agent_kind
+                        agent_kind=agent_kind,
+                        session_id=session_uuid,
                     )
-                    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}).", flush=True)
+                    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).", flush=True)
                     print(f"   • Pane: {pane_id} ({agent_kind})", flush=True)
                     print(f"   • Layer: {layer}", flush=True)
                     print(f"   • Reason: {reason}", flush=True)
