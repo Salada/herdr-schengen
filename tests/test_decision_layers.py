@@ -235,9 +235,11 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_new_file_creation_in_git_repo_fast_track(self):
         """Verify that creating a new file in a git repo via redirection (cat << 'EOF' > new_file) is classified as T2 Fast-Track."""
-        cmd = "cat << 'EOF' > ~/code/herdr-schengen/docs/adr-999-unit-test-creation.md\n# Test ADR\nEOF"
+        repo_root = Path(__file__).resolve().parent.parent
+        target_file = repo_root / "docs" / "adr-999-unit-test-creation.md"
+        cmd = f"cat << 'EOF' > {target_file}\n# Test ADR\nEOF"
         safe, reason, layer = audit_shell_command(cmd)
-        self.assertTrue(safe)
+        self.assertTrue(safe, f"Expected safe for git repo file creation, got: {reason}")
         self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
     def test_escalation_queue_lifecycle_and_cleanup(self):

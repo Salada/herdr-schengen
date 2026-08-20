@@ -20,10 +20,13 @@ DB_PATH = DB_DIR / "schengen_history.db"
 
 
 def get_db_connection() -> sqlite3.Connection:
-    """Initialize DB directory and connect to SQLite3 database."""
+    """Initialize DB directory and connect to SQLite3 database with WAL & busy timeout."""
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=5.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
 
