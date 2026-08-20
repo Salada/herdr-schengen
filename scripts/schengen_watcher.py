@@ -295,7 +295,7 @@ def handle_sighup(signum, frame):
 
 
 def verify_module_integrity(module_obj) -> bool:
-    """Verify that Python source file exists, is non-empty, and parses to valid AST before reload."""
+    """Verify that Python source file exists, parses to valid AST, contains required guard symbols, and is tracked before reload."""
     try:
         mod_file = getattr(module_obj, "__file__", None)
         if not mod_file:
@@ -308,7 +308,39 @@ def verify_module_integrity(module_obj) -> bool:
         content = mod_path.read_text(encoding="utf-8")
         if not content.strip():
             return False
+        
+        # 1. Syntax check
         ast.parse(content)
+
+        # 2. Critical symbol signature verification to prevent null-stubbing attacks
+        mod_name = getattr(module_obj, "__name__", "")
+        if "security_evaluator" in mod_name:
+            if "def audit_shell_command" not in content or "DecisionLayer" not in content:
+                return False
+        elif "guard_db" in mod_name:
+            if "def record_audit_log" not in content or "def init_db" not in content:
+                return False
+        elif "gray_zone_evaluator" in mod_name:
+            if "def evaluate_gray_zone_operation" not in content or "ResourceTier" not in content:
+                return False
+
+        # 3. SCM Git tracking check if running within a Git workspace
+        try:
+            parent_dir = mod_path.parent
+            res = subprocess.run(
+                ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
+                capture_output=True, text=True, check=False, timeout=1.0
+            )
+            if res.returncode == 0 and res.stdout.strip() == "true":
+                ls_res = subprocess.run(
+                    ["git", "-C", str(parent_dir), "ls-files", str(mod_path.name)],
+                    capture_output=True, text=True, check=False, timeout=1.0
+                )
+                if not ls_res.stdout.strip():
+                    return False
+        except Exception:
+            pass
+
         return True
     except Exception:
         return False

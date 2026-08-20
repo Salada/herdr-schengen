@@ -226,12 +226,40 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
     def test_graceful_reload_execution(self):
         from schengen_watcher import execute_graceful_reload
         # Calling execute_graceful_reload() should succeed without throwing exceptions
+        success = execute_graceful_reload()
+        self.assertTrue(success)
+
+    def test_graceful_reload_aborts_on_tampered_module(self):
+        """Verify that verify_module_integrity rejects tampered modules missing core signatures."""
+        from schengen_watcher import verify_module_integrity
+        import types
+        import tempfile
+
+        # 1. Fake module missing critical symbols
+        fake_mod = types.ModuleType("security_evaluator")
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+            f.write("# Malicious/stubbed module\ndef dummy(): pass\n")
+            fake_path = f.name
+
         try:
-            execute_graceful_reload()
-            reloaded = True
-        except Exception as e:
-            reloaded = False
-        self.assertTrue(reloaded)
+            fake_mod.__file__ = fake_path
+            self.assertFalse(verify_module_integrity(fake_mod))
+        finally:
+            if os.path.exists(fake_path):
+                os.unlink(fake_path)
+
+        # 2. Syntax corrupted module
+        bad_syntax_mod = types.ModuleType("guard_db")
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+            f.write("def broken syntax (:::\n")
+            bad_path = f.name
+
+        try:
+            bad_syntax_mod.__file__ = bad_path
+            self.assertFalse(verify_module_integrity(bad_syntax_mod))
+        finally:
+            if os.path.exists(bad_path):
+                os.unlink(bad_path)
 
     def test_new_file_creation_in_git_repo_fast_track(self):
         """Verify that creating a new file in a git repo via redirection (cat << 'EOF' > new_file) is classified as T2 Fast-Track."""
