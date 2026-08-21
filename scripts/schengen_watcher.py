@@ -769,7 +769,10 @@ def main():
                         req_cmd,
                         use_llm_judge=args.use_gpt_oss,
                         reasoning_effort=args.reasoning,
-                        origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN
+                        origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN,
+                        cwd=os.getcwd(),
+                        scope=pane_id,
+                        agent_id=agent_kind
                     )
                     if tax.get("counterfactual_block"):
                         decision = "SHADOW_BLOCKED"
