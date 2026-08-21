@@ -402,15 +402,15 @@ def audit_dynamic_substitution_with_llm(
     if not target_endpoint:
         return False, "Dynamic command substitution $(cat ...) detected; escalated to AGY Session (gpt-oss:120b native subagent) for parameter inspection"
     system_prompt = (
-        "You are an uncompromising security inspector subagent for Herdr SmartGate. "
+        "You are a strict security inspector subagent for Herdr SmartGate. "
         "A command contains dynamic command substitution (e.g. $(cat ...)). "
-        "Use the `read_file_content` tool to inspect the referenced file(s). "
-        "Check if the file content contains: "
-        "1) Sensitive secrets (.env, id_rsa, tokens, credentials, passwords), "
+        "Use `read_file_content` to inspect referenced files. "
+        "Block if content contains: "
+        "1) Secrets (.env, id_rsa, tokens, credentials, keys), "
         "2) System root paths (/etc, /System, /var, /usr, /dev), "
-        "3) Destructive shell flags or commands. "
-        "If safe, respond ONLY with JSON: {\"is_safe\": true, \"reason\": \"File content verified safe: <summary>\"}. "
-        "If dangerous or uncertain, respond ONLY with JSON: {\"is_safe\": false, \"reason\": \"<danger explanation>\"}."
+        "3) Destructive commands or dangerous payloads. "
+        "Respond ONLY in JSON format: "
+        "{\"is_safe\": true|false, \"reason\": \"<concise explanation>\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"NONE\"|\"EXFIL\"|\"DEST\"|\"INT\"|\"AVAIL\"|\"PERS\", \"mechanism\": \"string\"}}"
     )
 
     messages = [
@@ -842,16 +842,53 @@ def audit_shell_command_with_taxonomy(
     cmd_str: str,
     use_llm_judge: bool = False,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-    origin: Origin = Origin.AGENT
+    origin: Origin = Origin.AGENT,
+    cwd: str = "",
+    scope: str = "default",
+    agent_id: str = "default",
+    use_cache: bool = True
 ) -> Tuple[bool, str, DecisionLayer, Dict[str, Any]]:
-    """Audit shell command and return safety, reason, layer, and 2D taxonomy metadata.
+    """Audit shell command and return safety, reason, layer, and 2D taxonomy metadata with session caching.
     
     If SCHENGEN_SHADOW_MODE=1 is active, dangerous commands return is_safe=True with
     counterfactual logging metadata.
     """
+    cache_key = None
+    if use_cache and not is_shadow_mode():
+        try:
+            from session_cache import compute_cache_key, get_cached_result
+            origin_val = origin.value if isinstance(origin, Origin) else str(origin)
+            cache_key = compute_cache_key(cmd_str, cwd=cwd, scope=scope, agent_id=agent_id, origin=origin_val)
+            cached = get_cached_result(cache_key)
+            if cached:
+                cached_layer = getattr(DecisionLayer, cached["decision_layer"], DecisionLayer.FAST_TRACK_AST)
+                return cached["is_safe"], cached["safety_reason"], cached_layer, cached["taxonomy"]
+        except Exception:
+            pass
+
     is_safe, reason, layer = audit_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
     taxonomy = derive_taxonomy(cmd_str, layer, is_safe, reason, origin=origin)
     
+    # Store in session cache
+    if use_cache and cache_key and not is_shadow_mode():
+        try:
+            from session_cache import store_cached_result
+            origin_val = origin.value if isinstance(origin, Origin) else str(origin)
+            store_cached_result(
+                cache_key=cache_key,
+                raw_cmd=cmd_str,
+                is_safe=is_safe,
+                safety_reason=reason,
+                decision_layer=layer.value if isinstance(layer, DecisionLayer) else str(layer),
+                taxonomy=taxonomy,
+                cwd=cwd,
+                scope=scope,
+                agent_id=agent_id,
+                origin=origin_val
+            )
+        except Exception:
+            pass
+
     # Shadow Mode Handling
     if is_shadow_mode() and not is_safe:
         shadow_reason = f"[SHADOW_OBSERVE: Counterfactual BLOCK] {reason}"

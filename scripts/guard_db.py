@@ -84,10 +84,28 @@ def init_db():
             UNIQUE(pane_id, command_hash)
         );
 
+        CREATE TABLE IF NOT EXISTS evaluation_cache (
+            cache_key TEXT PRIMARY KEY,
+            raw_command TEXT NOT NULL,
+            cwd TEXT,
+            scope TEXT,
+            agent_id TEXT,
+            origin TEXT,
+            ruleset_version TEXT,
+            is_safe INTEGER NOT NULL,
+            safety_reason TEXT NOT NULL,
+            decision_layer TEXT NOT NULL,
+            taxonomy_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            hit_count INTEGER DEFAULT 0
+        );
+
         CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp);
         CREATE INDEX IF NOT EXISTS idx_audit_pattern ON audit_logs(normalized_pattern);
         CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_escalations(status);
         CREATE INDEX IF NOT EXISTS idx_pending_pane ON pending_escalations(pane_id);
+        CREATE INDEX IF NOT EXISTS idx_cache_expires ON evaluation_cache(expires_at);
         """)
         # Migration: Ensure columns exist in older schemas (Idempotent schema evolution)
         cursor.execute("PRAGMA table_info(audit_logs)")
@@ -117,6 +135,143 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_consequence ON audit_logs(consequence);")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pending_session ON pending_escalations(session_id);")
         conn.commit()
+
+
+# In-memory LRU evaluation cache: cache_key -> (is_safe, safety_reason, decision_layer, taxonomy, expiry_timestamp)
+_IN_MEMORY_EVAL_CACHE: Dict[str, Tuple[bool, str, str, Dict[str, Any], float]] = {}
+_MAX_MEMORY_CACHE_SIZE = 1000
+
+
+def get_cached_evaluation(cache_key: str) -> Optional[Dict[str, Any]]:
+    """Retrieve cached security evaluation result by cache_key."""
+    import json
+    now_ts = datetime.now(timezone.utc).timestamp()
+    
+    # 1. Check in-memory cache first (<0.1ms)
+    if cache_key in _IN_MEMORY_EVAL_CACHE:
+        is_safe, safety_reason, decision_layer, taxonomy, exp_ts = _IN_MEMORY_EVAL_CACHE[cache_key]
+        if exp_ts > now_ts:
+            return {
+                "cache_key": cache_key,
+                "is_safe": is_safe,
+                "safety_reason": safety_reason,
+                "decision_layer": decision_layer,
+                "taxonomy": taxonomy,
+                "from_memory": True,
+            }
+        else:
+            _IN_MEMORY_EVAL_CACHE.pop(cache_key, None)
+
+    # 2. Check SQLite persistent cache
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT raw_command, is_safe, safety_reason, decision_layer, taxonomy_json, expires_at, hit_count
+                FROM evaluation_cache
+                WHERE cache_key = ? AND expires_at > ?
+            """, (cache_key, now_iso))
+            row = cursor.fetchone()
+            if row:
+                is_safe = bool(row["is_safe"])
+                safety_reason = row["safety_reason"]
+                decision_layer = row["decision_layer"]
+                try:
+                    taxonomy = json.loads(row["taxonomy_json"])
+                except Exception:
+                    taxonomy = {}
+                
+                # Update hit count
+                cursor.execute("UPDATE evaluation_cache SET hit_count = hit_count + 1 WHERE cache_key = ?", (cache_key,))
+                conn.commit()
+
+                # Populate memory cache
+                try:
+                    exp_dt = datetime.fromisoformat(row["expires_at"])
+                    exp_ts = exp_dt.timestamp()
+                except Exception:
+                    exp_ts = now_ts + 3600.0
+
+                if len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
+                    _IN_MEMORY_EVAL_CACHE.clear()
+                _IN_MEMORY_EVAL_CACHE[cache_key] = (is_safe, safety_reason, decision_layer, taxonomy, exp_ts)
+
+                return {
+                    "cache_key": cache_key,
+                    "is_safe": is_safe,
+                    "safety_reason": safety_reason,
+                    "decision_layer": decision_layer,
+                    "taxonomy": taxonomy,
+                    "from_memory": False,
+                }
+    except Exception:
+        pass
+
+    return None
+
+
+def set_cached_evaluation(
+    cache_key: str,
+    raw_command: str,
+    is_safe: bool,
+    safety_reason: str,
+    decision_layer: str,
+    taxonomy: Dict[str, Any],
+    cwd: str = "",
+    scope: str = "default",
+    agent_id: str = "default",
+    origin: str = "A",
+    ruleset_version: str = "1.0",
+    ttl_seconds: int = 3600
+):
+    """Store security evaluation result in both in-memory and SQLite persistent cache."""
+    import json
+    from datetime import timedelta
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+    exp_dt = now_dt + timedelta(seconds=ttl_seconds)
+    exp_iso = exp_dt.isoformat()
+    exp_ts = exp_dt.timestamp()
+
+    # 1. Update in-memory cache
+    if len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
+        _IN_MEMORY_EVAL_CACHE.clear()
+    _IN_MEMORY_EVAL_CACHE[cache_key] = (is_safe, safety_reason, decision_layer, taxonomy, exp_ts)
+
+    # 2. Update SQLite persistent cache
+    try:
+        tax_json = json.dumps(taxonomy)
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO evaluation_cache (
+                    cache_key, raw_command, cwd, scope, agent_id, origin,
+                    ruleset_version, is_safe, safety_reason, decision_layer,
+                    taxonomy_json, created_at, expires_at, hit_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT hit_count FROM evaluation_cache WHERE cache_key = ?), 0))
+            """, (
+                cache_key, raw_command, cwd, scope, agent_id, origin,
+                ruleset_version, 1 if is_safe else 0, safety_reason,
+                decision_layer, tax_json, now_iso, exp_iso, cache_key
+            ))
+            conn.commit()
+    except Exception:
+        pass
+
+
+def purge_expired_cache_entries() -> int:
+    """Purge expired cache rows from SQLite evaluation_cache table."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM evaluation_cache WHERE expires_at <= ?", (now_iso,))
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
+    except Exception:
+        return 0
 
 
 def normalize_command(cmd_str: str) -> str:
