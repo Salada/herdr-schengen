@@ -137,8 +137,10 @@ def init_db():
         conn.commit()
 
 
-# In-memory LRU evaluation cache: cache_key -> (is_safe, safety_reason, decision_layer, taxonomy, expiry_timestamp)
-_IN_MEMORY_EVAL_CACHE: Dict[str, Tuple[bool, str, str, Dict[str, Any], float]] = {}
+from collections import OrderedDict
+
+# In-memory true LRU evaluation cache: cache_key -> (is_safe, safety_reason, decision_layer, taxonomy, expiry_timestamp)
+_IN_MEMORY_EVAL_CACHE: OrderedDict[str, Tuple[bool, str, str, Dict[str, Any], float]] = OrderedDict()
 _MAX_MEMORY_CACHE_SIZE = 1000
 
 
@@ -148,7 +150,7 @@ def clear_in_memory_cache():
 
 
 def get_cached_evaluation(cache_key: str) -> Optional[Dict[str, Any]]:
-    """Retrieve cached security evaluation result by cache_key."""
+    """Retrieve cached security evaluation result by cache_key with true LRU ordering."""
     import json
     now_ts = datetime.now(timezone.utc).timestamp()
     
@@ -156,6 +158,7 @@ def get_cached_evaluation(cache_key: str) -> Optional[Dict[str, Any]]:
     if cache_key in _IN_MEMORY_EVAL_CACHE:
         is_safe, safety_reason, decision_layer, taxonomy, exp_ts = _IN_MEMORY_EVAL_CACHE[cache_key]
         if exp_ts > now_ts:
+            _IN_MEMORY_EVAL_CACHE.move_to_end(cache_key)  # True LRU: move to most recent
             return {
                 "cache_key": cache_key,
                 "is_safe": is_safe,
@@ -191,15 +194,15 @@ def get_cached_evaluation(cache_key: str) -> Optional[Dict[str, Any]]:
                 cursor.execute("UPDATE evaluation_cache SET hit_count = hit_count + 1 WHERE cache_key = ?", (cache_key,))
                 conn.commit()
 
-                # Populate memory cache
+                # Populate memory cache with true LRU eviction
                 try:
                     exp_dt = datetime.fromisoformat(row["expires_at"])
                     exp_ts = exp_dt.timestamp()
                 except Exception:
                     exp_ts = now_ts + 3600.0
 
-                if len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
-                    _IN_MEMORY_EVAL_CACHE.clear()
+                while len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
+                    _IN_MEMORY_EVAL_CACHE.popitem(last=False)  # True LRU: pop least recently used
                 _IN_MEMORY_EVAL_CACHE[cache_key] = (is_safe, safety_reason, decision_layer, taxonomy, exp_ts)
 
                 return {
@@ -230,7 +233,7 @@ def set_cached_evaluation(
     ruleset_version: str = "1.0",
     ttl_seconds: int = 3600
 ):
-    """Store security evaluation result in both in-memory and SQLite persistent cache."""
+    """Store security evaluation result in both in-memory LRU and SQLite persistent cache."""
     import json
     from datetime import timedelta
     now_dt = datetime.now(timezone.utc)
@@ -239,10 +242,11 @@ def set_cached_evaluation(
     exp_iso = exp_dt.isoformat()
     exp_ts = exp_dt.timestamp()
 
-    # 1. Update in-memory cache
-    if len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
-        _IN_MEMORY_EVAL_CACHE.clear()
+    # 1. Update in-memory LRU cache
+    while len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
+        _IN_MEMORY_EVAL_CACHE.popitem(last=False)  # True LRU eviction
     _IN_MEMORY_EVAL_CACHE[cache_key] = (is_safe, safety_reason, decision_layer, taxonomy, exp_ts)
+    _IN_MEMORY_EVAL_CACHE.move_to_end(cache_key)
 
     # 2. Update SQLite persistent cache
     try:

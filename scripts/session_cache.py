@@ -21,7 +21,17 @@ from guard_db import (
     clear_in_memory_cache
 )
 
-RULESET_VERSION = "2.0.0"
+def get_dynamic_ruleset_version() -> str:
+    """Compute deterministic dynamic ruleset version from cryptographic hash of prompt and rules."""
+    try:
+        from security_evaluator import MINIMAL_INSPECTOR_SYSTEM_PROMPT, CRITICAL_PATTERNS
+        hasher = hashlib.sha256()
+        hasher.update(MINIMAL_INSPECTOR_SYSTEM_PROMPT.encode("utf-8"))
+        for cp in CRITICAL_PATTERNS:
+            hasher.update(cp.pattern.encode("utf-8"))
+        return f"dyn-{hasher.hexdigest()[:12]}"
+    except Exception:
+        return "dyn-2.0.0"
 
 
 def clear_session_cache():
@@ -36,9 +46,10 @@ def compute_cache_key(
     agent_id: str = "default",
     origin: str = "A",
     env_vars: Optional[Dict[str, str]] = None,
-    ruleset_version: str = RULESET_VERSION
+    ruleset_version: Optional[str] = None
 ) -> str:
     """Compute context-full SHA256 cache key for command evaluation."""
+    effective_ver = ruleset_version if ruleset_version is not None else get_dynamic_ruleset_version()
     norm_cmd = raw_cmd.strip()
     norm_cwd = str(cwd).strip() if cwd else ""
     norm_scope = str(scope).strip() if scope else "default"
@@ -50,7 +61,7 @@ def compute_cache_key(
         sorted_kvs = sorted((k, str(v)) for k, v in env_vars.items() if k in ("SCHENGEN_SHADOW_MODE", "HERDR_ENV", "AI_AGENT"))
         env_repr = json.dumps(sorted_kvs)
 
-    canonical = f"cmd={norm_cmd}|cwd={norm_cwd}|scope={norm_scope}|agent={norm_agent}|origin={norm_origin}|env={env_repr}|ver={ruleset_version}"
+    canonical = f"cmd={norm_cmd}|cwd={norm_cwd}|scope={norm_scope}|agent={norm_agent}|origin={norm_origin}|env={env_repr}|ver={effective_ver}"
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -70,10 +81,11 @@ def store_cached_result(
     scope: str = "default",
     agent_id: str = "default",
     origin: str = "A",
-    ruleset_version: str = RULESET_VERSION,
+    ruleset_version: Optional[str] = None,
     ttl_seconds: int = 3600
 ):
     """Store evaluation result in context cache."""
+    effective_ver = ruleset_version if ruleset_version is not None else get_dynamic_ruleset_version()
     set_cached_evaluation(
         cache_key=cache_key,
         raw_command=raw_cmd,
@@ -85,6 +97,6 @@ def store_cached_result(
         scope=scope,
         agent_id=agent_id,
         origin=origin,
-        ruleset_version=ruleset_version,
+        ruleset_version=effective_ver,
         ttl_seconds=ttl_seconds
     )

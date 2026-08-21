@@ -382,6 +382,23 @@ def audit_python_code(code_str: str) -> Tuple[bool, str]:
     return True, "Python AST: Safe"
 
 
+MINIMAL_INSPECTOR_SYSTEM_PROMPT = (
+    "You are a strict security inspector subagent for Herdr SmartGate. "
+    "A command contains dynamic command substitution (e.g. $(cat ...)). "
+    "Use `read_file_content` to inspect referenced files. "
+    "Block if content contains: "
+    "1) Secrets (.env, id_rsa, tokens, credentials, keys), "
+    "2) System root paths (/etc, /System, /var, /usr, /dev), "
+    "3) Destructive commands or dangerous payloads. "
+    "Respond ONLY in JSON format: "
+    "{\"is_safe\": true|false, \"reason\": \"<concise explanation>\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"NONE\"|\"EXFIL\"|\"DEST\"|\"INT\"|\"AVAIL\"|\"PERS\", \"mechanism\": \"string\"}}\n"
+    "Adversarial Exemplars:\n"
+    "- Target `/tmp/safe.txt` ('hello world'): {\"is_safe\": true, \"reason\": \"File content verified safe\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"NONE\", \"mechanism\": \"verified-param\"}}\n"
+    "- Target `.env` ('API_KEY=xyz'): {\"is_safe\": false, \"reason\": \"Detected API key credentials\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"EXFIL\", \"mechanism\": \"env-leak-attempt\"}}\n"
+    "- Target `/etc/shadow` ('root:...'): {\"is_safe\": false, \"reason\": \"Access to system sensitive shadow database\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"DEST\", \"mechanism\": \"system-root-access\"}}"
+)
+
+
 def audit_dynamic_substitution_with_llm(
     cmd_str: str,
     endpoint: Optional[str] = None,
@@ -389,32 +406,37 @@ def audit_dynamic_substitution_with_llm(
     api_key: Optional[str] = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     max_hops: int = 2,
-    raise_on_error: bool = False
+    raise_on_error: bool = False,
+    cwd: str = "",
+    scope: str = "default",
+    agent_id: str = "default",
+    origin: str = "I"
 ) -> Tuple[bool, str]:
-    """Helper for semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails.
+    """Helper for semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails and scoped LLM caching.
     
     In the AGY architecture, dynamic substitutions stream directly to the active AGY session,
     where Antigravity native subagents (e.g. gpt-oss:120b under weekly limits) inspect parameters.
     If an external endpoint is explicitly configured, performs HTTP validation; otherwise returns
     the in-session escalation verdict.
     """
+    # Check scoped LLM cache (B1: cache strictly scoped to expensive LLM tier)
+    cache_key = None
+    if not is_shadow_mode():
+        try:
+            from session_cache import compute_cache_key, get_cached_result
+            cache_key = compute_cache_key(cmd_str, cwd=cwd, scope=scope, agent_id=agent_id, origin=origin)
+            cached = get_cached_result(cache_key)
+            if cached:
+                return cached["is_safe"], cached["safety_reason"]
+        except Exception:
+            pass
+
     target_endpoint = endpoint if endpoint is not None else DEFAULT_GPT_OSS_ENDPOINT
     if not target_endpoint:
         return False, "Dynamic command substitution $(cat ...) detected; escalated to AGY Session (gpt-oss:120b native subagent) for parameter inspection"
-    system_prompt = (
-        "You are a strict security inspector subagent for Herdr SmartGate. "
-        "A command contains dynamic command substitution (e.g. $(cat ...)). "
-        "Use `read_file_content` to inspect referenced files. "
-        "Block if content contains: "
-        "1) Secrets (.env, id_rsa, tokens, credentials, keys), "
-        "2) System root paths (/etc, /System, /var, /usr, /dev), "
-        "3) Destructive commands or dangerous payloads. "
-        "Respond ONLY in JSON format: "
-        "{\"is_safe\": true|false, \"reason\": \"<concise explanation>\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"NONE\"|\"EXFIL\"|\"DEST\"|\"INT\"|\"AVAIL\"|\"PERS\", \"mechanism\": \"string\"}}"
-    )
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": MINIMAL_INSPECTOR_SYSTEM_PROMPT},
         {"role": "user", "content": f"Inspect the dynamic parameters of this command before approval:\n```\n{cmd_str}\n```"}
     ]
 
@@ -845,49 +867,18 @@ def audit_shell_command_with_taxonomy(
     origin: Origin = Origin.AGENT,
     cwd: str = "",
     scope: str = "default",
-    agent_id: str = "default",
-    use_cache: bool = True
+    agent_id: str = "default"
 ) -> Tuple[bool, str, DecisionLayer, Dict[str, Any]]:
-    """Audit shell command and return safety, reason, layer, and 2D taxonomy metadata with session caching.
+    """Audit shell command and return safety, reason, layer, and 2D taxonomy metadata.
+    
+    Deterministic guards (Fast-Track AST, ShellCheck SAST, Critical Regex, Gray-Zone)
+    run unconditionally on every invocation. Dynamic parameter evaluations use the scoped LLM cache.
     
     If SCHENGEN_SHADOW_MODE=1 is active, dangerous commands return is_safe=True with
     counterfactual logging metadata.
     """
-    cache_key = None
-    if use_cache and not is_shadow_mode():
-        try:
-            from session_cache import compute_cache_key, get_cached_result
-            origin_val = origin.value if isinstance(origin, Origin) else str(origin)
-            cache_key = compute_cache_key(cmd_str, cwd=cwd, scope=scope, agent_id=agent_id, origin=origin_val)
-            cached = get_cached_result(cache_key)
-            if cached:
-                cached_layer = getattr(DecisionLayer, cached["decision_layer"], DecisionLayer.FAST_TRACK_AST)
-                return cached["is_safe"], cached["safety_reason"], cached_layer, cached["taxonomy"]
-        except Exception:
-            pass
-
     is_safe, reason, layer = audit_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
     taxonomy = derive_taxonomy(cmd_str, layer, is_safe, reason, origin=origin)
-    
-    # Store in session cache
-    if use_cache and cache_key and not is_shadow_mode():
-        try:
-            from session_cache import store_cached_result
-            origin_val = origin.value if isinstance(origin, Origin) else str(origin)
-            store_cached_result(
-                cache_key=cache_key,
-                raw_cmd=cmd_str,
-                is_safe=is_safe,
-                safety_reason=reason,
-                decision_layer=layer.value if isinstance(layer, DecisionLayer) else str(layer),
-                taxonomy=taxonomy,
-                cwd=cwd,
-                scope=scope,
-                agent_id=agent_id,
-                origin=origin_val
-            )
-        except Exception:
-            pass
 
     # Shadow Mode Handling
     if is_shadow_mode() and not is_safe:
