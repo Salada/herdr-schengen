@@ -13,7 +13,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 DB_DIR = Path.home() / ".local" / "state" / "herdr-schengen"
 DB_PATH = DB_DIR / "schengen_history.db"
