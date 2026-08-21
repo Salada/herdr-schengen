@@ -31,6 +31,7 @@ from gray_zone_evaluator import (
     classify_resource_tier,
 )
 from shellcheck_evaluator import audit_shell_with_shellcheck
+from semgrep_evaluator import audit_script_with_semgrep
 
 # 1. Sensitive file patterns (Secrets & Credentials)
 SEP = r"(^|[\s/\"'@:=])"
@@ -599,6 +600,7 @@ class DecisionLayer(str, Enum):
     MANAGED_GIT_GUARD = "MANAGED_GIT_GUARD"   # Layer 1: Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) policy
     FORGEJO_GUARD = "MANAGED_GIT_GUARD"       # Layer 1 (Alias for backward compatibility)
     SAST_SHELLCHECK = "SAST_SHELLCHECK"       # Layer 2a: SAST ShellCheck variable hazard pre-filter (SC2115, SC2154)
+    SAST_SEMGREP = "SAST_SEMGREP"             # Layer 2b: SAST Semgrep remote pipe & reverse shell pre-filter
     SHELL_CRITICAL = "SHELL_CRITICAL"         # Layer 2: Critical destructive shell operations (rm -rf, sudo, git reset --hard)
     SANDBOX_GUARD = "SANDBOX_GUARD"           # Layer 3: Hermes Docker/microVM Sandbox write isolation
     PYTHON_AST = "PYTHON_AST"                 # Layer 4: Python static AST analysis (eval/exec, opens, subprocess writes)
@@ -663,6 +665,11 @@ def _audit_static_shell_command(
     if not sc_safe:
         return False, sc_reason, DecisionLayer.SAST_SHELLCHECK
 
+    # 1c. Check Semgrep SAST for remote piping / reverse shells
+    sem_safe, sem_reason, sem_details = audit_script_with_semgrep(cmd_str)
+    if not sem_safe:
+        return False, sem_reason, DecisionLayer.SAST_SEMGREP
+
     # 2. Check critical destructive patterns
     for pat, desc in CRITICAL_SHELL_PATTERNS:
         if re.search(pat, cmd_str, re.IGNORECASE):
@@ -702,6 +709,10 @@ def _audit_static_shell_command(
         return False, f"Non-VCS Gray-Zone Guard [BLOCK]: {gz_reason}", DecisionLayer.GRAY_ZONE_MATRIX
     if gz_verdict == Verdict.PROMPT and gz_payload:
         return False, format_decision_guidance(gz_payload), DecisionLayer.GRAY_ZONE_MATRIX
+
+    is_degraded = (isinstance(sc_details, dict) and sc_details.get("degraded")) or (isinstance(sem_details, dict) and sem_details.get("degraded"))
+    if is_degraded:
+        return True, "Safe [DEGRADED_UNAVAILABLE: SAST tools absent]", DecisionLayer.FAST_TRACK_AST
 
     return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
@@ -828,6 +839,10 @@ def derive_taxonomy(
             mechanism = "unbound-variable-sc2115"
         else:
             mechanism = "unbound-variable-sc2154"
+    elif layer == DecisionLayer.SAST_SEMGREP:
+        consequence = Consequence.PERSISTENCE if ("piped" in reason.lower() or "reverse" in reason.lower()) else Consequence.INTEGRITY
+        origin = Origin.INJECTED if ("piped" in reason.lower() or "reverse" in reason.lower()) else Origin.EMERGENT
+        mechanism = "piped-remote-script-execution" if "piped" in reason.lower() else ("reverse-shell" if "reverse" in reason.lower() else "semgrep-sast-rule")
     elif layer == DecisionLayer.SHELL_CRITICAL:
         if re.search(r"\b(sudo|su)\b", cmd_str, re.IGNORECASE):
             consequence = Consequence.PERSISTENCE
@@ -862,6 +877,10 @@ def derive_taxonomy(
     else:
         consequence = Consequence.DESTRUCTION
         mechanism = "none"
+
+    if "DEGRADED" in reason or "degraded" in reason.lower() or "binary absent" in reason.lower():
+        gate_state = GateState.DEGRADED
+        mechanism = "sast-degraded"
 
     return {
         "origin": origin.value if isinstance(origin, Origin) else str(origin),
