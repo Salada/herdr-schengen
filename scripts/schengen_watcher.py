@@ -294,6 +294,42 @@ def handle_sighup(signum, frame):
     _RELOAD_REQUESTED = True
 
 
+def find_git_repo_and_rel_path(mod_path: Path):
+    """Find git repository and relative path for module file, checking parent directory tree and SSOT repo."""
+    parent_dir = mod_path.parent
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        if res.returncode == 0 and res.stdout.strip() == "true":
+            rel_res = subprocess.run(
+                ["git", "-C", str(parent_dir), "ls-files", "--full-name", str(mod_path)],
+                capture_output=True, text=True, check=False, timeout=1.0
+            )
+            rel_path = rel_res.stdout.strip()
+            if rel_path:
+                return parent_dir, rel_path
+    except Exception:
+        pass
+
+    # Fallback to SSOT repository at ~/code/herdr-schengen
+    ssot_repo = Path.home() / "code" / "herdr-schengen"
+    if (ssot_repo / ".git").exists():
+        rel_candidate = f"scripts/{mod_path.name}"
+        try:
+            rel_res = subprocess.run(
+                ["git", "-C", str(ssot_repo), "ls-files", "--error-unmatch", rel_candidate],
+                capture_output=True, text=True, check=False, timeout=1.0
+            )
+            if rel_res.returncode == 0 and rel_res.stdout.strip():
+                return ssot_repo, rel_candidate
+        except Exception:
+            pass
+
+    return None, None
+
+
 def verify_module_integrity(module_obj) -> bool:
     """Verify that Python source file exists, parses to valid AST, is tracked by Git, and matches committed Git HEAD blob hash."""
     try:
@@ -313,24 +349,12 @@ def verify_module_integrity(module_obj) -> bool:
         ast.parse(content)
 
         # 2. Cryptographic SCM Git Blob Verification against committed HEAD
-        parent_dir = mod_path.parent
-        res = subprocess.run(
-            ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, check=False, timeout=1.0
-        )
-        if res.returncode != 0 or res.stdout.strip() != "true":
-            return False
-
-        rel_res = subprocess.run(
-            ["git", "-C", str(parent_dir), "ls-files", "--full-name", str(mod_path)],
-            capture_output=True, text=True, check=False, timeout=1.0
-        )
-        rel_path = rel_res.stdout.strip()
-        if not rel_path:
+        repo_dir, rel_path = find_git_repo_and_rel_path(mod_path)
+        if not repo_dir or not rel_path:
             return False
 
         head_blob_res = subprocess.run(
-            ["git", "-C", str(parent_dir), "rev-parse", f"HEAD:{rel_path}"],
+            ["git", "-C", str(repo_dir), "rev-parse", f"HEAD:{rel_path}"],
             capture_output=True, text=True, check=False, timeout=1.0
         )
         if head_blob_res.returncode != 0:
@@ -338,7 +362,7 @@ def verify_module_integrity(module_obj) -> bool:
         head_blob_hash = head_blob_res.stdout.strip()
 
         file_blob_res = subprocess.run(
-            ["git", "-C", str(parent_dir), "hash-object", str(mod_path)],
+            ["git", "-C", str(repo_dir), "hash-object", str(mod_path)],
             capture_output=True, text=True, check=False, timeout=1.0
         )
         if file_blob_res.returncode != 0:
@@ -684,7 +708,7 @@ def main():
         excluded.add(self_pane)
     print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning}, lock={lock_file_path.name})", flush=True)
 
-    last_approved_cmd = {}
+    last_processed_prompt = {}
     idle_count = 0
 
     try:
@@ -743,15 +767,28 @@ def main():
                 if args.agent_filter != "all" and agent_kind != args.agent_filter:
                     continue
 
+                state_seq = pane_info.get("state_change_seq", 0)
+                agent_status = pane_info.get("agent_status", "")
+
                 visible_text = get_pane_text(pane_id, lines=80)
                 req_cmd = parse_permission_request(visible_text)
 
                 if not req_cmd:
-                    # Prompt is no longer active; reset last_approved_cmd for this pane
-                    last_approved_cmd[pane_id] = None
+                    # Prompt is no longer active; reset last_processed_prompt for this pane
+                    if pane_id in last_processed_prompt:
+                        resolve_escalation(pane_id=pane_id)
+                        last_processed_prompt.pop(pane_id, None)
                     continue
 
-                if last_approved_cmd.get(pane_id) == req_cmd:
+                cached = last_processed_prompt.get(pane_id)
+                now = time.time()
+
+                # If same command is pending review on this pane, emit periodic reminder every 30s
+                if cached and cached.get("cmd") == req_cmd:
+                    if not cached.get("is_safe", True):
+                        if now - cached.get("last_alert_time", 0) > 30.0:
+                            cached["last_alert_time"] = now
+                            print(f"⏳ [ESCALATION_REMINDER] Pane {pane_id} ({agent_kind}) is STILL waiting for approval: {req_cmd[:70]}", flush=True)
                     continue
 
                 print(f"\n🔍 [Target: {pane_id} ({agent_kind})] Detected Script/Command Pre-Approval Request:\n----------------------------------------\n{req_cmd}\n----------------------------------------", flush=True)
@@ -817,7 +854,12 @@ def main():
                             run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
                     else:
                         print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
-                    last_approved_cmd[pane_id] = req_cmd
+                    last_processed_prompt[pane_id] = {
+                        "cmd": req_cmd,
+                        "seq": state_seq,
+                        "is_safe": True,
+                        "last_alert_time": now
+                    }
                     resolve_escalation(pane_id=pane_id)
                 else:
                     # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
@@ -835,8 +877,14 @@ def main():
                     print(f"   • Layer: {layer}", flush=True)
                     print(f"   • Reason: {reason}", flush=True)
                     print(f"   • Intercepted Command:\n     {req_cmd}", flush=True)
-                    run_cmd(["herdr", "notification", "send", "--title", "SmartGate Alert", "--body", f"Manual approval required on {pane_id} [Layer: {layer}]: {reason}"])
-                    last_approved_cmd[pane_id] = req_cmd
+                    # Herdr notification popup
+                    run_cmd(["herdr", "notification", "show", "SmartGate Alert", "--body", f"Manual approval required on {pane_id} [Layer: {layer}]: {reason}", "--sound", "request"])
+                    last_processed_prompt[pane_id] = {
+                        "cmd": req_cmd,
+                        "seq": state_seq,
+                        "is_safe": False,
+                        "last_alert_time": now
+                    }
 
             time.sleep(args.interval)
     finally:

@@ -87,11 +87,60 @@ class TestDecisionLayers(unittest.TestCase):
             "edit_file /Users/kyjbusan/.local/share/chezmoi/dot_zshenv.tmpl",
             "create_file /Users/kyjbusan/.local/share/chezmoi/docs/adr/ADR-003-destructive-intent.md",
             'git -C ~/.local/share/chezmoi commit -m "fix(zshenv): fix template whitespace newline rendering for secrets"',
+            "git push -u origin feat/context-cache-and-minimal-prompt",
+            "git push origin feat/allow-feature-branch-push",
+            "git push origin fix/sc2154-unbound-var",
+            "git push -u origin chore/update-deps",
+            "git push origin refactor/security-evaluator",
+            "git push origin test/feature-push",
+            "git push origin docs/update-readme",
+            "git push origin ci/runner-optimization",
+            "git push origin wip/experiment-1",
         ]
         for cmd in safe_macos_cmds:
             safe, reason, layer = audit_shell_command(cmd)
             self.assertTrue(safe, f"Expected '{cmd}' to be allowed, but got blocked: {reason}")
             self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_git_push_safeguards(self):
+        # 1. Safe Feature branch pushes -> FAST_TRACK_AST
+        safe_pushes = [
+            "git push -u origin feat/context-cache-and-minimal-prompt",
+            "cd /Users/kyjbusan/code/herdr-schengen-worktrees/context-cache && git push origin feat/context-cache-and-minimal-prompt",
+            "git push origin fix/test-bug",
+            "git push -u origin chore/cleanup",
+            "git push origin refactor/evaluator",
+            "git push origin test/audit-suite",
+            "git push origin docs/architecture",
+            "git push origin custom-branch-123",
+        ]
+        for cmd in safe_pushes:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected safe feature push for '{cmd}', but got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+        # 2. Blocked Dangerous Git Push scenarios -> SHELL_CRITICAL
+        blocked_pushes = [
+            ("git push --force origin feat/test", "force push"),
+            ("git push -f origin feat/test", "force push"),
+            ("git push origin +feat/test", "plus force refspec"),
+            ("git push origin --delete feat/test", "remote delete flag"),
+            ("git push origin :feat/test", "colon remote delete refspec"),
+            ("git push --all origin", "all branches push"),
+            ("git push --mirror origin", "mirror push"),
+            ("git push --tags origin", "tags push"),
+            ("git push origin main", "protected main branch"),
+            ("git push -u origin master", "protected master branch"),
+            ("git push origin develop", "protected develop branch"),
+            ("git push origin release/v1.0", "protected release branch"),
+            ("git push origin prod", "protected prod branch"),
+            ("git push origin production", "protected production branch"),
+            ("git push origin HEAD:main", "protected HEAD:main refspec"),
+        ]
+        for cmd, label in blocked_pushes:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' ({label}) to be blocked as critical, but got safe={safe}")
+            self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
     def test_sandbox_guard_layer(self):
         safe, reason, layer = audit_shell_command("echo 'hack' > ~/.hermes/sandboxes/docker/default/home/exploit.sh")
