@@ -819,7 +819,7 @@ def main():
                         use_llm_judge=args.use_gpt_oss,
                         reasoning_effort=args.reasoning,
                         origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN,
-                        target_cwd=target_cwd,
+                        cwd=target_cwd,
                         scope=pane_id,
                         agent_id=agent_kind
                     )

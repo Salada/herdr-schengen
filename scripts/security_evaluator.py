@@ -367,17 +367,27 @@ class PythonASTAuditor(ast.NodeVisitor):
 
 def audit_python_code(code_str: str) -> Tuple[bool, str]:
     """Parse and audit Python source code with Forgejo whitelist."""
-    try:
-        tree = ast.parse(code_str)
-        effective_code = code_str
-    except SyntaxError as e:
-        # Fallback: attempt parsing unwrapped lines if terminal soft-wrapped the single-line string
+    tree = None
+    effective_code = code_str
+    syntax_err = None
+
+    candidates = [
+        code_str,
+        code_str.replace('\\"', '"').replace("\\'", "'"),
+        " ".join(line.strip() for line in code_str.splitlines()),
+        " ".join(line.strip() for line in code_str.splitlines()).replace('\\"', '"').replace("\\'", "'"),
+    ]
+
+    for cand in candidates:
         try:
-            unwrapped = " ".join(line.strip() for line in code_str.splitlines())
-            tree = ast.parse(unwrapped)
-            effective_code = unwrapped
-        except SyntaxError:
-            return False, f"Python SyntaxError during AST audit: {e}"
+            tree = ast.parse(cand)
+            effective_code = cand
+            break
+        except SyntaxError as e:
+            syntax_err = e
+
+    if tree is None:
+        return False, f"Python SyntaxError during AST audit: {syntax_err}"
 
     auditor = PythonASTAuditor(raw_code=effective_code)
     auditor.visit(tree)
