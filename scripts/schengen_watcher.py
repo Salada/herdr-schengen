@@ -294,6 +294,42 @@ def handle_sighup(signum, frame):
     _RELOAD_REQUESTED = True
 
 
+def find_git_repo_and_rel_path(mod_path: Path):
+    """Find git repository and relative path for module file, checking parent directory tree and SSOT repo."""
+    parent_dir = mod_path.parent
+    try:
+        res = subprocess.run(
+            ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, check=False, timeout=1.0
+        )
+        if res.returncode == 0 and res.stdout.strip() == "true":
+            rel_res = subprocess.run(
+                ["git", "-C", str(parent_dir), "ls-files", "--full-name", str(mod_path)],
+                capture_output=True, text=True, check=False, timeout=1.0
+            )
+            rel_path = rel_res.stdout.strip()
+            if rel_path:
+                return parent_dir, rel_path
+    except Exception:
+        pass
+
+    # Fallback to SSOT repository at ~/code/herdr-schengen
+    ssot_repo = Path.home() / "code" / "herdr-schengen"
+    if (ssot_repo / ".git").exists():
+        rel_candidate = f"scripts/{mod_path.name}"
+        try:
+            rel_res = subprocess.run(
+                ["git", "-C", str(ssot_repo), "ls-files", "--error-unmatch", rel_candidate],
+                capture_output=True, text=True, check=False, timeout=1.0
+            )
+            if rel_res.returncode == 0 and rel_res.stdout.strip():
+                return ssot_repo, rel_candidate
+        except Exception:
+            pass
+
+    return None, None
+
+
 def verify_module_integrity(module_obj) -> bool:
     """Verify that Python source file exists, parses to valid AST, is tracked by Git, and matches committed Git HEAD blob hash."""
     try:
@@ -313,24 +349,12 @@ def verify_module_integrity(module_obj) -> bool:
         ast.parse(content)
 
         # 2. Cryptographic SCM Git Blob Verification against committed HEAD
-        parent_dir = mod_path.parent
-        res = subprocess.run(
-            ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, check=False, timeout=1.0
-        )
-        if res.returncode != 0 or res.stdout.strip() != "true":
-            return False
-
-        rel_res = subprocess.run(
-            ["git", "-C", str(parent_dir), "ls-files", "--full-name", str(mod_path)],
-            capture_output=True, text=True, check=False, timeout=1.0
-        )
-        rel_path = rel_res.stdout.strip()
-        if not rel_path:
+        repo_dir, rel_path = find_git_repo_and_rel_path(mod_path)
+        if not repo_dir or not rel_path:
             return False
 
         head_blob_res = subprocess.run(
-            ["git", "-C", str(parent_dir), "rev-parse", f"HEAD:{rel_path}"],
+            ["git", "-C", str(repo_dir), "rev-parse", f"HEAD:{rel_path}"],
             capture_output=True, text=True, check=False, timeout=1.0
         )
         if head_blob_res.returncode != 0:
@@ -338,7 +362,7 @@ def verify_module_integrity(module_obj) -> bool:
         head_blob_hash = head_blob_res.stdout.strip()
 
         file_blob_res = subprocess.run(
-            ["git", "-C", str(parent_dir), "hash-object", str(mod_path)],
+            ["git", "-C", str(repo_dir), "hash-object", str(mod_path)],
             capture_output=True, text=True, check=False, timeout=1.0
         )
         if file_blob_res.returncode != 0:
