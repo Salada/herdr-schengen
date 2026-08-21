@@ -102,11 +102,13 @@ Replaces flat intent tagging with an **Origin × Consequence + Mechanism** 3-axi
 
 ### D. English Minimal-Token Few-Shot Prompting & Context-Full Cache
 
-* **LLM Inspector Optimization**:
-  * Uses English-only, minimal-token prompts executed via an isolated subagent/SLM to maximize token efficiency and minimize TTFT/TPOT latency.
-* **Context-Full Cache Key**:
-  * Verdicts are cached per session to achieve $O(1)$ lookup for repetitive commands:
-    $$\text{CacheKey} = \text{SHA256}(\text{raw\_cmd} + \text{cwd} + \text{env\_fingerprint} + \text{scope\_root} + \text{agent\_id} + \text{origin} + \text{ruleset\_version})$$
+* **L2 Reducer Isolation (B1 Mandate)**:
+  * The LLM and its session cache operate strictly as a **middle-tier reducer** for complex dynamic substitutions (`audit_dynamic_substitution_with_llm`).
+  * Deterministic guards (Fast-Track AST, ShellCheck SAST, Semgrep SAST, Critical Regex, Sandbox Guard, Secret Guard, Gray-Zone Matrix) execute **unconditionally on every command** in 1~5ms and cannot be bypassed by cached verdicts.
+* **Context-Full Cache Key & Fail-Loud Invalidation**:
+  * Verdicts are cached in-memory (`collections.OrderedDict` LRU, <0.1ms) and persisted to SQLite (`evaluation_cache` table) with TTL:
+    $$\text{CacheKey} = \text{SHA256}(\text{raw\_cmd} + \text{cwd} + \text{scope} + \text{agent\_id} + \text{origin} + \text{ruleset\_hash})$$
+  * Dynamic ruleset hash is computed directly from prompt contents and critical rule definitions (`MINIMAL_INSPECTOR_SYSTEM_PROMPT` + `CRITICAL_SHELL_PATTERNS`), guaranteeing automatic invalidation upon rule updates without broad exception masking.
 
 ---
 
@@ -115,21 +117,21 @@ Replaces flat intent tagging with an **Origin × Consequence + Mechanism** 3-axi
 1. **Fail-Mode Boundary**:
    * **Fail-OPEN**: Provably side-effect-free, in-workspace local reads (`ls`, `cat src/`, `git status`) fail-OPEN with a visible `[GATE DEGRADED]` terminal banner.
    * **Fail-CLOSED**: Network egress (`curl`, `ssh`), sensitive path reads (`.env`, `~/.ssh`), and filesystem mutations fail-CLOSED on daemon error.
-2. **Scope Manifest (Zero-Config Default)**:
-   * Defaults to the current git repository root. Scope expansions (e.g. accessing `/var` or network egress) require explicit 1-time human approval.
+2. **Scoped Degradation Telemetry**:
+   * Analyzers reporting unavailable binaries surface `gate_state = DEGRADED` and `mechanism = sast-degraded` strictly on their targeted domain (e.g. script contexts `python -c`, `bash -c`), preserving `gate_state = ENFORCE` and `mechanism = fast-track-verified` for standard static commands.
 
 ---
 
-## 4. 5-Phase Phased Rollout Strategy
+## 4. 4-Phase Phased Rollout Completion Record
 
-```
-[Phase 0: Shadow/Observe] ──► [Phase 1: ShellCheck Scoped] ──► [Phase 2: Semgrep Minimal] ──► [Phase 3: LLM Inspector] ──► [Phase 4: Bandit Review]
-  - Log-only counterfactual     - SC2154 hard errors           - 3~5 core YAML rules          - English Few-shot SLM       - Python AST specialized
-  - Establish FP baseline       - Agent env whitelist          - Tier 2 escalation path        - Context-full cache on      - Telemetry validation
-```
+The 4-step phased rollout was executed in isolated worktrees and verified via dual-channel multi-agent peer review (`devops-hermes` & `ciso-hermes`):
 
-* **Kill-Switch**:
-  * If False Positive rate exceeds 1~2%, an alert is triggered with human-approved one-click fallback to Phase 0 Shadow Mode (`SCHENGEN_SHADOW_MODE=1`).
+| Phase | PR | Target Feature | Outcome |
+| :--- | :--- | :--- | :--- |
+| **Step 1** | [PR #5](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/pulls/5) | **Phase 0 Foundation**: 2D Taxonomy, SQLite schema, `SCHENGEN_SHADOW_MODE` kill-switch, diagnostics CLI. | **MERGED (`c37a768`)** |
+| **Step 2** | [PR #6](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/pulls/6) | **Phase 1 Scoped ShellCheck SAST**: SC2115/SC2154 pre-filtering, 30+ environment whitelist, CI shellcheck integration. | **MERGED (`882f263`)** |
+| **Step 3** | [PR #7](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/pulls/7) | **Phase 2 & 3 Context Cache & LLM Prompt**: Scoped L2 cache, OrderedDict true LRU, English minimal prompt (<300 tokens). | **MERGED (`16b7937`)** |
+| **Step 4** | [PR #8](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/pulls/8) | **Phase 4 SAST Pre-Filter & Degradation Hardening**: Remote piping / reverse shell pre-filter, scoped degradation telemetry, full 72-test suite. | **MERGED (`38b6171`)** |
 
 ---
 
