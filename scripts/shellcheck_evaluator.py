@@ -17,14 +17,14 @@ import subprocess
 from typing import Tuple, Dict, Any, Optional, Set
 
 # Standard runtime environment variable whitelist to prevent false-positives
+# Note: Sensitive tokens/keys (e.g. FORGEJO_TOKEN, BW_SESSION) are excluded to ensure full scrutiny
 STANDARD_ENV_WHITELIST: Set[str] = {
     "HOME", "USER", "LOGNAME", "PATH", "PWD", "OLDPWD", "SHELL", "TERM",
     "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "EDITOR", "VISUAL", "PAGER",
     "UID", "GID", "EUID", "OSTYPE", "MACHTYPE", "HOSTTYPE", "HOSTNAME",
     "SHLVL", "RANDOM", "SECONDS", "LINENO", "IFS",
-    # Agent & Tooling standard variables
-    "ANTIGRAVITY_AGENT", "HERDR_ENV", "HERMES_HOME", "FORGEJO_TOKEN",
-    "GH_TOKEN", "GITHUB_TOKEN", "BW_SESSION", "SCHENGEN_SHADOW_MODE",
+    # Safe Agent & Tooling runtime flags (non-secret)
+    "ANTIGRAVITY_AGENT", "HERDR_ENV", "HERMES_HOME", "SCHENGEN_SHADOW_MODE",
     "CI", "NODE_ENV", "PYTHONPATH", "VIRTUAL_ENV", "CARGO_HOME", "RUSTUP_HOME"
 }
 
@@ -36,9 +36,8 @@ DESTRUCTIVE_VARIABLE_COMMANDS = re.compile(
 
 
 def get_runtime_env_whitelist() -> Set[str]:
-    """Capture current process environment variables plus standard whitelist."""
-    env_keys = set(os.environ.keys())
-    return STANDARD_ENV_WHITELIST.union(env_keys)
+    """Return standard non-secret environment whitelist."""
+    return set(STANDARD_ENV_WHITELIST)
 
 
 def is_shellcheck_available() -> bool:
@@ -49,9 +48,11 @@ def is_shellcheck_available() -> bool:
 def audit_shell_with_shellcheck(
     cmd_str: str,
     custom_env_whitelist: Optional[Set[str]] = None,
-    timeout: float = 0.8
+    timeout: float = 0.2
 ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     """Audit shell command line or script block with ShellCheck AST analyzer.
+    
+    Latency SLA: <80ms typical, hard timeout at 200ms.
     
     Returns:
         (is_safe: bool, reason: str, details: Optional[Dict[str, Any]])
@@ -64,6 +65,12 @@ def audit_shell_with_shellcheck(
         return True, "Safe: Static command without variable expansion", None
 
     if not is_shellcheck_available():
+        # If binary is absent and command has destructive variable usage, emit visible DEGRADED marker
+        if DESTRUCTIVE_VARIABLE_COMMANDS.search(cmd_str) and re.search(r"(\$|`)", cmd_str):
+            return True, "ShellCheck SAST: [DEGRADED_UNAVAILABLE] shellcheck binary not installed; pass-through to Layer 2 pattern guards", {
+                "degraded": True,
+                "reason": "BINARY_ABSENT"
+            }
         return True, "ShellCheck binary not available; skipped SAST pre-filter", None
 
     try:
@@ -124,7 +131,10 @@ def audit_shell_with_shellcheck(
         return True, "ShellCheck SAST: Verified safe", None
 
     except subprocess.TimeoutExpired:
-        # Fast fail-open with note if timeout exceeded to adhere to <80ms SLA
-        return True, "ShellCheck SAST timeout exceeded (>80ms); pass-through to Layer 2", None
+        # Fast fail-open with explicit degradation note if timeout exceeded (>200ms)
+        return True, "ShellCheck SAST: [DEGRADED_TIMEOUT] timeout exceeded (>200ms); pass-through to Layer 2", {
+            "degraded": True,
+            "reason": "TIMEOUT_EXCEEDED"
+        }
     except Exception as e:
         return True, f"ShellCheck SAST execution error ({e}); pass-through to Layer 2", None

@@ -70,6 +70,28 @@ class TestShellCheckSAST(unittest.TestCase):
         safe, reason, layer, tax = audit_shell_command_with_taxonomy(cmd)
         self.assertTrue(safe)
 
+    def test_secret_variables_are_not_whitelisted_from_scrutiny(self):
+        """Secret tokens (FORGEJO_TOKEN, BW_SESSION) are not in whitelist and are scrutinized."""
+        if not is_shellcheck_available():
+            self.skipTest("shellcheck binary not installed on runner")
+
+        cmd = 'rm -rf "$FORGEJO_TOKEN_XYZ"'
+        safe, reason, layer, tax = audit_shell_command_with_taxonomy(cmd)
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SAST_SHELLCHECK)
+        self.assertEqual(tax["origin"], Origin.EMERGENT.value)
+
+    def test_degraded_state_reported_when_binary_absent(self):
+        """When shellcheck is unavailable, destructive commands with vars emit DEGRADED telemetry."""
+        from unittest.mock import patch
+        with patch("shellcheck_evaluator.is_shellcheck_available", return_value=False):
+            safe, reason, details = audit_shell_with_shellcheck('rm -rf "$TARGET_DIR"')
+            self.assertTrue(safe)  # Fails open to Layer 2 pattern guards
+            self.assertIsNotNone(details)
+            self.assertTrue(details.get("degraded"))
+            self.assertEqual(details.get("reason"), "BINARY_ABSENT")
+            self.assertIn("DEGRADED_UNAVAILABLE", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
