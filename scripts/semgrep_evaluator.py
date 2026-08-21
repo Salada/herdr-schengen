@@ -18,12 +18,12 @@ from typing import Dict, Any, Tuple, Optional
 
 # Pre-compiled high-confidence SAST signatures
 PIPED_REMOTE_EXEC_PATTERN = re.compile(
-    r"\b(curl|wget|fetch|http)\b[^|;\n]+\|\s*(ba|z|da|a)?sh\b",
+    r"\b(curl|wget|fetch|http)\b[^|;\n]+\|\s*(sudo\s+|env\s+|/bin/|/usr/bin/)?(ba|z|da|a)?sh\b",
     re.IGNORECASE
 )
 
 REVERSE_SHELL_PATTERN = re.compile(
-    r"(\b(bash|sh|zsh)\s+-i\s+>&|\/dev\/tcp\/[0-9.]+\/[0-9]+|\bsocket\.socket\(.*\.connect\(|\bpty\.spawn\()",
+    r"(\b(bash|sh|zsh)\s+-i\s+>&|\/dev\/tcp\/[0-9.]+\/[0-9]+|\bsocket\.socket\(.*\.connect\(|\bpty\.spawn\(|\bnc(\.traditional)?\s+-[a-zA-Z]*e\s+)",
     re.IGNORECASE
 )
 

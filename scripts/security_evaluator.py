@@ -706,6 +706,9 @@ def _audit_static_shell_command(
     if gz_verdict == Verdict.PROMPT and gz_payload:
         return False, format_decision_guidance(gz_payload), DecisionLayer.GRAY_ZONE_MATRIX
 
+    if sc_details.get("degraded") or sem_details.get("degraded"):
+        return True, "Safe [DEGRADED_UNAVAILABLE: SAST tools absent]", DecisionLayer.FAST_TRACK_AST
+
     return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
 
