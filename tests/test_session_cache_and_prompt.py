@@ -69,7 +69,7 @@ class TestSessionCacheAndPrompt(unittest.TestCase):
         self.assertEqual(res_mem["decision_layer"], "FAST_TRACK_AST")
 
         # 2. Clear in-memory cache to force SQLite DB fallback lookup
-        _IN_MEMORY_EVAL_CACHE.clear()
+        clear_session_cache()
         res_db = get_cached_result(test_key)
         self.assertIsNotNone(res_db)
         self.assertTrue(res_db["is_safe"])

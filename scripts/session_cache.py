@@ -17,10 +17,16 @@ from typing import Dict, Any, Optional, Tuple, Callable
 from guard_db import (
     get_cached_evaluation,
     set_cached_evaluation,
-    purge_expired_cache_entries
+    purge_expired_cache_entries,
+    clear_in_memory_cache
 )
 
 RULESET_VERSION = "2.0.0"
+
+
+def clear_session_cache():
+    """Clear in-memory cache entries."""
+    clear_in_memory_cache()
 
 
 def compute_cache_key(

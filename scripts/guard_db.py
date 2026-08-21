@@ -142,6 +142,11 @@ _IN_MEMORY_EVAL_CACHE: Dict[str, Tuple[bool, str, str, Dict[str, Any], float]] =
 _MAX_MEMORY_CACHE_SIZE = 1000
 
 
+def clear_in_memory_cache():
+    """Clear all entries from in-memory cache."""
+    _IN_MEMORY_EVAL_CACHE.clear()
+
+
 def get_cached_evaluation(cache_key: str) -> Optional[Dict[str, Any]]:
     """Retrieve cached security evaluation result by cache_key."""
     import json
