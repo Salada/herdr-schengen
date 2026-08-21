@@ -67,14 +67,17 @@ class TestSemgrepSASTAndHardening(unittest.TestCase):
 
     def test_degraded_telemetry_surfaced_in_taxonomy(self):
         """Degraded state telemetry surfaces in gate_state and mechanism."""
-        # Simulated degraded fallback
-        safe, reason, layer, tax = audit_shell_command_with_taxonomy("echo 'test'")
-        self.assertTrue(safe)
-        if "DEGRADED" in reason:
-            self.assertEqual(tax["gate_state"], GateState.DEGRADED.value)
-            self.assertEqual(tax["mechanism"], "sast-degraded")
-        else:
-            self.assertEqual(tax["gate_state"], GateState.ENFORCE.value)
+        # 1. Static command without script invocation is ENFORCE and fast-track-verified
+        safe_stat, _, layer_stat, tax_stat = audit_shell_command_with_taxonomy("git status")
+        self.assertTrue(safe_stat)
+        self.assertEqual(tax_stat["gate_state"], GateState.ENFORCE.value)
+        self.assertEqual(tax_stat["mechanism"], "fast-track-verified")
+
+        # 2. Script command requiring SAST tool reports DEGRADED when binary is absent
+        safe_script, reason_script, layer_script, tax_script = audit_shell_command_with_taxonomy("python3 -c \"print('test')\"")
+        self.assertTrue(safe_script)
+        self.assertEqual(tax_script["gate_state"], GateState.DEGRADED.value)
+        self.assertEqual(tax_script["mechanism"], "sast-degraded")
 
     def test_all_9_decision_layers_present(self):
         """All 9 decision layers are defined and distinct in the DecisionLayer enum."""

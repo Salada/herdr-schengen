@@ -1,12 +1,12 @@
-"""Semgrep SAST Pre-Filter for Herdr Schengen (SmartGate).
+"""Semgrep & Script SAST Pre-Filter for Herdr Schengen (SmartGate).
 
-Provides scoped static analysis for:
+Provides scoped static analysis and pre-filtering for:
 1. Remote execution piping (`curl ... | sh`, `wget ... | bash`)
 2. Dangerous subprocess shell invocation with dynamic strings
 3. Reverse shell and socket redirection patterns
-4. Embedded sensitive credential definitions
+4. Degraded telemetry surfacing when SAST analyzers are unavailable for script contexts.
 
-Latency SLA: <20ms typical (AST pre-filter) with 200ms hard timeout on Semgrep CLI.
+Latency SLA: <1ms typical AST/regex pre-filter.
 """
 
 import json
@@ -33,6 +33,12 @@ UNSAFE_SUBPROCESS_SHELL_PATTERN = re.compile(
 )
 
 
+SCRIPT_INVOCATION_PATTERN = re.compile(
+    r"\b(python[0-9.]*\s+(-c|-m)|bash\s+-c|sh\s+-c|zsh\s+-c|perl\s+-e|ruby\s+-e|node\s+-e|eval\b)",
+    re.IGNORECASE
+)
+
+
 def audit_script_with_semgrep(
     cmd_str: str,
     timeout_sec: float = 0.2
@@ -43,7 +49,7 @@ def audit_script_with_semgrep(
         (is_safe: bool, reason: str, details: Dict[str, Any])
     """
     if not cmd_str or not cmd_str.strip():
-        return True, "Safe: Empty command", {}
+        return True, "Safe: Empty command", {"degraded": False}
 
     # Fast AST/Regex Pattern Pre-Filter (<1ms)
     if PIPED_REMOTE_EXEC_PATTERN.search(cmd_str):
@@ -64,10 +70,14 @@ def audit_script_with_semgrep(
             "consequence": "INT"
         }
 
-    # If Semgrep binary is not available, emit graceful degraded telemetry
+    # Static commands without script invocations pass fast-path without degradation
+    if not SCRIPT_INVOCATION_PATTERN.search(cmd_str):
+        return True, "Semgrep SAST: Clean (Fast-path static)", {"degraded": False}
+
+    # If Semgrep binary is not available on script invocation, emit graceful degraded telemetry
     semgrep_bin = shutil.which("semgrep")
     if not semgrep_bin:
-        return True, "Semgrep SAST: Clean (Binary absent, fallback active)", {
+        return True, "Semgrep SAST: Clean (Binary absent on script context, AST fallback active)", {
             "degraded": True,
             "reason": "BINARY_ABSENT"
         }
