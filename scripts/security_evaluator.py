@@ -75,7 +75,11 @@ CRITICAL_SHELL_PATTERNS = [
     (r"\bsu\b", "User switching (su)"),
     (r"\bchmod\s+[0-7x+rw-]+", "Permission modification (chmod)"),
     (r"\bchown\b", "Ownership modification (chown)"),
-    (r"\bgit\s+push(\s+--force|\s+-f)?\b", "Remote Git push / overwrite"),
+    # Git Remote Push Safeguards (Allows non-force feature branch pushes, blocks force/delete/mirror/protected branch push)
+    (r"\bgit\s+push\b.*(--force\b|-f\b|\+[\w/.-]+)", "Destructive Git force push / overwrite (--force / -f / +ref)"),
+    (r"\bgit\s+push\b.*(--delete\b|:\w+)", "Destructive Git remote branch deletion (--delete)"),
+    (r"\bgit\s+push\b.*(--all\b|--mirror\b|--tags\b)", "Dangerous global or mirror Git push (--all / --mirror / --tags)"),
+    (r"\bgit\s+push\b.*(?:\borigin\s+|\s+|HEAD:)(main\b|master\b|develop\b|release[/_-][^\s]+|prod\b|production\b)", "Direct Git push to protected branch (main/master/develop/release/prod)"),
     (r"\bgit\s+reset\s+--hard\b", "Destructive Git reset"),
     (r"\bgit\s+clean\s+-[fF]", "Destructive Git clean"),
     (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Denial of Service / Fork bomb"),
@@ -812,7 +816,7 @@ def derive_taxonomy(
         elif re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", cmd_str) or re.search(r"\b(killall|pkill)\s+-9\s+(launchd|init|systemd|Dock|Finder)", cmd_str):
             consequence = Consequence.AVAILABILITY
             mechanism = "dos-fork-bomb"
-        elif re.search(r"\bgit\s+(push\s+--force|reset\s+--hard|clean\s+-[fF]|rm\s+-[rfRF]+)", cmd_str):
+        elif re.search(r"\bgit\s+(push\b|reset\s+--hard|clean\s+-[fF]|rm\s+-[rfRF]+)", cmd_str):
             consequence = Consequence.DESTRUCTION
             mechanism = "git-destructive"
         elif re.search(r"\b(diskutil\s+(erase|partition|zero)|mkfs|dd|gpt\s+destroy|asr\s+restore|tmutil\s+delete)", cmd_str):

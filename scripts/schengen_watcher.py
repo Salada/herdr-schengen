@@ -684,7 +684,7 @@ def main():
         excluded.add(self_pane)
     print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning}, lock={lock_file_path.name})", flush=True)
 
-    last_approved_cmd = {}
+    last_processed_prompt = {}
     idle_count = 0
 
     try:
@@ -743,15 +743,28 @@ def main():
                 if args.agent_filter != "all" and agent_kind != args.agent_filter:
                     continue
 
+                state_seq = pane_info.get("state_change_seq", 0)
+                agent_status = pane_info.get("agent_status", "")
+
                 visible_text = get_pane_text(pane_id, lines=80)
                 req_cmd = parse_permission_request(visible_text)
 
                 if not req_cmd:
-                    # Prompt is no longer active; reset last_approved_cmd for this pane
-                    last_approved_cmd[pane_id] = None
+                    # Prompt is no longer active; reset last_processed_prompt for this pane
+                    if pane_id in last_processed_prompt:
+                        resolve_escalation(pane_id=pane_id)
+                        last_processed_prompt.pop(pane_id, None)
                     continue
 
-                if last_approved_cmd.get(pane_id) == req_cmd:
+                cached = last_processed_prompt.get(pane_id)
+                now = time.time()
+
+                # If same command is pending review on this pane, emit periodic reminder every 30s
+                if cached and cached.get("cmd") == req_cmd:
+                    if not cached.get("is_safe", True):
+                        if now - cached.get("last_alert_time", 0) > 30.0:
+                            cached["last_alert_time"] = now
+                            print(f"⏳ [ESCALATION_REMINDER] Pane {pane_id} ({agent_kind}) is STILL waiting for approval: {req_cmd[:70]}", flush=True)
                     continue
 
                 print(f"\n🔍 [Target: {pane_id} ({agent_kind})] Detected Script/Command Pre-Approval Request:\n----------------------------------------\n{req_cmd}\n----------------------------------------", flush=True)
@@ -812,7 +825,12 @@ def main():
                             run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
                     else:
                         print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
-                    last_approved_cmd[pane_id] = req_cmd
+                    last_processed_prompt[pane_id] = {
+                        "cmd": req_cmd,
+                        "seq": state_seq,
+                        "is_safe": True,
+                        "last_alert_time": now
+                    }
                     resolve_escalation(pane_id=pane_id)
                 else:
                     # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
@@ -830,8 +848,14 @@ def main():
                     print(f"   • Layer: {layer}", flush=True)
                     print(f"   • Reason: {reason}", flush=True)
                     print(f"   • Intercepted Command:\n     {req_cmd}", flush=True)
-                    run_cmd(["herdr", "notification", "send", "--title", "SmartGate Alert", "--body", f"Manual approval required on {pane_id} [Layer: {layer}]: {reason}"])
-                    last_approved_cmd[pane_id] = req_cmd
+                    # Herdr notification popup
+                    run_cmd(["herdr", "notification", "show", "SmartGate Alert", "--body", f"Manual approval required on {pane_id} [Layer: {layer}]: {reason}", "--sound", "request"])
+                    last_processed_prompt[pane_id] = {
+                        "cmd": req_cmd,
+                        "seq": state_seq,
+                        "is_safe": False,
+                        "last_alert_time": now
+                    }
 
             time.sleep(args.interval)
     finally:
