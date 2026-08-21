@@ -455,7 +455,17 @@ def run_cmd(args):
 
 
 def get_all_panes():
-    """Retrieve all active Herdr panes."""
+    """Retrieve all active Herdr panes enriched with live agent metadata and state_change_seq."""
+    out = run_cmd(["herdr", "agent", "list"])
+    if out:
+        try:
+            data = json.loads(out)
+            agents = data.get("result", {}).get("agents", [])
+            if agents:
+                return agents
+        except Exception:
+            pass
+
     out = run_cmd(["herdr", "pane", "list"])
     if not out:
         return []
@@ -783,8 +793,8 @@ def main():
                 cached = last_processed_prompt.get(pane_id)
                 now = time.time()
 
-                # If same command is pending review on this pane, emit periodic reminder every 30s
-                if cached and cached.get("cmd") == req_cmd:
+                # If same command is pending review on this pane in the EXACT same turn state
+                if cached and cached.get("cmd") == req_cmd and cached.get("seq") == state_seq and cached.get("status") == agent_status:
                     if not cached.get("is_safe", True):
                         if now - cached.get("last_alert_time", 0) > 30.0:
                             cached["last_alert_time"] = now
@@ -809,7 +819,7 @@ def main():
                         use_llm_judge=args.use_gpt_oss,
                         reasoning_effort=args.reasoning,
                         origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN,
-                        cwd=target_cwd,
+                        target_cwd=target_cwd,
                         scope=pane_id,
                         agent_id=agent_kind
                     )
@@ -857,6 +867,7 @@ def main():
                     last_processed_prompt[pane_id] = {
                         "cmd": req_cmd,
                         "seq": state_seq,
+                        "status": agent_status,
                         "is_safe": True,
                         "last_alert_time": now
                     }
@@ -882,6 +893,7 @@ def main():
                     last_processed_prompt[pane_id] = {
                         "cmd": req_cmd,
                         "seq": state_seq,
+                        "status": agent_status,
                         "is_safe": False,
                         "last_alert_time": now
                     }
