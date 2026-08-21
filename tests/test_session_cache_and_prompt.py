@@ -9,7 +9,12 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from session_cache import compute_cache_key, get_cached_result, store_cached_result
+from session_cache import (
+    compute_cache_key,
+    get_cached_result,
+    store_cached_result,
+    clear_session_cache
+)
 from guard_db import (
     get_cached_evaluation,
     set_cached_evaluation,
