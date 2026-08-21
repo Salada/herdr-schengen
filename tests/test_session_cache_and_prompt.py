@@ -138,6 +138,16 @@ class TestSessionCacheAndPrompt(unittest.TestCase):
         dyn_ver = get_dynamic_ruleset_version()
         self.assertTrue(dyn_ver.startswith("dyn-"))
         self.assertGreater(len(dyn_ver), 8)
+        self.assertNotEqual(dyn_ver, "dyn-2.0.0", "get_dynamic_ruleset_version fell back to hardcoded default!")
+
+    def test_cache_key_changes_on_all_dimensions(self):
+        """Verify that cache key changes when cwd, scope, agent_id, origin, or ruleset changes."""
+        base_key = compute_cache_key("echo $(cat foo)", cwd="/home/a", scope="w1:p1", agent_id="hermes-devops", origin="I", ruleset_version="dyn-1")
+        self.assertNotEqual(base_key, compute_cache_key("echo $(cat foo)", cwd="/home/b", scope="w1:p1", agent_id="hermes-devops", origin="I", ruleset_version="dyn-1"))
+        self.assertNotEqual(base_key, compute_cache_key("echo $(cat foo)", cwd="/home/a", scope="w1:p2", agent_id="hermes-devops", origin="I", ruleset_version="dyn-1"))
+        self.assertNotEqual(base_key, compute_cache_key("echo $(cat foo)", cwd="/home/a", scope="w1:p1", agent_id="hermes-ciso", origin="I", ruleset_version="dyn-1"))
+        self.assertNotEqual(base_key, compute_cache_key("echo $(cat foo)", cwd="/home/a", scope="w1:p1", agent_id="hermes-devops", origin="A", ruleset_version="dyn-1"))
+        self.assertNotEqual(base_key, compute_cache_key("echo $(cat foo)", cwd="/home/a", scope="w1:p1", agent_id="hermes-devops", origin="I", ruleset_version="dyn-2"))
 
     def test_true_lru_eviction(self):
         """N2: True LRU OrderedDict pops least recently used item when capacity is reached."""

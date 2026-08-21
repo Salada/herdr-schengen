@@ -705,7 +705,10 @@ def _audit_static_shell_command(
 def audit_shell_command(
     cmd_str: str,
     use_llm_judge: bool = False,
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    cwd: str = "",
+    scope: str = "default",
+    agent_id: str = "default"
 ) -> Tuple[bool, str, str]:
     """Audit shell command line with PATH, Managed Git rules, dynamic substitution inspection, and AST judge.
     
@@ -724,7 +727,13 @@ def audit_shell_command(
 
         # 5b. If dynamic substitutions still remain (complex expressions like $(find ...), $(awk ...))
         if DYNAMIC_SUBSTITUTION_PATTERN.search(res_cmd):
-            is_safe, reason = audit_dynamic_substitution_with_llm(res_cmd, reasoning_effort=reasoning_effort)
+            is_safe, reason = audit_dynamic_substitution_with_llm(
+                res_cmd,
+                reasoning_effort=reasoning_effort,
+                cwd=cwd,
+                scope=scope,
+                agent_id=agent_id
+            )
             return is_safe, reason, DecisionLayer.LLM_INSPECTOR
 
         # 5c. All substitutions resolved -> audit resulting static command
@@ -877,7 +886,14 @@ def audit_shell_command_with_taxonomy(
     If SCHENGEN_SHADOW_MODE=1 is active, dangerous commands return is_safe=True with
     counterfactual logging metadata.
     """
-    is_safe, reason, layer = audit_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
+    is_safe, reason, layer = audit_shell_command(
+        cmd_str,
+        use_llm_judge=use_llm_judge,
+        reasoning_effort=reasoning_effort,
+        cwd=cwd,
+        scope=scope,
+        agent_id=agent_id
+    )
     taxonomy = derive_taxonomy(cmd_str, layer, is_safe, reason, origin=origin)
 
     # Shadow Mode Handling

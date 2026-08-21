@@ -756,6 +756,8 @@ def main():
 
                 print(f"\n🔍 [Target: {pane_id} ({agent_kind})] Detected Script/Command Pre-Approval Request:\n----------------------------------------\n{req_cmd}\n----------------------------------------", flush=True)
 
+                target_cwd = pane_info.get("foreground_cwd") or pane_info.get("cwd") or os.getcwd()
+
                 # 1. Check user persisted allowlist
                 is_whitelisted, wl_reason = check_persisted_allowlist(req_cmd)
                 if is_whitelisted:
@@ -770,7 +772,7 @@ def main():
                         use_llm_judge=args.use_gpt_oss,
                         reasoning_effort=args.reasoning,
                         origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN,
-                        cwd=os.getcwd(),
+                        cwd=target_cwd,
                         scope=pane_id,
                         agent_id=agent_kind
                     )

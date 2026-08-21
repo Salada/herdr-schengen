@@ -23,15 +23,12 @@ from guard_db import (
 
 def get_dynamic_ruleset_version() -> str:
     """Compute deterministic dynamic ruleset version from cryptographic hash of prompt and rules."""
-    try:
-        from security_evaluator import MINIMAL_INSPECTOR_SYSTEM_PROMPT, CRITICAL_PATTERNS
-        hasher = hashlib.sha256()
-        hasher.update(MINIMAL_INSPECTOR_SYSTEM_PROMPT.encode("utf-8"))
-        for cp in CRITICAL_PATTERNS:
-            hasher.update(cp.pattern.encode("utf-8"))
-        return f"dyn-{hasher.hexdigest()[:12]}"
-    except Exception:
-        return "dyn-2.0.0"
+    from security_evaluator import MINIMAL_INSPECTOR_SYSTEM_PROMPT, CRITICAL_SHELL_PATTERNS
+    hasher = hashlib.sha256()
+    hasher.update(MINIMAL_INSPECTOR_SYSTEM_PROMPT.encode("utf-8"))
+    for pat, desc in CRITICAL_SHELL_PATTERNS:
+        hasher.update(pat.encode("utf-8"))
+    return f"dyn-{hasher.hexdigest()[:12]}"
 
 
 def clear_session_cache():
