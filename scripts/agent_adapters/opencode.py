@@ -48,11 +48,14 @@ def decide_opencode_injection(stage: str) -> str:
 def resolve_opencode_injection(stages):
     """Pure loop-policy function: map the observed stage sequence to a final decision.
 
-    'always' and 'reject' both render as stable, visible confirmation screens, so if
-    either appears anywhere in the sequence we must abort (send escape) rather than
-    misclassify a human-residual cursor position as success. Otherwise, a cleared dialog
-    (final stage 'unknown') with neither confirm screen appearing means 'once' was
-    applied — this removes any dependency on Herdr's agent_status latency.
+    'always' renders as a stable, visible confirmation screen. 'reject' renders a
+    confirmation screen for sub-agents only — the top-level agent rejects immediately,
+    which text alone cannot distinguish from 'once' (a known structural limitation of
+    single-enter + text post-verification). If either confirm screen appears anywhere in
+    the sequence we must abort (send escape) rather than misclassify a human-residual
+    cursor position as success. Otherwise, a cleared dialog (final stage 'unknown') with
+    no confirm screen appearing means 'once' was applied — this removes any dependency on
+    Herdr's agent_status latency.
 
     Returns (verdict, reason) where verdict is
     'success' | 'always_abort' | 'reject_abort' | 'not_registered'.
