@@ -259,6 +259,20 @@ class TestDecisionLayers(unittest.TestCase):
             self.assertFalse(safe, f"Expected split-token '{cmd}' blocked, got safe={safe}: {reason}")
             self.assertEqual(layer, DecisionLayer.PYTHON_AST, f"Expected PYTHON_AST for split-token '{cmd}'")
 
+    def test_python_compact_guard_no_false_positive(self):
+        # The whitespace-insensitive dangerous-token guard must NOT block benign
+        # code: string/comment literals mentioning dangerous terms, and module
+        # names with a dangerous prefix (socketio, urllib3, httpclient).
+        for cmd in (
+            'python3 -c "print(\\"import socket\\")"',
+            'python3 -c "s = \\"exec(\\""',
+            "python3 -c \"import socketio\"",
+            "python3 -c \"import urllib3\"",
+            "python3 -c \"import httpclient\"",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected benign '{cmd}' allowed, got blocked: {reason}")
+
     def test_dialog_leading_whitespace_normalized(self):
         # Cross-layer: leading whitespace on dialog commands must still dispatch.
         safe, reason, layer = audit_shell_command("   edit_file /tmp/notes.txt")

@@ -12,12 +12,14 @@ Combines:
 
 import ast
 from enum import Enum
+import io
 import json
 import os
 import re
 import shlex
 import stat
 import textwrap
+import tokenize as _tokenize
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -175,12 +177,41 @@ DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
 # token (e.g. "__impor\nt__(...)" or "import sock\net"), turning a fail-closed
 # SyntaxError into a fail-open SAFE. Compacting all whitespace before matching
 # defeats that evasion regardless of the candidate that ultimately parses.
+# Trailing (?![a-zA-Z0-9_]) boundaries avoid false-positives on benign module
+# prefixes (socketio, httpclient, urllib3).
 _DANGEROUS_COMPACT_PATTERN = re.compile(
-    r"__import__|eval\(|exec\(|compile\(|"
-    r"importsocket|importrequests|importurllib|importftplib|importsmtplib|importhttp|"
-    r"fromsocket|fromrequests|fromurllib|fromftplib|fromsmtplib|fromhttp",
+    r"__import__(?![a-zA-Z0-9_])|eval\(|exec\(|compile\(|"
+    r"(?:import|from)(?:socket|requests|urllib|ftplib|smtplib|http)(?![a-zA-Z0-9_])",
     re.IGNORECASE,
 )
+
+
+def _strip_strings_and_comments(code_str: str) -> str:
+    """Remove STRING and COMMENT tokens so literals/comments that merely mention a
+    dangerous term do not trigger the compact dangerous-token guard."""
+    try:
+        tokens = list(_tokenize.generate_tokens(io.StringIO(code_str).readline))
+    except Exception:
+        return code_str  # untokenizable (e.g. split token) -> scan raw text
+    return "".join(
+        tok.string for tok in tokens
+        if tok.type not in (_tokenize.STRING, _tokenize.COMMENT)
+    )
+
+
+def _compact_dangerous_token(code_str: str) -> Optional[str]:
+    """Return the matched dangerous token after whitespace-compacting the code with
+    string/comment literals removed, or None if no dangerous token is present."""
+    # Unescape first so '-c' captures that carry \" / \' escapes tokenize cleanly
+    # (otherwise a string literal like print(\"import socket\") cannot be recognized
+    # as a STRING token and would false-positive).
+    unescaped = code_str.replace('\\"', '"').replace("\\'", "'")
+    compact_raw = re.sub(r"\s+", "", unescaped)
+    if not _DANGEROUS_COMPACT_PATTERN.search(compact_raw):
+        return None  # fast path: nothing dangerous even before stripping literals
+    compact_clean = re.sub(r"\s+", "", _strip_strings_and_comments(unescaped))
+    m = _DANGEROUS_COMPACT_PATTERN.search(compact_clean)
+    return m.group(0) if m else None
 
 # 9. LLM / GPT-OSS 120B Model Configuration (Antigravity Native Subagent)
 DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
@@ -432,10 +463,9 @@ def audit_python_code(code_str: str) -> Tuple[bool, str]:
     """Parse and audit Python source code with Forgejo whitelist."""
     # Whitespace-insensitive dangerous-token guard (defeats split-token evasions
     # that a normalization candidate could otherwise reconstruct as benign).
-    compact = re.sub(r"\s+", "", code_str)
-    compact_hit = _DANGEROUS_COMPACT_PATTERN.search(compact)
+    compact_hit = _compact_dangerous_token(code_str)
     if compact_hit:
-        return False, f"Python AST: dangerous token detected '{compact_hit.group(0)}'"
+        return False, f"Python AST: dangerous token detected '{compact_hit}'"
 
     tree = None
     effective_code = code_str
