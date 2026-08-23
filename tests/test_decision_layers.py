@@ -67,6 +67,15 @@ class TestDecisionLayers(unittest.TestCase):
             "security delete-generic-password -s myapp",
             "pfctl -d",
             "networksetup -removeallnetworkservices",
+            # Bitwarden CLI mass secret dump & irreversible vault destruction
+            "bw list items",
+            "bw list items --session $BW_SESSION",
+            "bw --session $BW_SESSION list items",
+            "bw --pretty list items",
+            "bw --raw list items",
+            "bw delete item 12345",
+            "bw --session $BW_SESSION delete item abc-uuid",
+            "bw delete item --permanent 12345",
         ]
         for cmd in critical_macos_cmds:
             safe, reason, layer = audit_shell_command(cmd)
@@ -96,6 +105,13 @@ class TestDecisionLayers(unittest.TestCase):
             "git push origin docs/update-readme",
             "git push origin ci/runner-optimization",
             "git push origin wip/experiment-1",
+            # Safe Bitwarden non-mass-dump operations
+            "bw list folders",
+            "bw list collections",
+            "bw get item 12345",
+            "bw sync",
+            "bw unlock",
+            "bw delete item-attachment 12345",
         ]
         for cmd in safe_macos_cmds:
             safe, reason, layer = audit_shell_command(cmd)
