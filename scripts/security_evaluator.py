@@ -58,7 +58,7 @@ HERMES_SANDBOX_PATTERN = re.compile(r"(\.hermes/sandboxes|hermes_sandbox)", re.I
 
 # 2b. Sensitive directory pattern (for external-directory access screening)
 SENSITIVE_DIRECTORY_PATTERN = re.compile(
-    r"(^|/)\.(ssh|aws|gnupg|kube|docker|hermes|config/gh|config/opencode)(/|$)",
+    r"(^|/)\.(ssh|aws|gnupg|kube|docker|hermes|config/gh|config/opencode)(/|\\|$)",
     re.IGNORECASE,
 )
 
