@@ -127,6 +127,21 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         text = "Permission required\n$0.93 spent\n422,651 tokens\nAllow once"
         self.assertIsNone(self.adapter.parse_permission_request(text))
 
+    def test_parse_anchors_to_latest_dialog_not_history(self):
+        # Regression: the transcript history above may contain the literal
+        # "Permission required"/"Allow once" strings. Extraction must anchor to the
+        # LATEST (bottom) dialog via rfind, not the first (top) history occurrence.
+        text = (
+            "Permission required\n"          # stale string in transcript history
+            "past discussion about Allow once\n"
+            "more history\n"
+            "Permission required\n"          # actual dialog header (bottom)
+            "  # Shell command\n"
+            "$ rm -rf /some/dir\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "rm -rf /some/dir")
+
     def test_parse_external_directory(self):
         text = (
             "Permission required\n"

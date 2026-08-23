@@ -118,11 +118,13 @@ class OpenCodeAdapter(AgentAdapter):
         if self.classify_dialog_stage(text) != "permission":
             return None
 
-        # Anchor to the dialog region: "Permission required" (header) .. "Allow once" (options).
-        header_idx = text.find("Permission required")
-        allow_idx = text.find("Allow once")
+        # Anchor to the dialog region. Use rfind (not find) so the LATEST rendered
+        # dialog at the bottom is anchored, not a stale "Permission required"/"Allow once"
+        # string in the transcript history above (which would slice the wrong region).
+        header_idx = text.rfind("Permission required")
+        allow_idx = text.rfind("Allow once")
         start = header_idx if header_idx != -1 else 0
-        region = text[start:allow_idx] if allow_idx != -1 else text[start:]
+        region = text[start:allow_idx] if allow_idx > start else text[start:]
 
         # 1. Bash command: "$ <command>" (whitespace after '$' is mandatory, so the
         #    sidebar cost "$0.93 spent" — no whitespace after '$' — is not matched).
