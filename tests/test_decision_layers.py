@@ -175,6 +175,30 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.GRAY_ZONE_MATRIX)
 
+    def test_external_directory_access_layer(self):
+        # Safe ephemeral directory -> allowed
+        safe, reason, layer = audit_shell_command("access_directory /tmp")
+        self.assertTrue(safe, f"Expected /tmp access allowed, got: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+        # Sensitive directory -> SECRET_GUARD
+        safe, reason, layer = audit_shell_command("access_directory ~/.ssh")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
+
+        safe, reason, layer = audit_shell_command("access_directory ~/.aws")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
+
+        safe, reason, layer = audit_shell_command("access_directory ~/.config/gh")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
+
+        # Hermes sandbox -> SANDBOX_GUARD
+        safe, reason, layer = audit_shell_command("access_directory ~/.hermes/sandboxes/default")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SANDBOX_GUARD)
+
     def test_managed_git_guard_layer(self):
         # 1. Forgejo GET is allowed, DELETE is blocked
         safe, reason, layer = audit_shell_command("curl http://192.168.10.102:3000/api/v1/repos/Org/repo/issues")

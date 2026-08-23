@@ -132,12 +132,19 @@ class OpenCodeAdapter(AgentAdapter):
             if cmd and not _looks_like_cost_metadata(cmd):
                 return cmd
 
-        # 2. File edit / write path
+        # 2. External directory access: "Access external directory <dir>" (with
+        #    "Patterns" body). Mapped to access_directory so the evaluator can apply
+        #    SECRET_GUARD / SANDBOX_GUARD / GRAY_ZONE screening to the directory.
+        m = re.search(r"Access external directory\s+([^\s\n]+)", region)
+        if m:
+            return f"access_directory {m.group(1).strip()}"
+
+        # 3. File edit / write path
         m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][^\s]+)", region, re.IGNORECASE)
         if m:
             return f"edit_file {m.group(1).strip()}"
 
-        # 3. webfetch URL
+        # 4. webfetch URL
         m = re.search(r"https?://[^\s)\]]+", region)
         if m:
             return f"webfetch {m.group(0).strip()}"
