@@ -28,6 +28,14 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_RE.sub("", text)
 
 
+_COST_METADATA_RE = re.compile(r"^\d+(?:\.\d+)?\s*(?:spent|tokens|k|m)?$", re.IGNORECASE)
+
+
+def _looks_like_cost_metadata(cmd: str) -> bool:
+    """True if the extracted string is a cost/token metadata value (e.g. '0.93 spent')."""
+    return bool(_COST_METADATA_RE.match(cmd.strip()))
+
+
 def decide_opencode_injection(stage: str) -> str:
     """Pure per-poll classification of an opencode post-inject dialog stage.
 
@@ -94,20 +102,21 @@ class OpenCodeAdapter(AgentAdapter):
         Only parses when the dialog is at the 'permission' stage; returns None
         otherwise (so the watcher aborts injection — see the Q3 fail-safe ladder).
 
-        TODO(weakness): dialog layout is source-inferred, not empirically captured.
-        Finalize the $ <command> / file-path regexes against a live opencode dialog
-        capture (herdr agent read --source detection) before trusting full command
-        extraction.
+        Layout is source-verified against packages/tui/src/routes/session/permission.tsx:
+        bash body renders "$ <command>"; edit/read render "Edit/Read <path>"; webfetch
+        renders "WebFetch <url>". The TUI sidebar shows a "$0.93 spent" cost line and the
+        footer shows "$0.93" — both with NO whitespace after '$' — so the bash regex
+        requires at least one whitespace after '$' to avoid mis-parsing those as commands.
         """
         text = strip_ansi(visible_text)
         if self.classify_dialog_stage(text) != "permission":
             return None
 
-        # 1. Bash command: "$ <command>"
-        m = re.search(r"\$\s*([^\n]+)", text)
+        # 1. Bash command: "$ <command>" (whitespace after '$' is mandatory).
+        m = re.search(r"\$\s+([^\n]+)", text)
         if m:
             cmd = m.group(1).strip()
-            if cmd:
+            if cmd and not _looks_like_cost_metadata(cmd):
                 return cmd
 
         # 2. File edit / write path
