@@ -219,6 +219,54 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
             "edit_file /Volumes/My Drive/project notes.md",
         )
 
+    def test_parse_external_directory_wrapped_path(self):
+        # Regression: a long directory path soft-wrapped by the TUI renders with real
+        # newlines. A first-line-only capture would drop the ".ssh" tail (fail-open).
+        text = (
+            "Permission required\n"
+            "  Access external directory /very/long/path/that/wraps\n"
+            "/onto/second/.ssh\n"
+            "Patterns\n"
+            "- /very/long/path/that/wraps/onto/second/.ssh/*\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "access_directory /very/long/path/that/wraps /onto/second/.ssh",
+        )
+
+    def test_parse_external_directory_patterns_substring_not_truncated(self):
+        # Regression: the "Patterns" boundary must anchor to LINE START, so a path that
+        # itself contains the substring "Patterns" is not truncated mid-path (which would
+        # drop the ".ssh" tail and fail-open).
+        text = (
+            "Permission required\n"
+            "  Access external directory /home/Patterns-dir/.ssh\n"
+            "Patterns\n"
+            "- /home/Patterns-dir/.ssh/*\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "access_directory /home/Patterns-dir/.ssh",
+        )
+
+    def test_parse_edit_file_does_not_swallow_diff_body(self):
+        # Regression: the edit dialog renders an EditBody diff after the title; the parser
+        # must capture only the title path, not the diff lines below it.
+        text = (
+            "Permission required\n"
+            "Edit file /tmp/example.txt\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-rm -rf /some/dir\n"
+            "+echo safe\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "edit_file /tmp/example.txt",
+        )
+
 
 class TestOpenCodeInjectionDecision(unittest.TestCase):
     def test_decide_always_abort(self):
