@@ -128,9 +128,20 @@ class OpenCodeAdapter(AgentAdapter):
 
         # 1. Bash command: "$ <command>" (whitespace after '$' is mandatory, so the
         #    sidebar cost "$0.93 spent" — no whitespace after '$' — is not matched).
-        m = re.search(r"\$\s+([^\n]+)", region)
+        #
+        #    Capture the FULL command to the end of the region (which terminates at
+        #    "Allow once"), not just the first line. The TUI soft-wraps long commands
+        #    onto multiple screen lines (real newlines in the captured pane text), so a
+        #    first-line-only capture would silently drop a dangerous suffix — e.g.
+        #    "git status; rm -rf /" wrapped after the space becomes "git status;" and the
+        #    "rm -rf /" tail is lost, a fail-open. Rejoin real newlines with single
+        #    spaces; literal backslash-n sequences (multi-line command bodies, see the
+        #    external-directory "Patterns" case) are not whitespace and are normalized to
+        #    a separator space so word-boundary evaluator patterns still match.
+        m = re.search(r"\$\s+([\s\S]+)", region)
         if m:
-            cmd = m.group(1).strip()
+            cmd = m.group(1).replace("\\n", " ")
+            cmd = re.sub(r"\s+", " ", cmd).strip()
             if cmd and not _looks_like_cost_metadata(cmd):
                 return cmd
 

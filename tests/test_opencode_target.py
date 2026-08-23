@@ -127,6 +127,35 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         text = "Permission required\n$0.93 spent\n422,651 tokens\nAllow once"
         self.assertIsNone(self.adapter.parse_permission_request(text))
 
+    def test_parse_bash_joins_wrapped_multiline_command(self):
+        # Regression: a long command soft-wrapped by the TUI renders with real newlines.
+        # A first-line-only capture would drop the "rm -rf /" suffix -> fail-open.
+        text = (
+            "Permission required\n"
+            "  # Shell command\n"
+            "$ git status; rm -rf\n"
+            "/some/dir\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "git status; rm -rf /some/dir",
+        )
+
+    def test_parse_bash_normalizes_literal_newline_command(self):
+        # Multi-line command bodies render with literal backslash-n (see the
+        # external-directory "Patterns" case). Normalize to a separator space so
+        # word-boundary evaluator patterns still match the trailing dangerous token.
+        text = (
+            "Permission required\n"
+            "$ git status\\nrm -rf /tmp/foo\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "git status rm -rf /tmp/foo",
+        )
+
     def test_parse_anchors_to_latest_dialog_not_history(self):
         # Regression: the transcript history above may contain the literal
         # "Permission required"/"Allow once" strings. Extraction must anchor to the
