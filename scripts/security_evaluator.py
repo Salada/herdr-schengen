@@ -56,6 +56,12 @@ SENSITIVE_FILE_PATTERN = re.compile(
 # 2. Hermes Sandbox path pattern
 HERMES_SANDBOX_PATTERN = re.compile(r"(\.hermes/sandboxes|hermes_sandbox)", re.IGNORECASE)
 
+# 2b. Sensitive directory pattern (for external-directory access screening)
+SENSITIVE_DIRECTORY_PATTERN = re.compile(
+    r"(^|/)\.(ssh|aws|gnupg|kube|docker|hermes|config/gh|config/opencode)(/|$)",
+    re.IGNORECASE,
+)
+
 # 3. Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) allowed endpoint patterns
 MANAGED_GIT_HOST_PATTERN = re.compile(r"https?://(192\.168\.10\.102:3000|api\.github\.com|gitlab\.com/api|[^/]*gitea[^/]*/api)")
 MANAGED_GIT_ISSUES_PATTERN = re.compile(
@@ -646,6 +652,18 @@ def _audit_static_shell_command(
         if gz_tier == ResourceTier.T4_CRITICAL:
             return False, f"Critical OS/Secret resource {op_type} blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
         return True, f"Verified safe file {op_type}: '{target_path}'", DecisionLayer.FAST_TRACK_AST
+
+    # 0a-2. Check opencode external-directory access dialog (access_directory <path>)
+    if cmd_str.startswith("access_directory "):
+        target = cmd_str.split(" ", 1)[1].strip()
+        if HERMES_SANDBOX_PATTERN.search(target):
+            return False, f"Forbidden external directory access to Hermes Sandbox: '{target}'", DecisionLayer.SANDBOX_GUARD
+        if SENSITIVE_FILE_PATTERN.search(target) or SENSITIVE_DIRECTORY_PATTERN.search(target):
+            return False, f"Forbidden external directory access to sensitive location: '{target}'", DecisionLayer.SECRET_GUARD
+        gz_tier = classify_resource_tier(target)
+        if gz_tier == ResourceTier.T4_CRITICAL:
+            return False, f"Critical OS/Secret resource directory access blocked: '{target}'", DecisionLayer.GRAY_ZONE_MATRIX
+        return True, f"Verified safe external directory access: '{target}'", DecisionLayer.FAST_TRACK_AST
 
     # 0b. Check Managed Git command rules if targeting Managed Git host
     if MANAGED_GIT_HOST_PATTERN.search(cmd_str):

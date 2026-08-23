@@ -127,6 +127,16 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         text = "Permission required\n$0.93 spent\n422,651 tokens\nAllow once"
         self.assertIsNone(self.adapter.parse_permission_request(text))
 
+    def test_parse_external_directory(self):
+        text = (
+            "Permission required\n"
+            "  Access external directory /tmp\n"
+            "Patterns\n"
+            "- /tmp/*\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "access_directory /tmp")
+
 
 class TestOpenCodeInjectionDecision(unittest.TestCase):
     def test_decide_always_abort(self):
