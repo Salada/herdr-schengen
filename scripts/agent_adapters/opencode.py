@@ -135,7 +135,9 @@ class OpenCodeAdapter(AgentAdapter):
         # 2. External directory access: "Access external directory <dir>" (with
         #    "Patterns" body). Mapped to access_directory so the evaluator can apply
         #    SECRET_GUARD / SANDBOX_GUARD / GRAY_ZONE screening to the directory.
-        m = re.search(r"Access external directory\s+([^\s\n]+)", region)
+        #    Stop at whitespace OR a literal backslash: the TUI renders the multi-line
+        #    "Patterns" body with literal "\n" sequences, which must not be captured.
+        m = re.search(r"Access external directory\s+([^\\\s]+)", region)
         if m:
             return f"access_directory {m.group(1).strip()}"
 

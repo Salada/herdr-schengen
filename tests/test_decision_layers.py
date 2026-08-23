@@ -199,6 +199,13 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.SANDBOX_GUARD)
 
+        # Literal "\n" suffix (as captured from the TUI "Patterns" body) must not
+        # break the sensitive-directory boundary -> still SECRET_GUARD (fail-closed).
+        literal_n = "access_directory ~/.ssh\\nPatterns\\n-"
+        safe, reason, layer = audit_shell_command(literal_n)
+        self.assertFalse(safe, f"Expected literal-\\n ~/.ssh blocked, got safe: {reason}")
+        self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
+
     def test_managed_git_guard_layer(self):
         # 1. Forgejo GET is allowed, DELETE is blocked
         safe, reason, layer = audit_shell_command("curl http://192.168.10.102:3000/api/v1/repos/Org/repo/issues")

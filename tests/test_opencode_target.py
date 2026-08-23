@@ -137,6 +137,16 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "access_directory /tmp")
 
+    def test_parse_external_directory_strips_literal_newline_body(self):
+        # The TUI renders the multi-line "Patterns" body with literal "\n" (backslash-n).
+        # The extraction must stop at the backslash so only the directory is captured.
+        text = (
+            "Permission required\n"
+            "  Access external directory /tmp\\nPatterns\\n- /tmp/*\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "access_directory /tmp")
+
 
 class TestOpenCodeInjectionDecision(unittest.TestCase):
     def test_decide_always_abort(self):
