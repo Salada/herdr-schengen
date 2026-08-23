@@ -148,14 +148,18 @@ class OpenCodeAdapter(AgentAdapter):
         # 2. External directory access: "Access external directory <dir>" (with
         #    "Patterns" body). Mapped to access_directory so the evaluator can apply
         #    SECRET_GUARD / SANDBOX_GUARD / GRAY_ZONE screening to the directory.
-        #    Stop at whitespace OR a literal backslash: the TUI renders the multi-line
-        #    "Patterns" body with literal "\n" sequences, which must not be captured.
-        m = re.search(r"Access external directory\s+([^\\\s]+)", region)
+        #    Capture the FULL directory path including spaces (e.g. "/Volumes/My Drive/.ssh")
+        #    — a whitespace-bounded capture would truncate it to "/Volumes/My" and drop the
+        #    sensitive ".ssh" tail, a fail-open. Stop only at a real newline or a literal
+        #    backslash (the multi-line "Patterns" body renders with literal "\n" sequences).
+        m = re.search(r"Access external directory\s+([^\\\n]+)", region)
         if m:
             return f"access_directory {m.group(1).strip()}"
 
-        # 3. File edit / write path
-        m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][^\s]+)", region, re.IGNORECASE)
+        # 3. File edit / write path — same space-in-path concern: capture the path up to a
+        #    real newline or literal backslash, not up to the first whitespace, so a path
+        #    like "~/My Projects/foo.py" is not truncated to "~/My".
+        m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][^\n\\]+)", region, re.IGNORECASE)
         if m:
             return f"edit_file {m.group(1).strip()}"
 
