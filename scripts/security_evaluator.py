@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import stat
+import textwrap
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -380,20 +381,49 @@ class PythonASTAuditor(ast.NodeVisitor):
                     self.reasons.append(f"Non-GET request to non-issues Forgejo endpoint: '{url}'")
 
 
+def _python_normalization_candidates(code_str: str) -> List[str]:
+    """Generate ordered parseable normalization candidates for inline Python source.
+
+    Handles formatting artifacts captured from TUI/agent dialogs:
+    1. Common leading indentation across all lines (textwrap.dedent).
+    2. First-line-flush-with-indented-body where only per-line lstrip resolves it.
+    3. Tab/space mixing (expandtabs before dedent).
+    4. Escaped quotes (unescape candidates).
+    5. TUI soft-wrap flattening a single logical line onto multiple screen rows.
+
+    Candidates are ordered most-preserving -> most-aggressively-normalized so
+    semantic fidelity is preferred whenever a variant parses.
+    """
+    raw = code_str
+    unescaped = raw.replace('\\"', '"').replace("\\'", "'")
+    dedented = textwrap.dedent(raw)
+    dedented_unescaped = textwrap.dedent(unescaped)
+    tabs_expanded = textwrap.dedent(raw.expandtabs(4))
+    flattened = " ".join(line.strip() for line in raw.splitlines())
+    per_line_stripped = "\n".join(line.strip() for line in raw.splitlines() if line.strip())
+
+    candidates: List[str] = []
+    for cand in (
+        raw,
+        dedented,
+        unescaped,
+        dedented_unescaped,
+        tabs_expanded,
+        flattened,
+        per_line_stripped,
+    ):
+        if cand and cand not in candidates:
+            candidates.append(cand)
+    return candidates
+
+
 def audit_python_code(code_str: str) -> Tuple[bool, str]:
     """Parse and audit Python source code with Forgejo whitelist."""
     tree = None
     effective_code = code_str
     syntax_err = None
 
-    candidates = [
-        code_str,
-        code_str.replace('\\"', '"').replace("\\'", "'"),
-        " ".join(line.strip() for line in code_str.splitlines()),
-        " ".join(line.strip() for line in code_str.splitlines()).replace('\\"', '"').replace("\\'", "'"),
-    ]
-
-    for cand in candidates:
+    for cand in _python_normalization_candidates(code_str):
         try:
             tree = ast.parse(cand)
             effective_code = cand
@@ -641,7 +671,10 @@ def _audit_static_shell_command(
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
 ) -> Tuple[bool, str, str]:
     """Audit static shell command line with PATH, Managed Git rules, and AST judge."""
-    if not cmd_str or not cmd_str.strip():
+    # Normalize leading/trailing whitespace so dialog dispatch (startswith / ==)
+    # and pattern matching are robust against TUI-captured indentation.
+    cmd_str = cmd_str.strip()
+    if not cmd_str:
         return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
     # 0. Check CLI feedback survey skip
@@ -697,14 +730,17 @@ def _audit_static_shell_command(
             return True, f"Managed Git security guard: {mg_reason}", DecisionLayer.MANAGED_GIT_GUARD
 
     # 1. Check for inline python execution (Here-doc or -c)
-    heredoc_match = re.search(r"python[0-9.]*\s+-\s*<<\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n([\s\S]*?)\n\s*\1", cmd_str)
+    #    Heredoc allows optional '-' (python3 - <<EOF), no '-' (python3 <<EOF),
+    #    and tab-stripping '<<-' (python3 <<-EOF). Escaped-quote truncation is
+    #    avoided in -c via a negative lookbehind on the closing quote.
+    heredoc_match = re.search(r"python[0-9.]*\s+(?:-\s*)?<<-?\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n([\s\S]*?)\n\s*\1", cmd_str)
     if heredoc_match:
         py_code = heredoc_match.group(2)
         safe, reason = audit_python_code(py_code)
         if not safe:
             return False, f"Inline Python risk: {reason}", DecisionLayer.PYTHON_AST
 
-    dash_c_match = re.search(r"python[0-9.]*\s+-c\s+(['\"])([\s\S]*?)\1", cmd_str)
+    dash_c_match = re.search(r"python[0-9.]*\s+-c\s*(['\"])([\s\S]*?)(?<!\\)\1", cmd_str)
     if dash_c_match:
         py_code = dash_c_match.group(2)
         safe, reason = audit_python_code(py_code)

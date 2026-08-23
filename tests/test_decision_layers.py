@@ -1,8 +1,10 @@
 """Unit tests for Herdr Schengen Decision Layer Attribution and History CLI."""
 
+import ast
 import json
 import os
 import sys
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -10,7 +12,21 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from security_evaluator import audit_shell_command, DecisionLayer
+from security_evaluator import (
+    audit_python_code,
+    _python_normalization_candidates,
+    audit_shell_command,
+    DecisionLayer,
+)
+
+
+def _try_parse(code: str) -> bool:
+    try:
+        ast.parse(code)
+        return True
+    except SyntaxError:
+        return False
+
 from guard_db import (
     init_db,
     record_audit_log,
@@ -184,6 +200,59 @@ class TestDecisionLayers(unittest.TestCase):
         safe, reason, layer = audit_shell_command("python3 -c \"import socket; s = socket.socket()\"")
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.PYTHON_AST)
+
+    def test_python_ast_normalization_dedent_issue22(self):
+        # Issue #22 regression: leading whitespace indentation on multi-line
+        # inline python (TUI/AGY captured) must not fail-closed as SyntaxError.
+        code = (
+            "\n import json\n"
+            " d=json.load(open('/Users/kyjbusan/.local/share/chezmoi/dot_agents/dot_skill-lock.json'))\n"
+            " print('source hash:', d.get('skillFolderHash'))\n"
+        )
+        safe, reason = audit_python_code(code)
+        self.assertTrue(safe, f"Expected dedent-normalized safe code, got blocked: {reason}")
+
+    def test_python_ast_normalization_candidates(self):
+        # _python_normalization_candidates must include dedent and a parseable variant
+        code = "\n import json\n d = {}\n print(d)\n"
+        cands = _python_normalization_candidates(code)
+        self.assertIn(textwrap.dedent(code), cands)
+        parsed = any(True for c in cands if _try_parse(c))
+        self.assertTrue(parsed, "No normalization candidate parsed the indented python")
+
+    def test_python_heredoc_variants_captured(self):
+        # Bypass regressions: heredoc forms that were previously not AST-audited.
+        # Dangerous inline python via no-dash heredoc must now be blocked.
+        for cmd in (
+            "python3 <<EOF\nimport socket; s=socket.socket()\nEOF",
+            "python3 <<-EOF\n\timport socket; s=socket.socket()\n\tEOF",
+            "python3 - <<EOF\nimport socket; s=socket.socket()\nEOF",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' blocked, got safe={safe}: {reason}")
+            self.assertEqual(layer, DecisionLayer.PYTHON_AST, f"Expected PYTHON_AST for '{cmd}'")
+
+    def test_python_dash_c_no_space_captured(self):
+        # python3 -c"..." (no space) previously bypassed the -c capture.
+        safe, reason, layer = audit_shell_command("python3 -c\"import socket; s=socket.socket()\"")
+        self.assertFalse(safe, f"Expected -c\"...\" blocked, got safe={safe}: {reason}")
+        self.assertEqual(layer, DecisionLayer.PYTHON_AST)
+
+    def test_python_dash_c_escaped_quote_not_truncated(self):
+        # python3 -c "print(\"hi\")" previously truncated the capture at the escaped
+        # quote (fail-closed SyntaxError); safe code must now be allowed.
+        safe, reason, layer = audit_shell_command('python3 -c "print(\\"hi\\")"')
+        self.assertTrue(safe, f"Expected escaped-quote python allowed, got blocked: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_dialog_leading_whitespace_normalized(self):
+        # Cross-layer: leading whitespace on dialog commands must still dispatch.
+        safe, reason, layer = audit_shell_command("   edit_file /tmp/notes.txt")
+        self.assertTrue(safe, f"Expected leading-space edit_file allowed, got blocked: {reason}")
+
+        safe, reason, layer = audit_shell_command("   read_file ~/.ssh/id_rsa")
+        self.assertFalse(safe, f"Expected leading-space read_file of secrets blocked, got safe: {reason}")
+        self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
 
     def test_gray_zone_layer(self):
         # Truncate unversioned file in gray zone
