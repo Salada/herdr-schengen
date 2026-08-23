@@ -126,11 +126,11 @@ CRITICAL_SHELL_PATTERNS = [
     ),
     # Bitwarden CLI: mass secret dump & irreversible vault destruction (Rule 17 + Rule 9)
     (
-        r"\bbw\s+list\s+items\b",
+        r"\bbw\b.*?\blist\s+items\b",
         "Bitwarden mass secret dump (bw list items) - violates Secret Redacted-Read Mandate (Rule 17)"
     ),
     (
-        r"\bbw\s+delete\s+item\b",
+        r"\bbw\b.*?\bdelete\s+item\b(?!-)",
         "Bitwarden irreversible vault item deletion (bw delete item) - Non-VCS T4 irreversible mutation (Rule 9)"
     ),
 ]
