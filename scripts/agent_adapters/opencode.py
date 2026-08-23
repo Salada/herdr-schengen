@@ -150,20 +150,23 @@ class OpenCodeAdapter(AgentAdapter):
         #    SECRET_GUARD / SANDBOX_GUARD / GRAY_ZONE screening to the directory.
         #    Capture the FULL directory path — including spaces ("/Volumes/My Drive/.ssh")
         #    AND real-newline soft-wraps ("/very/long/.../wraps\n/onto/second/.ssh") — up to
-        #    the "Patterns" body or a literal backslash-n. A first-line-only capture would
-        #    drop a wrapped sensitive tail, a fail-open; rejoin real newlines with spaces.
-        m = re.search(r"Access external directory\s+([^\\]+?)(?=\s*Patterns|\s*\\n|$)", region)
+        #    the "Patterns" body (anchored to LINE START so a path containing the substring
+        #    "Patterns", e.g. "/home/Patterns-dir/.ssh", is not truncated) or a literal
+        #    backslash-n. A first-line-only capture would drop a wrapped sensitive tail, a
+        #    fail-open; rejoin real newlines with spaces.
+        m = re.search(r"Access external directory\s+([^\\]+?)(?=\n\s*Patterns\b|\s*\\n|$)", region)
         if m:
             dir_path = re.sub(r"\s+", " ", m.group(1)).strip()
             return f"access_directory {dir_path}"
 
-        # 3. File edit / write path — same hardening: capture the full path (spaces and
-        #    soft-wraps) to the end of the dialog region (title-only dialog, so the region
-        #    ends at "Allow once"), then rejoin real newlines with spaces.
-        m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][\s\S]+)", region, re.IGNORECASE)
+        # 3. File edit / write path — capture the path up to the first real newline or a
+        #    literal backslash (the title line only). The edit dialog also renders an
+        #    EditBody diff after the title, which must NOT be swallowed, so capture is
+        #    intentionally single-line (space-in-path safe; soft-wrapped edit paths are a
+        #    documented residual limitation pending host verification of the body boundary).
+        m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][^\n\\]+)", region, re.IGNORECASE)
         if m:
-            file_path = re.sub(r"\s+", " ", m.group(1)).strip()
-            return f"edit_file {file_path}"
+            return f"edit_file {m.group(1).strip()}"
 
         # 4. webfetch URL
         m = re.search(r"https?://[^\s)\]]+", region)
