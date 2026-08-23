@@ -191,6 +191,34 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "access_directory /tmp")
 
+    def test_parse_external_directory_with_space_in_path(self):
+        # Regression: a directory path containing spaces must be captured in full; a
+        # whitespace-bounded capture would truncate "/Volumes/My Drive/.ssh" to
+        # "/Volumes/My" and drop the sensitive ".ssh" tail (fail-open).
+        text = (
+            "Permission required\n"
+            "  Access external directory /Volumes/My Drive/.ssh\n"
+            "Patterns\n"
+            "- /Volumes/My Drive/.ssh/*\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "access_directory /Volumes/My Drive/.ssh",
+        )
+
+    def test_parse_edit_file_with_space_in_path(self):
+        # Regression: same space-in-path concern for edit/write paths.
+        text = (
+            "Permission required\n"
+            "Edit file /Volumes/My Drive/project notes.md\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "edit_file /Volumes/My Drive/project notes.md",
+        )
+
 
 class TestOpenCodeInjectionDecision(unittest.TestCase):
     def test_decide_always_abort(self):
