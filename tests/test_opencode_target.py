@@ -9,7 +9,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from schengen_watcher import parse_agent_filter, agent_matches
 from agent_adapters import get_adapter, target_agent_kinds
-from agent_adapters.opencode import strip_ansi, decide_opencode_injection
+from agent_adapters.opencode import strip_ansi, decide_opencode_injection, resolve_opencode_injection
 
 
 class TestAgentFilterParsing(unittest.TestCase):
@@ -101,18 +101,30 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
 
 
 class TestOpenCodeInjectionDecision(unittest.TestCase):
-    def test_always_abort(self):
-        self.assertEqual(decide_opencode_injection("always_confirm", "blocked"), "always_abort")
+    def test_decide_always_abort(self):
+        self.assertEqual(decide_opencode_injection("always_confirm"), "always_abort")
 
-    def test_not_registered(self):
-        self.assertEqual(decide_opencode_injection("permission", "blocked"), "not_registered")
+    def test_decide_not_registered(self):
+        self.assertEqual(decide_opencode_injection("permission"), "not_registered")
 
-    def test_success_requires_positive_signal(self):
-        self.assertEqual(decide_opencode_injection("unknown", "working"), "success")
-        self.assertEqual(decide_opencode_injection("unknown", "idle"), "success")
+    def test_decide_dialogue_gone(self):
+        self.assertEqual(decide_opencode_injection("unknown"), "dialogue_gone")
 
-    def test_ambiguous_when_unknown_and_blocked(self):
-        self.assertEqual(decide_opencode_injection("unknown", "blocked"), "ambiguous")
+    def test_resolve_success_when_dialog_clears(self):
+        verdict, _ = resolve_opencode_injection(["unknown", "unknown"])
+        self.assertEqual(verdict, "success")
+
+    def test_resolve_always_abort_even_if_later_unknown(self):
+        verdict, _ = resolve_opencode_injection(["unknown", "always_confirm", "unknown"])
+        self.assertEqual(verdict, "always_abort")
+
+    def test_resolve_not_registered_when_still_permission(self):
+        verdict, _ = resolve_opencode_injection(["permission", "permission"])
+        self.assertEqual(verdict, "not_registered")
+
+    def test_resolve_not_registered_when_empty(self):
+        verdict, _ = resolve_opencode_injection([])
+        self.assertEqual(verdict, "not_registered")
 
 
 class TestAgentDispatch(unittest.TestCase):

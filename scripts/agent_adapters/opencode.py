@@ -11,7 +11,7 @@ import re
 import time
 
 from agent_adapters.base import AgentAdapter, register
-from herdr_client import run_cmd, get_pane_info, get_pane_text
+from herdr_client import run_cmd, get_pane_text
 
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
@@ -28,14 +28,13 @@ def strip_ansi(text: str) -> str:
     return ANSI_ESCAPE_RE.sub("", text)
 
 
-def decide_opencode_injection(stage: str, agent_status: str) -> str:
-    """Pure decision function for the post-inject fail-safe backstop.
+def decide_opencode_injection(stage: str) -> str:
+    """Pure per-poll classification of an opencode post-inject dialog stage.
 
-    Maps (dialog_stage, agent_status) to one of:
-      'always_abort'   : our enter landed on 'always' -> caller sends escape.
-      'not_registered' : dialog still at 'permission' -> enter did not register.
-      'ambiguous'      : stage unknown AND agent still blocked -> do NOT treat as success.
-      'success'        : dialog cleared AND agent no longer blocked (positive signal).
+    Returns one of:
+      'always_abort'   : the 'always' confirmation screen appeared -> caller sends escape.
+      'not_registered' : dialog still at 'permission' -> enter did not register yet.
+      'dialogue_gone'  : no recognized dialog marker (stage 'unknown').
 
     Kept pure (no subprocess/Herdr) so the ladder can be unit-tested.
     """
@@ -43,11 +42,26 @@ def decide_opencode_injection(stage: str, agent_status: str) -> str:
         return "always_abort"
     if stage == "permission":
         return "not_registered"
-    # stage 'unknown' (no recognized dialog marker): success requires a positive
-    # signal that the agent is no longer blocked (i.e. the command started running).
-    if agent_status != "blocked":
-        return "success"
-    return "ambiguous"
+    return "dialogue_gone"
+
+
+def resolve_opencode_injection(stages):
+    """Pure loop-policy function: map the observed stage sequence to a final decision.
+
+    'always' renders as a stable, visible always-confirm screen, so if it appears
+    anywhere in the sequence we must abort. Otherwise, a cleared dialog (final stage
+    'unknown') with no always-confirm appearing means 'once' was applied — this removes
+    any dependency on Herdr's agent_status latency.
+
+    Returns (verdict, reason) where verdict is 'success' | 'always_abort' | 'not_registered'.
+    """
+    if any(s == "always_confirm" for s in stages):
+        return "always_abort", "post-inject: 'always' confirmation detected; aborted via escape"
+    if stages and stages[-1] == "permission":
+        return "not_registered", "post-inject: dialog still at 'permission' after bounded re-poll; enter not registered"
+    if stages and stages[-1] == "unknown":
+        return "success", "once approved (dialog cleared, no always-confirm)"
+    return "not_registered", "post-inject: no dialog signal after bounded re-poll; enter not registered"
 
 
 @register
@@ -109,23 +123,19 @@ class OpenCodeAdapter(AgentAdapter):
         # Step 4: inject a single enter (no arrows/numbers).
         run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
 
-        # Step 5: post-inject self-correction backstop via bounded re-poll. A single
-        # timed read would misclassify mid-redraw flicker as 'unknown' (success), so we
-        # re-poll until the dialog stage stabilizes or a positive signal appears.
+        # Step 5: post-inject self-correction backstop via bounded re-poll. Collect the
+        # observed stages and resolve once at the end, so a transient mid-redraw flicker
+        # cannot be misclassified as success (the pure loop-policy does the final call).
+        stages = []
         for _ in range(5):
             time.sleep(0.1)
-            stage = self.classify_dialog_stage(get_pane_text(pane_id, lines=80))
-            status = (get_pane_info(pane_id) or {}).get("agent_status", "")
-            verdict = decide_opencode_injection(stage, status)
+            stages.append(self.classify_dialog_stage(get_pane_text(pane_id, lines=80)))
 
-            if verdict == "always_abort":
-                run_cmd(["herdr", "agent", "send-keys", pane_id, "escape"])
-                return False, "post-inject: 'always' confirmation detected; aborted via escape"
-            if verdict == "success":
-                print(f"🚀 Auto-approving opencode 'once' for {pane_id}...", flush=True)
-                return True, "once approved (dialog cleared, agent no longer blocked)"
-            if verdict == "ambiguous":
-                return False, "post-inject: ambiguous state; not approved"
-            # 'not_registered' -> keep polling in case of a mid-redraw flicker.
-
-        return False, "post-inject: dialog still at 'permission' after bounded re-poll; enter not registered"
+        verdict, reason = resolve_opencode_injection(stages)
+        if verdict == "always_abort":
+            run_cmd(["herdr", "agent", "send-keys", pane_id, "escape"])
+            return False, reason
+        if verdict == "success":
+            print(f"🚀 Auto-approving opencode 'once' for {pane_id}...", flush=True)
+            return True, reason
+        return False, reason

@@ -506,7 +506,7 @@ def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer,
     return esc_id
 
 
-def find_blocked_panes(agent_filter=None, exclude_panes=None):
+def find_blocked_panes(agent_filter=frozenset(), exclude_panes=None):
     """Find panes currently waiting on approval, strictly filtered by agent type and excluding excluded panes."""
     if exclude_panes is None:
         exclude_panes = set()
