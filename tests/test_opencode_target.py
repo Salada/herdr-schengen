@@ -118,6 +118,14 @@ class TestOpenCodeInjectionDecision(unittest.TestCase):
         verdict, _ = resolve_opencode_injection(["unknown", "always_confirm", "unknown"])
         self.assertEqual(verdict, "always_abort")
 
+    def test_resolve_reject_abort(self):
+        verdict, _ = resolve_opencode_injection(["reject", "reject"])
+        self.assertEqual(verdict, "reject_abort")
+
+    def test_resolve_reject_abort_even_if_later_unknown(self):
+        verdict, _ = resolve_opencode_injection(["unknown", "reject", "unknown"])
+        self.assertEqual(verdict, "reject_abort")
+
     def test_resolve_not_registered_when_still_permission(self):
         verdict, _ = resolve_opencode_injection(["permission", "permission"])
         self.assertEqual(verdict, "not_registered")

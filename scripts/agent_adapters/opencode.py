@@ -48,19 +48,26 @@ def decide_opencode_injection(stage: str) -> str:
 def resolve_opencode_injection(stages):
     """Pure loop-policy function: map the observed stage sequence to a final decision.
 
-    'always' renders as a stable, visible always-confirm screen, so if it appears
-    anywhere in the sequence we must abort. Otherwise, a cleared dialog (final stage
-    'unknown') with no always-confirm appearing means 'once' was applied — this removes
-    any dependency on Herdr's agent_status latency.
+    'always' renders as a stable, visible confirmation screen. 'reject' renders a
+    confirmation screen for sub-agents only — the top-level agent rejects immediately,
+    which text alone cannot distinguish from 'once' (a known structural limitation of
+    single-enter + text post-verification). If either confirm screen appears anywhere in
+    the sequence we must abort (send escape) rather than misclassify a human-residual
+    cursor position as success. Otherwise, a cleared dialog (final stage 'unknown') with
+    no confirm screen appearing means 'once' was applied — this removes any dependency on
+    Herdr's agent_status latency.
 
-    Returns (verdict, reason) where verdict is 'success' | 'always_abort' | 'not_registered'.
+    Returns (verdict, reason) where verdict is
+    'success' | 'always_abort' | 'reject_abort' | 'not_registered'.
     """
     if any(s == "always_confirm" for s in stages):
         return "always_abort", "post-inject: 'always' confirmation detected; aborted via escape"
+    if any(s == "reject" for s in stages):
+        return "reject_abort", "post-inject: 'reject' confirmation detected (human residual cursor); aborted via escape"
     if stages and stages[-1] == "permission":
         return "not_registered", "post-inject: dialog still at 'permission' after bounded re-poll; enter not registered"
     if stages and stages[-1] == "unknown":
-        return "success", "once approved (dialog cleared, no always-confirm)"
+        return "success", "once approved (dialog cleared, no always/reject confirm)"
     return "not_registered", "post-inject: no dialog signal after bounded re-poll; enter not registered"
 
 
@@ -132,7 +139,10 @@ class OpenCodeAdapter(AgentAdapter):
             stages.append(self.classify_dialog_stage(get_pane_text(pane_id, lines=80)))
 
         verdict, reason = resolve_opencode_injection(stages)
-        if verdict == "always_abort":
+        if verdict in ("always_abort", "reject_abort"):
+            # A human-residual cursor position (on 'always' or 'reject') was hit by our
+            # enter. Press escape to exit the confirmation sub-dialog, and return the
+            # reason so the caller escalates (conveying it to the human via Herdr).
             run_cmd(["herdr", "agent", "send-keys", pane_id, "escape"])
             return False, reason
         if verdict == "success":
