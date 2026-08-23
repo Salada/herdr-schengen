@@ -93,7 +93,7 @@ flowchart TD
    - **Fail-Safe to Human**: Graceful bail-out to manual approval on network timeout or ambiguity.
 4. **Self-Exclusion & Agent Isolation**:
    - The caller pane running the watcher is automatically excluded (`HERDR_PANE_ID`) to prevent self-recursive auto-approval.
-   - Strictly targets designated coding agents (`agent: "agy"`) while ignoring non-target agents (Hermes, bare shells).
+   - Strictly targets designated coding agents (`agent: "agy"` by default; `agent: "opencode"` opt-in via `--agent-filter agy,opencode`) while ignoring non-target agents (Hermes, bare shells).
 5. **Auditing & History CLI (`schengen_history.py`)**:
    - Every approval and manual delegation is permanently logged to SQLite with timestamps, safety rationales, and exact decision layer attribution.
 
@@ -111,6 +111,9 @@ npx skills add ssh://git@salada-git:2222/InhouseOriented/herdr-schengen.git -g -
 ```bash
 # 1. Start SmartGate daemon monitoring all active & future AGY panes
 python3 scripts/schengen_watcher.py --target auto
+
+# 1b. Also auto-approve OpenCode panes (explicit opt-in)
+python3 scripts/schengen_watcher.py --target auto --agent-filter agy,opencode
 
 # 2. Check live status and active Herdr panes
 python3 scripts/schengen_watcher.py --status

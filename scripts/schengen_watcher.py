@@ -7,7 +7,7 @@ event into SQLite3 database (~/.local/state/herdr-schengen/schengen_history.db),
 and auto-approves safe commands (SmartGate flow) while delegating risky commands to human review.
 
 Key Architecture:
-- STRICT AGY-ONLY SCOPE: Excludes Hermes and other agents by default (--agent-filter agy).
+- MULTI-AGENT TARGET SCOPE: Auto-approves designated coding agents (agy, opencode) while excluding Hermes, bare shells, and the caller pane. Default target is 'agy'; opencode is opt-in via --agent-filter agy,opencode.
 - CONTINUOUS DISCOVERY: Dynamically polls all active and newly added Herdr panes in real-time.
 - STRICT SINGLETON FILELOCK (fcntl.flock): Prevents race conditions & duplicate key injection.
 - DAEMON & STATUS MANAGEMENT: Built-in --daemon, --status, and --stop lifecycle management.
@@ -69,6 +69,14 @@ from security_evaluator import (
     DEFAULT_GPT_OSS_ENDPOINT,
     DEFAULT_REASONING_EFFORT
 )
+from herdr_client import (
+    run_cmd,
+    get_all_panes,
+    get_pane_info,
+    get_pane_text,
+    detect_self_pane_id,
+)
+from agent_adapters import get_adapter, target_agent_kinds
 
 LOCK_FILE = DB_DIR / "schengen.lock"
 LOG_FILE = DB_DIR / "schengen.log"
@@ -208,10 +216,10 @@ def show_guard_status():
         cwd = p.get("foreground_cwd") or p.get("cwd", "")
         if self_pane and pane_id == self_pane:
             guard_label = " [🚫 EXCLUDED: Self-Caller Pane (No Self-Approval)]"
-        elif agent == "agy":
-            guard_label = " [🎯 Guard Target: AGY Sibling/Child Pane]"
+        elif agent in target_agent_kinds():
+            guard_label = f" [🎯 Guard Target: {agent.upper()} Sibling/Child Pane]"
         else:
-            guard_label = f" [⚪ Ignored: Non-AGY ({agent})]"
+            guard_label = f" [⚪ Ignored: Non-Target ({agent})]"
         print(f"   • Pane {pane_id:<6} | Agent: {agent:<8} | Status: {agent_status:<8} | CWD: {cwd}{guard_label}")
 
     # Recent Audit Log Entries
@@ -445,60 +453,60 @@ def is_parent_alive(initial_ppid: int) -> bool:
         return False
 
 
-def run_cmd(args):
-    """Run a subprocess command and return stdout."""
-    try:
-        res = subprocess.run(args, capture_output=True, text=True, check=True)
-        return res.stdout
-    except subprocess.CalledProcessError:
-        return None
+AGENT_FILTER_ALL = "all"
 
 
-def get_all_panes():
-    """Retrieve all active Herdr panes enriched with live agent metadata and state_change_seq."""
-    out = run_cmd(["herdr", "agent", "list"])
-    if out:
-        try:
-            data = json.loads(out)
-            agents = data.get("result", {}).get("agents", [])
-            if agents:
-                return agents
-        except Exception:
-            pass
+def parse_agent_filter(raw: str):
+    """Normalize --agent-filter into a frozenset of agent kinds.
 
-    out = run_cmd(["herdr", "pane", "list"])
-    if not out:
-        return []
-    try:
-        data = json.loads(out)
-        return data.get("result", {}).get("panes", [])
-    except Exception:
-        return []
+    Accepts a comma-separated list (e.g. 'agy,opencode') or the 'all' sentinel.
+    'all' expands to the registered target agent kinds; it does NOT match
+    non-target agents (hermes, bare shells, human). Empty input falls back to
+    the default {'agy'}.
+    """
+    raw = (raw or "").strip()
+    if raw.lower() == AGENT_FILTER_ALL:
+        return frozenset(target_agent_kinds())
+    kinds = frozenset(k.strip() for k in raw.split(",") if k.strip())
+    return kinds or frozenset({"agy"})
 
 
-def get_pane_info(pane_id):
-    """Retrieve specific pane metadata."""
-    for pane in get_all_panes():
-        if pane.get("pane_id") == pane_id:
-            return pane
-    return None
+def agent_matches(agent_kind: str, agent_filter) -> bool:
+    """Return True if agent_kind passes the parsed agent filter.
+
+    agent_filter is expected to be a frozenset of agent kinds (from
+    parse_agent_filter). A bare string is treated as a single agent kind for
+    backward compatibility; None matches nothing (safe default, never match-all).
+    """
+    if isinstance(agent_filter, str):
+        return agent_kind == agent_filter
+    if agent_filter is None:
+        return False
+    return agent_kind in agent_filter
 
 
-def get_pane_text(pane_id, lines=80):
-    """Read visible terminal buffer from pane."""
-    out = run_cmd(["herdr", "pane", "read", pane_id, "--source", "visible", "--lines", str(lines)])
-    return out or ""
+def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer, agent_kind):
+    """Enqueue a persistent escalation and emit intercept notifications. Returns escalation id."""
+    session_uuid = pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
+    esc_id = enqueue_pending_escalation(
+        pane_id=pane_id,
+        raw_command=req_cmd,
+        safety_reason=safety_reason,
+        decision_layer=decision_layer,
+        agent_kind=agent_kind,
+        session_id=session_uuid,
+    )
+    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).", flush=True)
+    print(f"   • Pane: {pane_id} ({agent_kind})", flush=True)
+    print(f"   • Layer: {decision_layer}", flush=True)
+    print(f"   • Reason: {safety_reason}", flush=True)
+    print(f"   • Intercepted Command:\n     {req_cmd}", flush=True)
+    # Herdr notification popup
+    run_cmd(["herdr", "notification", "show", "SmartGate Alert", "--body", f"Manual approval required on {pane_id} [Layer: {decision_layer}]: {safety_reason}", "--sound", "request"])
+    return esc_id
 
 
-def detect_self_pane_id():
-    """Detect the current pane ID running this guard watcher process."""
-    env_pane = os.environ.get("HERDR_PANE") or os.environ.get("HERDR_PANE_ID")
-    if env_pane:
-        return env_pane.strip()
-    return None
-
-
-def find_blocked_panes(agent_filter="agy", exclude_panes=None):
+def find_blocked_panes(agent_filter=frozenset(), exclude_panes=None):
     """Find panes currently waiting on approval, strictly filtered by agent type and excluding excluded panes."""
     if exclude_panes is None:
         exclude_panes = set()
@@ -512,98 +520,25 @@ def find_blocked_panes(agent_filter="agy", exclude_panes=None):
             continue
 
         agent_kind = pane.get("agent", "")
-        if agent_filter != "all" and agent_kind != agent_filter:
+        if not agent_matches(agent_kind, agent_filter):
             continue
 
         status = pane.get("agent_status", "")
         if status == "blocked":
             blocked.append(pane_id)
         else:
+            adapter = get_adapter(agent_kind)
             text = get_pane_text(pane_id, lines=50)
-            if any(p in text for p in (
-                "Requesting permission for:",
-                "Do you want to proceed?",
-                "Do you want to run",
-                "Execute command?",
-                "> 1. Yes",
-                "Accept this file edit?",
-                "Accept this change?",
-                "Pending edit",
-                "Allow creation of this file?",
-                "Allow creation",
-                "Yes, allow creation",
-                "How's the CLI experience so far?",
-                "[0] Skip",
-                "Press enter to continue",
-                "[y/N]",
-                "[Y/n]"
-            )):
+            if adapter and any(p in text for p in adapter.blocked_markers):
                 blocked.append(pane_id)
     return list(set(blocked))
-
-
-def parse_permission_request(visible_text):
-    """Extract command/script/file-edit/survey from diverse approval dialogs across AGY prompts."""
-    # Pattern 1: Standard AGY Requesting permission dialog
-    m1 = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", visible_text)
-    if m1:
-        return m1.group(1).strip()
-
-    # Pattern 2: Multi-line Command box with Requesting permission
-    m2 = re.search(r"Command\s*\n[─-]+\s*\n\s*Requesting permission for:\s*\n([\s\S]*?)\n\s*(> 1\. Yes|Do you want to proceed)", visible_text)
-    if m2:
-        return m2.group(1).strip()
-
-    # Pattern 3: AGY File Edit Confirmation Dialog (Accept this file edit?)
-    if "Accept this file edit?" in visible_text or "Accept this change?" in visible_text or "Pending edit" in visible_text:
-        m_file = re.search(r"Pending edit\s*\n[─-]+\s*\n\s*([^\n\s]+)", visible_text)
-        if not m_file:
-            m_file = re.search(r"(/[^\s]+\.[a-zA-Z0-9_\-\.]+)\s+[+-]\d+", visible_text)
-        file_path = m_file.group(1).strip() if m_file else "unknown_file"
-        return f"edit_file {file_path}"
-
-    # Pattern 3b: AGY File Creation Confirmation Dialog (Allow creation of this file?)
-    if "Allow creation of this file?" in visible_text or "Allow creation" in visible_text or "Yes, allow creation" in visible_text:
-        m_file = re.search(r"WriteToFile\(([^\)]+)\)", visible_text)
-        if not m_file:
-            m_file = re.search(r"Creating file:\s*([^\n\s]+)", visible_text)
-        if not m_file:
-            m_file = re.search(r"(/[^\s]+\.[a-zA-Z0-9_\-\.]+)", visible_text)
-        file_path = m_file.group(1).strip() if m_file else "unknown_file"
-        return f"create_file {file_path}"
-
-    # Pattern 4: Do you want to run '...'?
-    m3 = re.search(r"Do you want to run\s*['\"`]([\s\S]*?)['\"`]\?", visible_text)
-    if m3:
-        return m3.group(1).strip()
-
-    # Pattern 5: Execute/Run command [y/N]
-    m4 = re.search(r"(?:Execute[\s\w?]*|Run\s*command\??):\s*\n([\s\S]*?)\n\s*\[[Yy]/[Nn]\]", visible_text)
-    if m4:
-        return m4.group(1).strip()
-
-    # Pattern 6: Menu options (> 1. Yes) present with python3 heredoc or bash command above
-    if "> 1. Yes" in visible_text or "Do you want to proceed?" in visible_text:
-        py_match = re.search(r"(python[0-9.]*\s+-\s*<<\s*['\"]?([A-Za-z0-9_]+)['\"]?[\s\S]*?\n\s*\2)", visible_text)
-        if py_match:
-            return py_match.group(1).strip()
-        bash_match = re.findall(r"●\s*Bash\(([\s\S]*?)\)", visible_text)
-        if bash_match:
-            return bash_match[-1].strip()
-
-    # Pattern 7: CLI Experience Survey / Feedback Dialog ([0] Skip) strictly checked at the bottom
-    tail_text = "\n".join(visible_text.splitlines()[-15:])
-    if re.search(r"How's the CLI experience so far\?[\s\S]*?\[0\]\s*Skip", tail_text):
-        return "feedback_survey_skip"
-
-    return None
 
 
 def main():
     global _RELOAD_REQUESTED
     parser = argparse.ArgumentParser(description="Herdr SmartGate / Schengen Trusted Clearance Watcher (AGY Exclusive)")
     parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto' (default: auto - monitors all active & future panes)")
-    parser.add_argument("--agent-filter", choices=["agy", "all"], default="agy", help="Target agent filter (default: agy only)")
+    parser.add_argument("--agent-filter", default="agy", help="Target agent filter, comma-separated (e.g. 'agy,opencode') or 'all' (default: agy only)")
     parser.add_argument("--exclude-pane", action="append", default=[], help="Pane ID to exclude from auto-approval")
     parser.add_argument("--interval", type=int, default=3, help="Polling interval in seconds (default: 3)")
     parser.add_argument("--auto-exit", action="store_true", default=False, help="Automatically exit after idle timeout (default: False, runs continuously)")
@@ -702,6 +637,9 @@ def main():
     # Strictly verify AGY runtime environment (ADR-003 mandate)
     verify_agy_runtime_environment()
 
+    # Normalize the target agent filter into a set (None = match all).
+    agent_filter_set = parse_agent_filter(args.agent_filter)
+
     # Track parent PID for orphan prevention
     initial_ppid = os.getppid()
 
@@ -737,12 +675,9 @@ def main():
             all_p = get_all_panes()
 
             if args.target == "auto":
-                target_panes = find_blocked_panes(agent_filter=args.agent_filter, exclude_panes=excluded)
+                target_panes = find_blocked_panes(agent_filter=agent_filter_set, exclude_panes=excluded)
                 if not target_panes:
-                    if args.agent_filter == "agy":
-                        active = [p["pane_id"] for p in all_p if p.get("agent") == "agy" and p["pane_id"] not in excluded]
-                    else:
-                        active = [p["pane_id"] for p in all_p if p.get("agent") in ("agy", "hermes", "codex") and p["pane_id"] not in excluded]
+                    active = [p["pane_id"] for p in all_p if agent_matches(p.get("agent"), agent_filter_set) and p["pane_id"] not in excluded]
                     target_panes = active
             else:
                 if args.target in excluded:
@@ -751,7 +686,7 @@ def main():
                     pane_info = get_pane_info(args.target)
                     if pane_info:
                         agent_kind = pane_info.get("agent", "")
-                        if args.agent_filter != "all" and agent_kind != args.agent_filter:
+                        if not agent_matches(agent_kind, agent_filter_set):
                             target_panes = []
                         else:
                             target_panes = [args.target]
@@ -774,14 +709,18 @@ def main():
                     continue
 
                 agent_kind = pane_info.get("agent", "unknown")
-                if args.agent_filter != "all" and agent_kind != args.agent_filter:
+                if not agent_matches(agent_kind, agent_filter_set):
+                    continue
+
+                adapter = get_adapter(agent_kind)
+                if adapter is None:
                     continue
 
                 state_seq = pane_info.get("state_change_seq", 0)
                 agent_status = pane_info.get("agent_status", "")
 
                 visible_text = get_pane_text(pane_id, lines=80)
-                req_cmd = parse_permission_request(visible_text)
+                req_cmd = adapter.parse_permission_request(visible_text)
 
                 if not req_cmd:
                     # Prompt is no longer active; reset last_processed_prompt for this pane
@@ -851,17 +790,25 @@ def main():
                     if not args.dry_run:
                         # P0 TOCTOU Guard: Re-read pane immediately before sending enter to ensure prompt has not changed
                         current_text = get_pane_text(pane_id, lines=80)
-                        current_req = parse_permission_request(current_text)
+                        current_req = adapter.parse_permission_request(current_text)
                         if current_req != req_cmd:
                             print(f"⚠️  [TOCTOU_ABORT] Pane {pane_id} prompt modified during safety evaluation. Aborting key injection.", flush=True)
                             continue
 
-                        if req_cmd == "feedback_survey_skip":
-                            print(f"⏩ Auto-skipping CLI experience survey on {pane_id} (sending '0')...", flush=True)
-                            run_cmd(["herdr", "agent", "send-keys", pane_id, "0"])
-                        else:
-                            print(f"🚀 Auto-approving pre-execution script for {pane_id} (sending Enter via SmartGate)...", flush=True)
-                            run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
+                        approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
+                        if not approved:
+                            print(f"🚨 [{agent_kind}] {inject_reason} on {pane_id}", flush=True)
+                            # 'OPENCODE_FAILSAFE' is a watcher-level escalation marker, deliberately
+                            # outside the command-classification DecisionLayer enum.
+                            escalate_request(pane_id, pane_info, req_cmd, inject_reason, "OPENCODE_FAILSAFE", agent_kind)
+                            last_processed_prompt[pane_id] = {
+                                "cmd": req_cmd,
+                                "seq": state_seq,
+                                "status": agent_status,
+                                "is_safe": False,
+                                "last_alert_time": now
+                            }
+                            continue
                     else:
                         print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
                     last_processed_prompt[pane_id] = {
@@ -874,22 +821,7 @@ def main():
                     resolve_escalation(pane_id=pane_id)
                 else:
                     # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
-                    session_uuid = pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
-                    esc_id = enqueue_pending_escalation(
-                        pane_id=pane_id,
-                        raw_command=req_cmd,
-                        safety_reason=reason,
-                        decision_layer=layer,
-                        agent_kind=agent_kind,
-                        session_id=session_uuid,
-                    )
-                    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).", flush=True)
-                    print(f"   • Pane: {pane_id} ({agent_kind})", flush=True)
-                    print(f"   • Layer: {layer}", flush=True)
-                    print(f"   • Reason: {reason}", flush=True)
-                    print(f"   • Intercepted Command:\n     {req_cmd}", flush=True)
-                    # Herdr notification popup
-                    run_cmd(["herdr", "notification", "show", "SmartGate Alert", "--body", f"Manual approval required on {pane_id} [Layer: {layer}]: {reason}", "--sound", "request"])
+                    escalate_request(pane_id, pane_info, req_cmd, reason, layer, agent_kind)
                     last_processed_prompt[pane_id] = {
                         "cmd": req_cmd,
                         "seq": state_seq,
