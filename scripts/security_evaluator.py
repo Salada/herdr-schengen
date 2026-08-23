@@ -170,6 +170,18 @@ STATIC_RESOLVABLE_SUBSTITUTION_PATTERN = re.compile(
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
 
+# 8b. Whitespace-insensitive dangerous-token guard. Normalization candidates
+# (dedent/flatten) can reconstruct a benign-looking AST from a split dangerous
+# token (e.g. "__impor\nt__(...)" or "import sock\net"), turning a fail-closed
+# SyntaxError into a fail-open SAFE. Compacting all whitespace before matching
+# defeats that evasion regardless of the candidate that ultimately parses.
+_DANGEROUS_COMPACT_PATTERN = re.compile(
+    r"__import__|eval\(|exec\(|compile\(|"
+    r"importsocket|importrequests|importurllib|importftplib|importsmtplib|importhttp|"
+    r"fromsocket|fromrequests|fromurllib|fromftplib|fromsmtplib|fromhttp",
+    re.IGNORECASE,
+)
+
 # 9. LLM / GPT-OSS 120B Model Configuration (Antigravity Native Subagent)
 DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
 DEFAULT_GPT_OSS_ENDPOINT = os.environ.get("GUARD_LLM_ENDPOINT", "")
@@ -386,13 +398,14 @@ def _python_normalization_candidates(code_str: str) -> List[str]:
 
     Handles formatting artifacts captured from TUI/agent dialogs:
     1. Common leading indentation across all lines (textwrap.dedent).
-    2. First-line-flush-with-indented-body where only per-line lstrip resolves it.
-    3. Tab/space mixing (expandtabs before dedent).
-    4. Escaped quotes (unescape candidates).
-    5. TUI soft-wrap flattening a single logical line onto multiple screen rows.
+    2. Tab/space mixing (expandtabs before dedent).
+    3. Escaped quotes (unescape candidates).
+    4. TUI soft-wrap flattening a single logical line onto multiple screen rows.
 
-    Candidates are ordered most-preserving -> most-aggressively-normalized so
-    semantic fidelity is preferred whenever a variant parses.
+    Candidates are ordered most-preserving -> most-normalized so semantic
+    fidelity is preferred whenever a variant parses. Per-line lstrip is
+    deliberately NOT included: it is semantic-changing and can reconstruct a
+    benign-but-different AST from a split+indented dangerous token (fail-open).
     """
     raw = code_str
     unescaped = raw.replace('\\"', '"').replace("\\'", "'")
@@ -400,7 +413,6 @@ def _python_normalization_candidates(code_str: str) -> List[str]:
     dedented_unescaped = textwrap.dedent(unescaped)
     tabs_expanded = textwrap.dedent(raw.expandtabs(4))
     flattened = " ".join(line.strip() for line in raw.splitlines())
-    per_line_stripped = "\n".join(line.strip() for line in raw.splitlines() if line.strip())
 
     candidates: List[str] = []
     for cand in (
@@ -410,7 +422,6 @@ def _python_normalization_candidates(code_str: str) -> List[str]:
         dedented_unescaped,
         tabs_expanded,
         flattened,
-        per_line_stripped,
     ):
         if cand and cand not in candidates:
             candidates.append(cand)
@@ -419,6 +430,13 @@ def _python_normalization_candidates(code_str: str) -> List[str]:
 
 def audit_python_code(code_str: str) -> Tuple[bool, str]:
     """Parse and audit Python source code with Forgejo whitelist."""
+    # Whitespace-insensitive dangerous-token guard (defeats split-token evasions
+    # that a normalization candidate could otherwise reconstruct as benign).
+    compact = re.sub(r"\s+", "", code_str)
+    compact_hit = _DANGEROUS_COMPACT_PATTERN.search(compact)
+    if compact_hit:
+        return False, f"Python AST: dangerous token detected '{compact_hit.group(0)}'"
+
     tree = None
     effective_code = code_str
     syntax_err = None

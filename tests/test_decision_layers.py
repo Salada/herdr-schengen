@@ -245,6 +245,20 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertTrue(safe, f"Expected escaped-quote python allowed, got blocked: {reason}")
         self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
+    def test_python_split_token_normalization_fail_closed(self):
+        # Split-token evasions: a dangerous identifier fragmented across a newline
+        # must remain fail-closed (blocked), not reconstructed into a benign AST by
+        # a normalization candidate (per_line_stripped regression / dedent variant).
+        for cmd in (
+            "python3 <<EOF\n    __impor\nt__(\"os\").system(\"id\")\nEOF",
+            "python3 <<EOF\n    ex\nec(\"import os; os.system(\\\"id\\\")\")\nEOF",
+            "python3 <<EOF\n    __impor\n    t__(\"os\").system(\"id\")\nEOF",
+            "python3 <<EOF\n    import sock\n    et\nEOF",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected split-token '{cmd}' blocked, got safe={safe}: {reason}")
+            self.assertEqual(layer, DecisionLayer.PYTHON_AST, f"Expected PYTHON_AST for split-token '{cmd}'")
+
     def test_dialog_leading_whitespace_normalized(self):
         # Cross-layer: leading whitespace on dialog commands must still dispatch.
         safe, reason, layer = audit_shell_command("   edit_file /tmp/notes.txt")
