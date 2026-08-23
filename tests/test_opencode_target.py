@@ -99,6 +99,34 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         text = "Permission required\n\nEdit ~/src/foo.py\n\nAllow once"
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file ~/src/foo.py")
 
+    def test_parse_bash_ignores_sidebar_cost_even_if_first(self):
+        # Regression: the TUI sidebar renders "$0.93 spent" (cost metadata, no whitespace
+        # after '$'). Even if it appears before the dialog command, it must be skipped.
+        text = (
+            "Permission required\n"
+            "$0.93 spent\n"
+            "$ echo schengen-live-probe\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "echo schengen-live-probe")
+
+    def test_parse_bash_anchored_to_dialog_ignores_past_command(self):
+        # Regression: the chat timeline renders past commands ("$ git status") ABOVE the
+        # dialog. Extraction must anchor to the dialog, never match the first "$ " viewport-wide.
+        text = (
+            "$ git status\n"
+            "$ ls -la\n"
+            "Permission required\n"
+            "  # Shell command\n"
+            "$ rm -rf /some/dir\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "rm -rf /some/dir")
+
+    def test_parse_returns_none_when_only_cost_metadata(self):
+        text = "Permission required\n$0.93 spent\n422,651 tokens\nAllow once"
+        self.assertIsNone(self.adapter.parse_permission_request(text))
+
 
 class TestOpenCodeInjectionDecision(unittest.TestCase):
     def test_decide_always_abort(self):
