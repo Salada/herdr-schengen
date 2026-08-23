@@ -219,6 +219,35 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
             "edit_file /Volumes/My Drive/project notes.md",
         )
 
+    def test_parse_external_directory_wrapped_path(self):
+        # Regression: a long directory path soft-wrapped by the TUI renders with real
+        # newlines. A first-line-only capture would drop the ".ssh" tail (fail-open).
+        text = (
+            "Permission required\n"
+            "  Access external directory /very/long/path/that/wraps\n"
+            "/onto/second/.ssh\n"
+            "Patterns\n"
+            "- /very/long/path/that/wraps/onto/second/.ssh/*\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "access_directory /very/long/path/that/wraps /onto/second/.ssh",
+        )
+
+    def test_parse_edit_file_wrapped_path(self):
+        # Regression: same wrapped-path concern for edit/write paths.
+        text = (
+            "Permission required\n"
+            "Edit file /very/long/path/that/wraps\n"
+            "/onto/second/id_rsa\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "edit_file /very/long/path/that/wraps /onto/second/id_rsa",
+        )
+
 
 class TestOpenCodeInjectionDecision(unittest.TestCase):
     def test_decide_always_abort(self):

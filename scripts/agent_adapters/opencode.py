@@ -148,20 +148,22 @@ class OpenCodeAdapter(AgentAdapter):
         # 2. External directory access: "Access external directory <dir>" (with
         #    "Patterns" body). Mapped to access_directory so the evaluator can apply
         #    SECRET_GUARD / SANDBOX_GUARD / GRAY_ZONE screening to the directory.
-        #    Capture the FULL directory path including spaces (e.g. "/Volumes/My Drive/.ssh")
-        #    — a whitespace-bounded capture would truncate it to "/Volumes/My" and drop the
-        #    sensitive ".ssh" tail, a fail-open. Stop only at a real newline or a literal
-        #    backslash (the multi-line "Patterns" body renders with literal "\n" sequences).
-        m = re.search(r"Access external directory\s+([^\\\n]+)", region)
+        #    Capture the FULL directory path — including spaces ("/Volumes/My Drive/.ssh")
+        #    AND real-newline soft-wraps ("/very/long/.../wraps\n/onto/second/.ssh") — up to
+        #    the "Patterns" body or a literal backslash-n. A first-line-only capture would
+        #    drop a wrapped sensitive tail, a fail-open; rejoin real newlines with spaces.
+        m = re.search(r"Access external directory\s+([^\\]+?)(?=\s*Patterns|\s*\\n|$)", region)
         if m:
-            return f"access_directory {m.group(1).strip()}"
+            dir_path = re.sub(r"\s+", " ", m.group(1)).strip()
+            return f"access_directory {dir_path}"
 
-        # 3. File edit / write path — same space-in-path concern: capture the path up to a
-        #    real newline or literal backslash, not up to the first whitespace, so a path
-        #    like "~/My Projects/foo.py" is not truncated to "~/My".
-        m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][^\n\\]+)", region, re.IGNORECASE)
+        # 3. File edit / write path — same hardening: capture the full path (spaces and
+        #    soft-wraps) to the end of the dialog region (title-only dialog, so the region
+        #    ends at "Allow once"), then rejoin real newlines with spaces.
+        m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][\s\S]+)", region, re.IGNORECASE)
         if m:
-            return f"edit_file {m.group(1).strip()}"
+            file_path = re.sub(r"\s+", " ", m.group(1)).strip()
+            return f"edit_file {file_path}"
 
         # 4. webfetch URL
         m = re.search(r"https?://[^\s)\]]+", region)
