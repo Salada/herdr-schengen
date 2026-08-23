@@ -103,29 +103,44 @@ class OpenCodeAdapter(AgentAdapter):
         otherwise (so the watcher aborts injection — see the Q3 fail-safe ladder).
 
         Layout is source-verified against packages/tui/src/routes/session/permission.tsx:
-        bash body renders "$ <command>"; edit/read render "Edit/Read <path>"; webfetch
-        renders "WebFetch <url>". The TUI sidebar shows a "$0.93 spent" cost line and the
-        footer shows "$0.93" — both with NO whitespace after '$' — so the bash regex
-        requires at least one whitespace after '$' to avoid mis-parsing those as commands.
+        the dialog renders as a banner with header "Permission required", a per-tool title
+        (e.g. "Shell command" for bash), a body ("$ <command>" for bash), and option buttons
+        "Allow once"/"Allow always"/"Reject".
+
+        Extraction is anchored to the dialog region (between "Permission required" and
+        "Allow once") because the chat timeline ALSO renders past commands as
+        "$ <command>", and the sidebar renders cost metadata "$0.93 spent". An unanchored
+        search would match the first "$ " in the viewport — a past (safe) command or cost —
+        instead of the current request, causing a fail-open where a dangerous command is
+        auto-approved as if it were benign.
         """
         text = strip_ansi(visible_text)
         if self.classify_dialog_stage(text) != "permission":
             return None
 
-        # 1. Bash command: "$ <command>" (whitespace after '$' is mandatory).
-        m = re.search(r"\$\s+([^\n]+)", text)
+        # Anchor to the dialog region: "Permission required" (header) .. "Allow once" (options).
+        header_idx = text.find("Permission required")
+        if header_idx == -1:
+            header_idx = text.find("Allow once")
+        start = header_idx if header_idx != -1 else 0
+        allow_idx = text.find("Allow once", start)
+        region = text[start:allow_idx] if allow_idx != -1 else text[start:]
+
+        # 1. Bash command: "$ <command>" (whitespace after '$' is mandatory, so the
+        #    sidebar cost "$0.93 spent" — no whitespace after '$' — is not matched).
+        m = re.search(r"\$\s+([^\n]+)", region)
         if m:
             cmd = m.group(1).strip()
             if cmd and not _looks_like_cost_metadata(cmd):
                 return cmd
 
         # 2. File edit / write path
-        m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][^\s]+)", text, re.IGNORECASE)
+        m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?([~/][^\s]+)", region, re.IGNORECASE)
         if m:
             return f"edit_file {m.group(1).strip()}"
 
         # 3. webfetch URL
-        m = re.search(r"https?://[^\s)\]]+", text)
+        m = re.search(r"https?://[^\s)\]]+", region)
         if m:
             return f"webfetch {m.group(0).strip()}"
 

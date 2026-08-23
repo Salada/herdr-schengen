@@ -110,6 +110,19 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "echo schengen-live-probe")
 
+    def test_parse_bash_anchored_to_dialog_ignores_past_command(self):
+        # Regression: the chat timeline renders past commands ("$ git status") ABOVE the
+        # dialog. Extraction must anchor to the dialog, never match the first "$ " viewport-wide.
+        text = (
+            "$ git status\n"
+            "$ ls -la\n"
+            "Permission required\n"
+            "  # Shell command\n"
+            "$ rm -rf /some/dir\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "rm -rf /some/dir")
+
     def test_parse_returns_none_when_only_cost_metadata(self):
         text = "Permission required\n$0.93 spent\n422,651 tokens\nAllow once"
         self.assertIsNone(self.adapter.parse_permission_request(text))
