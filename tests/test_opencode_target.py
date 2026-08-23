@@ -87,6 +87,18 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
     def test_stage_unknown(self):
         self.assertEqual(self.adapter.classify_dialog_stage("random terminal output"), "unknown")
 
+    def test_stage_anchored_to_latest_dialog_ignores_history_marker(self):
+        # Regression: a stale "Always allow" string in the transcript history (e.g. a
+        # code diff printing the marker) must not misclassify the live permission dialog.
+        text = (
+            'ALWAYS_CONFIRM_MARKERS = ("Always allow", "until OpenCode is restarted")\n'
+            "some diff line\n"
+            "Permission required\n"
+            "$ git status\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(self.adapter.classify_dialog_stage(text), "permission")
+
     def test_parse_bash_command(self):
         text = "Permission required\n\n  $ git status --porcelain\n\nAllow once  Allow always  Reject"
         self.assertEqual(self.adapter.parse_permission_request(text), "git status --porcelain")

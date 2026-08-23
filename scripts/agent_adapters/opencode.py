@@ -98,13 +98,22 @@ class OpenCodeAdapter(AgentAdapter):
     blocked_markers = ("Permission required", "Allow once", "Allow always")
 
     def classify_dialog_stage(self, visible_text: str) -> str:
-        """Classify the opencode dialog stage: 'always_confirm' | 'reject' | 'permission' | 'unknown'."""
+        """Classify the opencode dialog stage: 'always_confirm' | 'reject' | 'permission' | 'unknown'.
+
+        Anchored to the LATEST (bottom) dialog: confirm/reject markers are only
+        recognized after the last "Permission required" header. An unanchored
+        substring search would match a stale marker in the transcript history
+        (e.g. a code diff printing "Always allow") and misclassify the live
+        permission dialog as a confirm stage -> hang.
+        """
         text = strip_tui(visible_text)
-        if any(m in text for m in ALWAYS_CONFIRM_MARKERS):
+        header_idx = text.rfind("Permission required")
+        tail = text[header_idx:] if header_idx != -1 else text
+        if any(m in tail for m in ALWAYS_CONFIRM_MARKERS):
             return "always_confirm"
-        if any(m in text for m in REJECT_MARKERS):
+        if any(m in tail for m in REJECT_MARKERS):
             return "reject"
-        if "Permission required" in text or "Allow once" in text:
+        if "Permission required" in tail or "Allow once" in tail:
             return "permission"
         return "unknown"
 
