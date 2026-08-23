@@ -206,6 +206,35 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe, f"Expected literal-\\n ~/.ssh blocked, got safe: {reason}")
         self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
 
+    def test_read_file_layer(self):
+        # Safe read -> allowed
+        safe, reason, layer = audit_shell_command("read_file /tmp/notes.txt")
+        self.assertTrue(safe, f"Expected /tmp read allowed, got: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+        # Sensitive file read -> SECRET_GUARD
+        safe, reason, layer = audit_shell_command("read_file ~/.ssh/id_rsa")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
+
+        safe, reason, layer = audit_shell_command("read_file /app/.env")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
+
+    def test_unhandled_dialog_and_doom_loop_layer(self):
+        # Unhandled / doom-loop dialogs must never be auto-approved.
+        safe, reason, layer = audit_shell_command("doom_loop")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+
+        safe, reason, layer = audit_shell_command("unhandled_dialog Glob /tmp/**")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+
+        safe, reason, layer = audit_shell_command("unhandled_dialog WebSearch foo")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+
     def test_managed_git_guard_layer(self):
         # 1. Forgejo GET is allowed, DELETE is blocked
         safe, reason, layer = audit_shell_command("curl http://192.168.10.102:3000/api/v1/repos/Org/repo/issues")

@@ -9,7 +9,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from schengen_watcher import parse_agent_filter, agent_matches
 from agent_adapters import get_adapter, target_agent_kinds
-from agent_adapters.opencode import strip_ansi, decide_opencode_injection, resolve_opencode_injection
+from agent_adapters.opencode import strip_ansi, strip_tui, decide_opencode_injection, resolve_opencode_injection
 
 
 class TestAgentFilterParsing(unittest.TestCase):
@@ -68,6 +68,10 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
     def test_strip_ansi(self):
         self.assertEqual(strip_ansi("\x1b[1;32mPermission required\x1b[0m"), "Permission required")
 
+    def test_strip_tui_box_drawing(self):
+        self.assertEqual(strip_tui("┃ Permission required ┃"), " Permission required ")
+        self.assertEqual(strip_tui("│ $ git status │"), " $ git status ")
+
     def test_stage_permission(self):
         text = "Permission required\n\n$ git status\n\nAllow once  Allow always  Reject"
         self.assertEqual(self.adapter.classify_dialog_stage(text), "permission")
@@ -82,6 +86,18 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
 
     def test_stage_unknown(self):
         self.assertEqual(self.adapter.classify_dialog_stage("random terminal output"), "unknown")
+
+    def test_stage_anchored_to_latest_dialog_ignores_history_marker(self):
+        # Regression: a stale "Always allow" string in the transcript history (e.g. a
+        # code diff printing the marker) must not misclassify the live permission dialog.
+        text = (
+            'ALWAYS_CONFIRM_MARKERS = ("Always allow", "until OpenCode is restarted")\n'
+            "some diff line\n"
+            "Permission required\n"
+            "$ git status\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        self.assertEqual(self.adapter.classify_dialog_stage(text), "permission")
 
     def test_parse_bash_command(self):
         text = "Permission required\n\n  $ git status --porcelain\n\nAllow once  Allow always  Reject"
@@ -266,6 +282,38 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
             self.adapter.parse_permission_request(text),
             "edit_file /tmp/example.txt",
         )
+
+    def test_parse_bash_strips_tui_border_glyphs(self):
+        # Regression: the TUI panel border wraps each visual line with box-drawing glyphs
+        # (e.g. '┃' U+2503). A multi-line capture must not leak them into the command,
+        # which would make the AST evaluator fail with "invalid character".
+        text = (
+            "Permission required\n"
+            "┃ $ python3 -c 'import sys\n"
+            "┃   print(1)' ┃\n"
+            "Allow once  Allow always  Reject\n"
+        )
+        cmd = self.adapter.parse_permission_request(text)
+        self.assertNotIn("\u2503", cmd)
+        self.assertIn("python3 -c", cmd)
+
+    def test_parse_read_file(self):
+        text = "Permission required\n\nRead /tmp/notes.txt\n\nAllow once"
+        self.assertEqual(self.adapter.parse_permission_request(text), "read_file /tmp/notes.txt")
+
+    def test_parse_read_file_sensitive(self):
+        text = "Permission required\n\nRead file /app/.env\n\nAllow once"
+        self.assertEqual(self.adapter.parse_permission_request(text), "read_file /app/.env")
+
+    def test_parse_doom_loop(self):
+        text = "Permission required\n\nDoom loop detected\n\nAllow once  Allow always  Reject"
+        self.assertEqual(self.adapter.parse_permission_request(text), "doom_loop")
+
+    def test_parse_fallback_unhandled_dialog(self):
+        # Glob/grep/list/task/websearch and any unknown permission type must escalate
+        # with the title rather than return None (silent skip).
+        text = "Permission required\n\nGlob /tmp/**\n\nAllow once  Allow always  Reject"
+        self.assertEqual(self.adapter.parse_permission_request(text), "unhandled_dialog Glob /tmp/**")
 
 
 class TestOpenCodeInjectionDecision(unittest.TestCase):

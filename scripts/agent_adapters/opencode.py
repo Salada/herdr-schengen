@@ -16,6 +16,13 @@ from herdr_client import run_cmd, get_pane_text
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 
+# Box-drawing / block-element glyphs rendered by the Bubble Tea panel border
+# (e.g. '┃' U+2503, '│' U+2502, '─' U+2500). These are terminal-margin artifacts
+# that wrap around each visual line of the dialog and MUST NOT leak into an
+# extracted command (they otherwise corrupt multi-line captures and make the AST
+# evaluator fail with "invalid character").
+BOX_DRAWING_RE = re.compile(r"[\u2500-\u257F\u2580-\u259F]")
+
 # opencode TUI permission dialog stage markers (plain-text substrings, source-verified).
 ALWAYS_CONFIRM_MARKERS = ("Always allow", "until OpenCode is restarted")
 REJECT_MARKERS = ("Reject permission", "Tell OpenCode what to do differently")
@@ -26,6 +33,11 @@ def strip_ansi(text: str) -> str:
     if not text:
         return ""
     return ANSI_ESCAPE_RE.sub("", text)
+
+
+def strip_tui(text: str) -> str:
+    """Strip ANSI escapes AND TUI box-drawing/block glyphs from pane text."""
+    return BOX_DRAWING_RE.sub("", strip_ansi(text))
 
 
 _COST_METADATA_RE = re.compile(r"^\d+(?:\.\d+)?\s*(?:spent|tokens|k|m)?$", re.IGNORECASE)
@@ -86,13 +98,22 @@ class OpenCodeAdapter(AgentAdapter):
     blocked_markers = ("Permission required", "Allow once", "Allow always")
 
     def classify_dialog_stage(self, visible_text: str) -> str:
-        """Classify the opencode dialog stage: 'always_confirm' | 'reject' | 'permission' | 'unknown'."""
-        text = strip_ansi(visible_text)
-        if any(m in text for m in ALWAYS_CONFIRM_MARKERS):
+        """Classify the opencode dialog stage: 'always_confirm' | 'reject' | 'permission' | 'unknown'.
+
+        Anchored to the LATEST (bottom) dialog: confirm/reject markers are only
+        recognized after the last "Permission required" header. An unanchored
+        substring search would match a stale marker in the transcript history
+        (e.g. a code diff printing "Always allow") and misclassify the live
+        permission dialog as a confirm stage -> hang.
+        """
+        text = strip_tui(visible_text)
+        header_idx = text.rfind("Permission required")
+        tail = text[header_idx:] if header_idx != -1 else text
+        if any(m in tail for m in ALWAYS_CONFIRM_MARKERS):
             return "always_confirm"
-        if any(m in text for m in REJECT_MARKERS):
+        if any(m in tail for m in REJECT_MARKERS):
             return "reject"
-        if "Permission required" in text or "Allow once" in text:
+        if "Permission required" in tail or "Allow once" in tail:
             return "permission"
         return "unknown"
 
@@ -114,7 +135,7 @@ class OpenCodeAdapter(AgentAdapter):
         instead of the current request, causing a fail-open where a dangerous command is
         auto-approved as if it were benign.
         """
-        text = strip_ansi(visible_text)
+        text = strip_tui(visible_text)
         if self.classify_dialog_stage(text) != "permission":
             return None
 
@@ -168,12 +189,38 @@ class OpenCodeAdapter(AgentAdapter):
         if m:
             return f"edit_file {m.group(1).strip()}"
 
-        # 4. webfetch URL
+        # 4. File read: "Read <path>" -> read_file, so the evaluator applies SECRET_GUARD
+        #    (e.g. reading ".env", "id_*") and GRAY_ZONE screening to the path.
+        m = re.search(r"\bRead\b\s+(?:file\s+)?([~/][^\n\\]+)", region, re.IGNORECASE)
+        if m:
+            return f"read_file {m.group(1).strip()}"
+
+        # 5. webfetch URL
         m = re.search(r"https?://[^\s)\]]+", region)
         if m:
             return f"webfetch {m.group(0).strip()}"
 
-        return None
+        # 6. Doom loop: the agent is stuck in a repetition loop. Never auto-approve —
+        #    always escalate so the human can intervene.
+        if re.search(r"doom\s*loop", region, re.IGNORECASE):
+            return "doom_loop"
+
+        # 7. Fallback: any other permission type (glob/grep/list/task/websearch/unknown).
+        #    Escalate carrying the dialog title — never silently skip or auto-approve an
+        #    unhandled request. Skip the header and sidebar cost metadata (which can leak
+        #    into the region while the dialog is still rendering -> transient, re-poll).
+        title = None
+        for ln in region.splitlines():
+            ln = ln.strip()
+            if not ln or ln.startswith("Permission required") or ln.startswith("$"):
+                continue
+            if re.match(r"^[\d,]+(?:\s+(?:spent|tokens|k|m))?$", ln, re.IGNORECASE):
+                continue
+            title = ln
+            break
+        if title is None:
+            return None
+        return f"unhandled_dialog {title}"
 
     def inject_approval(self, pane_id, req_cmd):
         """Inject a single 'enter' via the Q3 fail-safe ladder with bounded re-poll.

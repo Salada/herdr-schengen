@@ -665,6 +665,20 @@ def _audit_static_shell_command(
             return False, f"Critical OS/Secret resource directory access blocked: '{target}'", DecisionLayer.GRAY_ZONE_MATRIX
         return True, f"Verified safe external directory access: '{target}'", DecisionLayer.FAST_TRACK_AST
 
+    # 0a-3. Check opencode file-read dialog (read_file <path>)
+    if cmd_str.startswith("read_file "):
+        target_path = cmd_str.split(" ", 1)[1].strip()
+        if SENSITIVE_FILE_PATTERN.search(target_path) and "dot_zshenv.tmpl" not in target_path and ".zshenv.local" not in target_path:
+            return False, f"Attempting to READ sensitive credential file: '{target_path}'", DecisionLayer.SECRET_GUARD
+        gz_tier = classify_resource_tier(target_path)
+        if gz_tier == ResourceTier.T4_CRITICAL:
+            return False, f"Critical OS/Secret resource read blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
+        return True, f"Verified safe file read: '{target_path}'", DecisionLayer.FAST_TRACK_AST
+
+    # 0a-4. opencode unhandled / doom-loop dialogs must never be auto-approved.
+    if cmd_str == "doom_loop" or cmd_str.startswith("unhandled_dialog "):
+        return False, "Unhandled opencode permission type; requires human review", DecisionLayer.SHELL_CRITICAL
+
     # 0b. Check Managed Git command rules if targeting Managed Git host
     if MANAGED_GIT_HOST_PATTERN.search(cmd_str):
         mg_safe, mg_reason = is_managed_git_safe_command(cmd_str)
@@ -821,6 +835,9 @@ def derive_taxonomy(
         mechanism = "user-allowlist" if layer == DecisionLayer.ALLOWLIST else "fast-track-verified"
         if layer == DecisionLayer.ALLOWLIST:
             origin = Origin.HUMAN
+    elif cmd_str == "doom_loop" or cmd_str.startswith("unhandled_dialog "):
+        consequence = Consequence.INTEGRITY
+        mechanism = "doom-loop" if cmd_str == "doom_loop" else "unhandled-dialog"
     elif layer == DecisionLayer.SECRET_GUARD:
         consequence = Consequence.EXFILTRATION
         mechanism = "secret-path"
