@@ -484,7 +484,7 @@ def enqueue_pending_escalation(
     raw_command: str,
     safety_reason: str,
     decision_layer: str,
-    agent_kind: str = "agy",
+    agent_kind: str = "unknown",
     session_id: Optional[str] = None,
 ) -> int:
     """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once)."""
