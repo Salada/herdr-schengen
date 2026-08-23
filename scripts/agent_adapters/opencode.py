@@ -120,10 +120,8 @@ class OpenCodeAdapter(AgentAdapter):
 
         # Anchor to the dialog region: "Permission required" (header) .. "Allow once" (options).
         header_idx = text.find("Permission required")
-        if header_idx == -1:
-            header_idx = text.find("Allow once")
+        allow_idx = text.find("Allow once")
         start = header_idx if header_idx != -1 else 0
-        allow_idx = text.find("Allow once", start)
         region = text[start:allow_idx] if allow_idx != -1 else text[start:]
 
         # 1. Bash command: "$ <command>" (whitespace after '$' is mandatory, so the
