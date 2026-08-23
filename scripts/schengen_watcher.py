@@ -69,6 +69,14 @@ from security_evaluator import (
     DEFAULT_GPT_OSS_ENDPOINT,
     DEFAULT_REASONING_EFFORT
 )
+from herdr_client import (
+    run_cmd,
+    get_all_panes,
+    get_pane_info,
+    get_pane_text,
+    detect_self_pane_id,
+)
+from agent_adapters import get_adapter, target_agent_kinds
 
 LOCK_FILE = DB_DIR / "schengen.lock"
 LOG_FILE = DB_DIR / "schengen.log"
@@ -208,7 +216,7 @@ def show_guard_status():
         cwd = p.get("foreground_cwd") or p.get("cwd", "")
         if self_pane and pane_id == self_pane:
             guard_label = " [🚫 EXCLUDED: Self-Caller Pane (No Self-Approval)]"
-        elif agent in TARGET_AGENT_KINDS:
+        elif agent in target_agent_kinds():
             guard_label = f" [🎯 Guard Target: {agent.upper()} Sibling/Child Pane]"
         else:
             guard_label = f" [⚪ Ignored: Non-Target ({agent})]"
@@ -445,186 +453,36 @@ def is_parent_alive(initial_ppid: int) -> bool:
         return False
 
 
-def run_cmd(args):
-    """Run a subprocess command and return stdout."""
-    try:
-        res = subprocess.run(args, capture_output=True, text=True, check=True)
-        return res.stdout
-    except subprocess.CalledProcessError:
-        return None
-
-
-def get_all_panes():
-    """Retrieve all active Herdr panes enriched with live agent metadata and state_change_seq."""
-    out = run_cmd(["herdr", "agent", "list"])
-    if out:
-        try:
-            data = json.loads(out)
-            agents = data.get("result", {}).get("agents", [])
-            if agents:
-                return agents
-        except Exception:
-            pass
-
-    out = run_cmd(["herdr", "pane", "list"])
-    if not out:
-        return []
-    try:
-        data = json.loads(out)
-        return data.get("result", {}).get("panes", [])
-    except Exception:
-        return []
-
-
-def get_pane_info(pane_id):
-    """Retrieve specific pane metadata."""
-    for pane in get_all_panes():
-        if pane.get("pane_id") == pane_id:
-            return pane
-    return None
-
-
-def get_pane_text(pane_id, lines=80):
-    """Read visible terminal buffer from pane."""
-    out = run_cmd(["herdr", "pane", "read", pane_id, "--source", "visible", "--lines", str(lines)])
-    return out or ""
-
-
-def detect_self_pane_id():
-    """Detect the current pane ID running this guard watcher process."""
-    env_pane = os.environ.get("HERDR_PANE") or os.environ.get("HERDR_PANE_ID")
-    if env_pane:
-        return env_pane.strip()
-    return None
-
-
-# --- Multi-agent target support (agy + opencode) ---
-
-# Agent kinds that SmartGate may auto-approve as targets.
-TARGET_AGENT_KINDS = ("agy", "opencode")
-
 AGENT_FILTER_ALL = "all"
-
-ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
-
-# opencode TUI permission dialog stage markers (plain-text substrings, source-verified).
-OPENCODE_ALWAYS_CONFIRM_MARKERS = ("Always allow", "until OpenCode is restarted")
-OPENCODE_REJECT_MARKERS = ("Reject permission", "Tell OpenCode what to do differently")
-
-
-def strip_ansi(text: str) -> str:
-    """Strip ANSI escape sequences so plain-text stage markers and commands are regex-matchable."""
-    if not text:
-        return ""
-    return ANSI_ESCAPE_RE.sub("", text)
 
 
 def parse_agent_filter(raw: str):
-    """Normalize --agent-filter into a frozenset of agent kinds, or None to match all.
+    """Normalize --agent-filter into a frozenset of agent kinds.
 
     Accepts a comma-separated list (e.g. 'agy,opencode') or the 'all' sentinel.
-    Returns None for 'all' (matches every agent kind); otherwise a frozenset.
+    'all' expands to the registered target agent kinds; it does NOT match
+    non-target agents (hermes, bare shells, human). Empty input falls back to
+    the default {'agy'}.
     """
     raw = (raw or "").strip()
-    if not raw or raw.lower() == AGENT_FILTER_ALL:
-        return None
-    return frozenset(k.strip() for k in raw.split(",") if k.strip())
+    if raw.lower() == AGENT_FILTER_ALL:
+        return frozenset(target_agent_kinds())
+    kinds = frozenset(k.strip() for k in raw.split(",") if k.strip())
+    return kinds or frozenset({"agy"})
 
 
 def agent_matches(agent_kind: str, agent_filter) -> bool:
-    """Return True if agent_kind passes the parsed agent filter (None = match all)."""
+    """Return True if agent_kind passes the parsed agent filter.
+
+    agent_filter is expected to be a frozenset of agent kinds (from
+    parse_agent_filter). A bare string is treated as a single agent kind for
+    backward compatibility; None matches nothing (safe default, never match-all).
+    """
+    if isinstance(agent_filter, str):
+        return agent_kind == agent_filter
     if agent_filter is None:
-        return True
+        return False
     return agent_kind in agent_filter
-
-
-def classify_opencode_dialog_stage(visible_text: str) -> str:
-    """Classify an opencode permission dialog stage.
-
-    Returns one of: 'always_confirm' | 'reject' | 'permission' | 'unknown'.
-    Only the 'permission' stage (fresh dialog, 'once' pre-selected) is safe to auto-approve.
-    """
-    text = strip_ansi(visible_text)
-    if any(m in text for m in OPENCODE_ALWAYS_CONFIRM_MARKERS):
-        return "always_confirm"
-    if any(m in text for m in OPENCODE_REJECT_MARKERS):
-        return "reject"
-    if "Permission required" in text or "Allow once" in text:
-        return "permission"
-    return "unknown"
-
-
-def parse_opencode_permission_request(visible_text: str):
-    """Extract the command/action from an opencode permission dialog.
-
-    Only parses when the dialog is at the 'permission' stage; returns None otherwise
-    (so the watcher aborts injection — see the Q3 fail-safe ladder).
-
-    TODO(weakness): dialog layout is source-inferred, not empirically captured. Finalize
-    the $ <command> / file-path regexes against a live opencode dialog capture
-    (herdr agent read --source detection) before trusting full command extraction.
-    """
-    text = strip_ansi(visible_text)
-    if classify_opencode_dialog_stage(text) != "permission":
-        return None
-
-    # 1. Bash command: "$ <command>"
-    m = re.search(r"\$\s*([^\n]+)", text)
-    if m:
-        cmd = m.group(1).strip()
-        if cmd:
-            return cmd
-
-    # 2. File edit / write path
-    m = re.search(r"(?:Edit|Write|Create)\s+(?:file\s+)?(/[^\s]+)", text, re.IGNORECASE)
-    if m:
-        return f"edit_file {m.group(1).strip()}"
-
-    # 3. webfetch URL
-    m = re.search(r"https?://[^\s)\]]+", text)
-    if m:
-        return f"webfetch {m.group(0).strip()}"
-
-    return None
-
-
-def parse_permission_request_for_agent(visible_text: str, agent_kind: str):
-    """Dispatch to the correct permission-request parser based on the target agent kind."""
-    if agent_kind == "opencode":
-        return parse_opencode_permission_request(visible_text)
-    return parse_permission_request(visible_text)
-
-
-def inject_opencode_approval(pane_id: str):
-    """Inject a single 'enter' into an opencode permission dialog via the Q3 fail-safe ladder.
-
-    Returns (approved: bool, reason: str). approved=True means the 'once' approval was
-    applied. approved=False means injection was aborted or landed on a dangerous option,
-    and the caller MUST escalate (MANUAL_DELEGATED) instead of resolving.
-
-    opencode's permission dialog is a horizontal button row {once:"Allow once",
-    always:"Allow always", reject:"Reject"} with 'once' pre-selected on fresh mount
-    (source-verified: selected = keys[0]). A single enter deterministically selects 'once';
-    arrows/numbers are NOT supported and MUST NOT be sent.
-    """
-    # Step 4: inject a single enter (no arrows/numbers).
-    run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
-
-    # Step 5: post-inject self-correction backstop (fail-safe against 'always').
-    # Short TUI re-render pacing; not an agent busy-wait on a peer/background task.
-    time.sleep(0.15)
-    after_text = get_pane_text(pane_id, lines=80)
-    stage = classify_opencode_dialog_stage(after_text)
-
-    if stage == "always_confirm":
-        # Our enter landed on 'always' -> abort the confirmation immediately.
-        run_cmd(["herdr", "agent", "send-keys", pane_id, "escape"])
-        return False, "post-inject: 'always' confirmation detected; aborted via escape"
-    if stage == "permission":
-        # Enter did not register (focus issue etc.) -> do not retry.
-        return False, "post-inject: dialog still at 'permission'; enter not registered"
-    # Dialog cleared (stage 'unknown' or no markers) -> success.
-    return True, "once approved"
 
 
 def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer, agent_kind):
@@ -669,88 +527,11 @@ def find_blocked_panes(agent_filter=None, exclude_panes=None):
         if status == "blocked":
             blocked.append(pane_id)
         else:
+            adapter = get_adapter(agent_kind)
             text = get_pane_text(pane_id, lines=50)
-            if any(p in text for p in (
-                "Requesting permission for:",
-                "Do you want to proceed?",
-                "Do you want to run",
-                "Execute command?",
-                "> 1. Yes",
-                "Accept this file edit?",
-                "Accept this change?",
-                "Pending edit",
-                "Allow creation of this file?",
-                "Allow creation",
-                "Yes, allow creation",
-                "How's the CLI experience so far?",
-                "[0] Skip",
-                "Press enter to continue",
-                "[y/N]",
-                "[Y/n]",
-                # opencode TUI permission dialog markers (plain-text fallback detection)
-                "Permission required",
-                "Allow once",
-                "Allow always",
-            )):
+            if adapter and any(p in text for p in adapter.blocked_markers):
                 blocked.append(pane_id)
     return list(set(blocked))
-
-
-def parse_permission_request(visible_text):
-    """Extract command/script/file-edit/survey from diverse approval dialogs across AGY prompts."""
-    # Pattern 1: Standard AGY Requesting permission dialog
-    m1 = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", visible_text)
-    if m1:
-        return m1.group(1).strip()
-
-    # Pattern 2: Multi-line Command box with Requesting permission
-    m2 = re.search(r"Command\s*\n[─-]+\s*\n\s*Requesting permission for:\s*\n([\s\S]*?)\n\s*(> 1\. Yes|Do you want to proceed)", visible_text)
-    if m2:
-        return m2.group(1).strip()
-
-    # Pattern 3: AGY File Edit Confirmation Dialog (Accept this file edit?)
-    if "Accept this file edit?" in visible_text or "Accept this change?" in visible_text or "Pending edit" in visible_text:
-        m_file = re.search(r"Pending edit\s*\n[─-]+\s*\n\s*([^\n\s]+)", visible_text)
-        if not m_file:
-            m_file = re.search(r"(/[^\s]+\.[a-zA-Z0-9_\-\.]+)\s+[+-]\d+", visible_text)
-        file_path = m_file.group(1).strip() if m_file else "unknown_file"
-        return f"edit_file {file_path}"
-
-    # Pattern 3b: AGY File Creation Confirmation Dialog (Allow creation of this file?)
-    if "Allow creation of this file?" in visible_text or "Allow creation" in visible_text or "Yes, allow creation" in visible_text:
-        m_file = re.search(r"WriteToFile\(([^\)]+)\)", visible_text)
-        if not m_file:
-            m_file = re.search(r"Creating file:\s*([^\n\s]+)", visible_text)
-        if not m_file:
-            m_file = re.search(r"(/[^\s]+\.[a-zA-Z0-9_\-\.]+)", visible_text)
-        file_path = m_file.group(1).strip() if m_file else "unknown_file"
-        return f"create_file {file_path}"
-
-    # Pattern 4: Do you want to run '...'?
-    m3 = re.search(r"Do you want to run\s*['\"`]([\s\S]*?)['\"`]\?", visible_text)
-    if m3:
-        return m3.group(1).strip()
-
-    # Pattern 5: Execute/Run command [y/N]
-    m4 = re.search(r"(?:Execute[\s\w?]*|Run\s*command\??):\s*\n([\s\S]*?)\n\s*\[[Yy]/[Nn]\]", visible_text)
-    if m4:
-        return m4.group(1).strip()
-
-    # Pattern 6: Menu options (> 1. Yes) present with python3 heredoc or bash command above
-    if "> 1. Yes" in visible_text or "Do you want to proceed?" in visible_text:
-        py_match = re.search(r"(python[0-9.]*\s+-\s*<<\s*['\"]?([A-Za-z0-9_]+)['\"]?[\s\S]*?\n\s*\2)", visible_text)
-        if py_match:
-            return py_match.group(1).strip()
-        bash_match = re.findall(r"●\s*Bash\(([\s\S]*?)\)", visible_text)
-        if bash_match:
-            return bash_match[-1].strip()
-
-    # Pattern 7: CLI Experience Survey / Feedback Dialog ([0] Skip) strictly checked at the bottom
-    tail_text = "\n".join(visible_text.splitlines()[-15:])
-    if re.search(r"How's the CLI experience so far\?[\s\S]*?\[0\]\s*Skip", tail_text):
-        return "feedback_survey_skip"
-
-    return None
 
 
 def main():
@@ -931,11 +712,15 @@ def main():
                 if not agent_matches(agent_kind, agent_filter_set):
                     continue
 
+                adapter = get_adapter(agent_kind)
+                if adapter is None:
+                    continue
+
                 state_seq = pane_info.get("state_change_seq", 0)
                 agent_status = pane_info.get("agent_status", "")
 
                 visible_text = get_pane_text(pane_id, lines=80)
-                req_cmd = parse_permission_request_for_agent(visible_text, agent_kind)
+                req_cmd = adapter.parse_permission_request(visible_text)
 
                 if not req_cmd:
                     # Prompt is no longer active; reset last_processed_prompt for this pane
@@ -1005,31 +790,25 @@ def main():
                     if not args.dry_run:
                         # P0 TOCTOU Guard: Re-read pane immediately before sending enter to ensure prompt has not changed
                         current_text = get_pane_text(pane_id, lines=80)
-                        current_req = parse_permission_request_for_agent(current_text, agent_kind)
+                        current_req = adapter.parse_permission_request(current_text)
                         if current_req != req_cmd:
                             print(f"⚠️  [TOCTOU_ABORT] Pane {pane_id} prompt modified during safety evaluation. Aborting key injection.", flush=True)
                             continue
 
-                        if req_cmd == "feedback_survey_skip":
-                            print(f"⏩ Auto-skipping CLI experience survey on {pane_id} (sending '0')...", flush=True)
-                            run_cmd(["herdr", "agent", "send-keys", pane_id, "0"])
-                        elif agent_kind == "opencode":
-                            # Q3 fail-safe ladder: single enter + post-inject backstop.
-                            approved, ladder_reason = inject_opencode_approval(pane_id)
-                            print(f"{'✅' if approved else '🚨'} [opencode] {ladder_reason} on {pane_id}", flush=True)
-                            if not approved:
-                                escalate_request(pane_id, pane_info, req_cmd, ladder_reason, "OPENCODE_FAILSAFE", agent_kind)
-                                last_processed_prompt[pane_id] = {
-                                    "cmd": req_cmd,
-                                    "seq": state_seq,
-                                    "status": agent_status,
-                                    "is_safe": False,
-                                    "last_alert_time": now
-                                }
-                                continue
-                        else:
-                            print(f"🚀 Auto-approving pre-execution script for {pane_id} (sending Enter via SmartGate)...", flush=True)
-                            run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
+                        approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
+                        if not approved:
+                            print(f"🚨 [{agent_kind}] {inject_reason} on {pane_id}", flush=True)
+                            # 'OPENCODE_FAILSAFE' is a watcher-level escalation marker, deliberately
+                            # outside the command-classification DecisionLayer enum.
+                            escalate_request(pane_id, pane_info, req_cmd, inject_reason, "OPENCODE_FAILSAFE", agent_kind)
+                            last_processed_prompt[pane_id] = {
+                                "cmd": req_cmd,
+                                "seq": state_seq,
+                                "status": agent_status,
+                                "is_safe": False,
+                                "last_alert_time": now
+                            }
+                            continue
                     else:
                         print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
                     last_processed_prompt[pane_id] = {
