@@ -123,6 +123,23 @@ class TestResolveGuardLlmConfig(unittest.TestCase):
         self.assertEqual(endpoint, "https://api.openai.com/v1/chat/completions")
         self.assertEqual(key, "sk-openai")
 
+    def test_guard_llm_api_key_openai_project_prefix_derives_openai_endpoint(self):
+        with mock.patch.dict(os.environ, {"GUARD_LLM_API_KEY": "sk-proj-abc123"}):
+            endpoint, _, key = resolve_guard_llm_config()
+        self.assertEqual(endpoint, "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(key, "sk-proj-abc123")
+
+    def test_explicit_api_key_openai_project_prefix_derives_openai_endpoint(self):
+        endpoint, _, key = resolve_guard_llm_config(api_key="sk-svcacct-xyz789")
+        self.assertEqual(endpoint, "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(key, "sk-svcacct-xyz789")
+
+    def test_plain_sk_guard_llm_api_key_keeps_deepseek_default(self):
+        with mock.patch.dict(os.environ, {"GUARD_LLM_API_KEY": "sk-plain"}):
+            endpoint, _, key = resolve_guard_llm_config()
+        self.assertEqual(endpoint, DEFAULT_GUARD_LLM_ENDPOINT)
+        self.assertEqual(key, "sk-plain")
+
 
 class TestAuditWithCloudJudge(unittest.TestCase):
     def setUp(self):
@@ -143,16 +160,25 @@ class TestAuditWithCloudJudge(unittest.TestCase):
     def test_cloud_judge_layer_registered(self):
         self.assertEqual(DecisionLayer.CLOUD_JUDGE, "CLOUD_JUDGE")
 
-    def test_cache_verdict_store_roundtrip(self):
+    def test_cache_verdict_skips_safe_true(self):
         from security_evaluator import _cache_cloud_verdict
         from session_cache import clear_session_cache, compute_cache_key, get_cached_result
 
         clear_session_cache()
-        key = compute_cache_key("cj:test-store", cwd="/tmp", scope="t", agent_id="a", origin="A")
-        _cache_cloud_verdict(key, "cj:test-store", True, "safe", "CLOUD_JUDGE", "/tmp", "t", "a", "A")
+        key = compute_cache_key("cj:test-safe", cwd="/tmp", scope="t", agent_id="a", origin="A")
+        _cache_cloud_verdict(key, "cj:test-safe", True, "safe", "CLOUD_JUDGE", "/tmp", "t", "a", "A")
+        self.assertIsNone(get_cached_result(key))
+
+    def test_cache_verdict_stores_unsafe(self):
+        from security_evaluator import _cache_cloud_verdict
+        from session_cache import clear_session_cache, compute_cache_key, get_cached_result
+
+        clear_session_cache()
+        key = compute_cache_key("cj:test-unsafe", cwd="/tmp", scope="t", agent_id="a", origin="A")
+        _cache_cloud_verdict(key, "cj:test-unsafe", False, "unsafe", "CLOUD_JUDGE", "/tmp", "t", "a", "A")
         cached = get_cached_result(key)
         self.assertIsNotNone(cached)
-        self.assertTrue(cached["is_safe"])
+        self.assertFalse(cached["is_safe"])
         self.assertEqual(cached["decision_layer"], "CLOUD_JUDGE")
 
 
