@@ -111,6 +111,12 @@ class TestResolveGuardLlmConfig(unittest.TestCase):
             endpoint, _, _ = resolve_guard_llm_config()
         self.assertEqual(endpoint, "https://api.deepseek.com/v1/chat/completions")
 
+    def test_openai_key_derives_openai_endpoint(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-openai"}):
+            endpoint, _, key = resolve_guard_llm_config()
+        self.assertEqual(endpoint, "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(key, "sk-openai")
+
 
 class TestAuditWithCloudJudge(unittest.TestCase):
     def setUp(self):
@@ -130,6 +136,17 @@ class TestAuditWithCloudJudge(unittest.TestCase):
 
     def test_cloud_judge_layer_registered(self):
         self.assertEqual(DecisionLayer.CLOUD_JUDGE, "CLOUD_JUDGE")
+
+    def test_cache_verdict_store_roundtrip(self):
+        from security_evaluator import _cache_cloud_verdict
+        from session_cache import compute_cache_key, get_cached_result, clear_session_cache
+        clear_session_cache()
+        key = compute_cache_key("cj:test-store", cwd="/tmp", scope="t", agent_id="a", origin="A")
+        _cache_cloud_verdict(key, "cj:test-store", True, "safe", "CLOUD_JUDGE", "/tmp", "t", "a", "A")
+        cached = get_cached_result(key)
+        self.assertIsNotNone(cached)
+        self.assertTrue(cached["is_safe"])
+        self.assertEqual(cached["decision_layer"], "CLOUD_JUDGE")
 
 
 if __name__ == "__main__":

@@ -507,6 +507,28 @@ MINIMAL_INSPECTOR_SYSTEM_PROMPT = (
 )
 
 
+def _cache_cloud_verdict(cache_key, cmd_str, is_safe, reason, decision_layer, cwd, scope, agent_id, origin):
+    """Best-effort store of a resolved cloud-judge verdict into the scoped cache (B1)."""
+    if not cache_key:
+        return
+    try:
+        from session_cache import store_cached_result
+        store_cached_result(
+            cache_key=cache_key,
+            raw_cmd=cmd_str,
+            is_safe=is_safe,
+            safety_reason=reason,
+            decision_layer=decision_layer,
+            taxonomy={"origin": origin, "consequence": "NONE" if is_safe else "DEST", "mechanism": "cloud-judge"},
+            cwd=cwd,
+            scope=scope,
+            agent_id=agent_id,
+            origin=origin,
+        )
+    except Exception:
+        pass
+
+
 def audit_with_cloud_judge(
     cmd_str: str,
     context: str = "",
@@ -526,6 +548,7 @@ def audit_with_cloud_judge(
     verdict returns is_safe=False so the caller defers to human review.
     """
     # Scoped cache (mirrors the dynamic-substitution inspector; key is namespaced 'cj:').
+    cache_key = None
     if not is_shadow_mode():
         try:
             from session_cache import compute_cache_key, get_cached_result
@@ -554,6 +577,7 @@ def audit_with_cloud_judge(
         content_str = data["choices"][0].get("message", {}).get("content", "")
         parsed = parse_json_verdict(content_str)
         if parsed is not None:
+            _cache_cloud_verdict(cache_key, cmd_str, parsed[0], parsed[1], "CLOUD_JUDGE", cwd, scope, agent_id, origin)
             return parsed
         if raise_on_error:
             raise RuntimeError(f"Unparseable cloud judge output: {content_str}")
@@ -616,9 +640,6 @@ def audit_dynamic_substitution_with_llm(
             tool_calls = message.get("tool_calls", [])
 
             if tool_calls:
-                if hop >= max_hops:
-                    return False, f"Dynamic substitution inspection hop limit exceeded (Max Hops: {max_hops}); requires human review"
-
                 messages.append(message)
                 for tc in tool_calls:
                     fn_name = tc.get("function", {}).get("name")
@@ -650,9 +671,8 @@ def audit_dynamic_substitution_with_llm(
             content_str = message.get("content", "")
             parsed = parse_json_verdict(content_str)
             if parsed is not None:
+                _cache_cloud_verdict(cache_key, cmd_str, parsed[0], parsed[1], "LLM_INSPECTOR", cwd, scope, agent_id, origin)
                 return parsed
-            if "true" in content_str.lower() and "safe" in content_str.lower() and "not" not in content_str.lower():
-                return True, f"[Cloud Judge] Safe: {content_str[:80]}"
             if raise_on_error:
                 raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
             return False, f"[Cloud Judge] Uncertain verdict: {content_str[:80]}; delegating to human"

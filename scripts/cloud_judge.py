@@ -32,11 +32,28 @@ def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
 
     model    : explicit arg -> GUARD_LLM_MODEL -> DEFAULT_GUARD_LLM_MODEL (deepseek-chat)
     endpoint : explicit arg -> GUARD_LLM_ENDPOINT -> GUARD_LLM_BASE_URL + /chat/completions
-               -> DEFAULT_GUARD_LLM_ENDPOINT (only when a key is present)
+               -> provider default (DeepSeek, or OpenAI when only OPENAI_API_KEY resolves)
     api_key  : explicit arg -> GUARD_LLM_API_KEY -> DEEPSEEK_API_KEY -> OPENAI_API_KEY
     """
     effective_model = model or os.environ.get("GUARD_LLM_MODEL") or DEFAULT_GUARD_LLM_MODEL
-    effective_key = api_key or os.environ.get("GUARD_LLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+
+    # Resolve the key with precedence, tracking its source so the default
+    # endpoint matches the provider the key belongs to (no key/endpoint mismatch).
+    if api_key:
+        effective_key = api_key
+        key_source = "deepseek"
+    elif os.environ.get("GUARD_LLM_API_KEY"):
+        effective_key = os.environ["GUARD_LLM_API_KEY"]
+        key_source = "deepseek"
+    elif os.environ.get("DEEPSEEK_API_KEY"):
+        effective_key = os.environ["DEEPSEEK_API_KEY"]
+        key_source = "deepseek"
+    elif os.environ.get("OPENAI_API_KEY"):
+        effective_key = os.environ["OPENAI_API_KEY"]
+        key_source = "openai"
+    else:
+        effective_key = ""
+        key_source = "deepseek"
 
     base_url = os.environ.get("GUARD_LLM_BASE_URL", "").strip().rstrip("/")
     env_endpoint = os.environ.get("GUARD_LLM_ENDPOINT", "").strip().rstrip("/")
@@ -48,7 +65,10 @@ def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
     elif base_url:
         effective_endpoint = base_url + "/chat/completions"
     elif effective_key:
-        effective_endpoint = DEFAULT_GUARD_LLM_ENDPOINT
+        if key_source == "openai":
+            effective_endpoint = "https://api.openai.com/v1/chat/completions"
+        else:
+            effective_endpoint = DEFAULT_GUARD_LLM_ENDPOINT
     else:
         effective_endpoint = ""
     return effective_endpoint, effective_model, effective_key

@@ -22,14 +22,21 @@ from guard_db import (
 )
 
 def get_dynamic_ruleset_version() -> str:
-    """Compute deterministic dynamic ruleset version from cryptographic hash of prompt and rules."""
+    """Compute deterministic dynamic ruleset version from cryptographic hash of prompts, rules, and redaction."""
     from security_evaluator import MINIMAL_INSPECTOR_SYSTEM_PROMPT, CRITICAL_SHELL_PATTERNS
-    from cloud_judge import GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT
+    from cloud_judge import GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT, DEFAULT_GUARD_LLM_MODEL
+    import redaction
     hasher = hashlib.sha256()
     hasher.update(MINIMAL_INSPECTOR_SYSTEM_PROMPT.encode("utf-8"))
     hasher.update(GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT.encode("utf-8"))
+    hasher.update(DEFAULT_GUARD_LLM_MODEL.encode("utf-8"))
     for pat, desc in CRITICAL_SHELL_PATTERNS:
         hasher.update(pat.encode("utf-8"))
+    for pat, label in redaction._SECRET_VALUE_RULES:
+        hasher.update(pat.pattern.encode("utf-8"))
+    hasher.update(redaction._KEY_VALUE_RE.pattern.encode("utf-8"))
+    hasher.update(redaction._BEARER_RE.pattern.encode("utf-8"))
+    hasher.update(redaction._URI_CREDENTIAL_RE.pattern.encode("utf-8"))
     return f"dyn-{hasher.hexdigest()[:12]}"
 
 
