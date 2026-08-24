@@ -85,6 +85,14 @@ class TestRedactForCloud(unittest.TestCase):
         self.assertIn("uri-password", redact_for_cloud("postgres://user:pass@host:5432/db"))
         self.assertIn("slack-token", redact_for_cloud(FAKE_SLACK))
 
+    def test_uri_credential_roundtrip_masks_genuine_password(self):
+        # A genuine (not pre-masked) credential must be masked end-to-end so the
+        # assertion is not tautological (issue #29).
+        out = redact_for_cloud("https://alice:secret@example.com/path")
+        self.assertNotIn("secret", out)
+        self.assertNotIn("alice:secret@", out)
+        self.assertIn("[REDACTED:uri-password]", out)
+
 
 class TestResolveGuardLlmConfig(unittest.TestCase):
     def setUp(self):

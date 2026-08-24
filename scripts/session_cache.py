@@ -28,11 +28,7 @@ def get_dynamic_ruleset_version() -> str:
     hasher.update(DEFAULT_GUARD_LLM_MODEL.encode("utf-8"))
     for pat, _desc in CRITICAL_SHELL_PATTERNS:
         hasher.update(pat.encode("utf-8"))
-    for pat, _label in redaction._SECRET_VALUE_RULES:
-        hasher.update(pat.pattern.encode("utf-8"))
-    hasher.update(redaction._KEY_VALUE_RE.pattern.encode("utf-8"))
-    hasher.update(redaction._BEARER_RE.pattern.encode("utf-8"))
-    hasher.update(redaction._URI_CREDENTIAL_RE.pattern.encode("utf-8"))
+    hasher.update(redaction.get_redaction_fingerprint().encode("utf-8"))
     return f"dyn-{hasher.hexdigest()[:12]}"
 
 
