@@ -20,8 +20,6 @@ import shlex
 import stat
 import textwrap
 import tokenize as _tokenize
-import urllib.request
-import urllib.error
 from pathlib import Path
 from typing import Tuple, List, Dict, Any, Optional
 
@@ -35,6 +33,14 @@ from gray_zone_evaluator import (
 )
 from shellcheck_evaluator import audit_shell_with_shellcheck
 from semgrep_evaluator import audit_script_with_semgrep
+from redaction import redact_for_cloud
+from cloud_judge import (
+    DEFAULT_REASONING_EFFORT,
+    GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT,
+    resolve_guard_llm_config,
+    parse_json_verdict,
+    post_cloud_judge,
+)
 
 # 1. Sensitive file patterns (Secrets & Credentials)
 SEP = r"(^|[\s/\"'@:=])"
@@ -212,12 +218,6 @@ def _compact_dangerous_token(code_str: str) -> Optional[str]:
     compact_clean = re.sub(r"\s+", "", _strip_strings_and_comments(unescaped))
     m = _DANGEROUS_COMPACT_PATTERN.search(compact_clean)
     return m.group(0) if m else None
-
-# 9. LLM / GPT-OSS 120B Model Configuration (Antigravity Native Subagent)
-DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
-DEFAULT_GPT_OSS_ENDPOINT = os.environ.get("GUARD_LLM_ENDPOINT", "")
-DEFAULT_GPT_OSS_API_KEY = os.environ.get("GUARD_LLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
 
 # Tool Definition for Tool-Calling Semantic Inspector
 INSPECTOR_TOOLS = [
@@ -507,10 +507,91 @@ MINIMAL_INSPECTOR_SYSTEM_PROMPT = (
 )
 
 
+def _cache_cloud_verdict(cache_key, cmd_str, is_safe, reason, decision_layer, cwd, scope, agent_id, origin):
+    """Best-effort store of a resolved cloud-judge verdict into the scoped cache (B1)."""
+    if not cache_key:
+        return
+    try:
+        from session_cache import store_cached_result
+        store_cached_result(
+            cache_key=cache_key,
+            raw_cmd=cmd_str,
+            is_safe=is_safe,
+            safety_reason=reason,
+            decision_layer=decision_layer,
+            taxonomy={"origin": origin, "consequence": "NONE" if is_safe else "DEST", "mechanism": "cloud-judge"},
+            cwd=cwd,
+            scope=scope,
+            agent_id=agent_id,
+            origin=origin,
+        )
+    except Exception:
+        pass
+
+
+def audit_with_cloud_judge(
+    cmd_str: str,
+    context: str = "",
+    endpoint: Optional[str] = None,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    cwd: str = "",
+    scope: str = "default",
+    agent_id: str = "default",
+    origin: str = "A",
+    raise_on_error: bool = False
+) -> Tuple[bool, str]:
+    """Second-tier cloud judge for uncertain cases (gray-zone PROMPT, unhandled dialogs).
+
+    Returns (is_safe, reason). Fail-closed: any error / unparseable / uncertain
+    verdict returns is_safe=False so the caller defers to human review.
+    """
+    # Scoped cache (mirrors the dynamic-substitution inspector; key is namespaced 'cj:').
+    cache_key = None
+    if not is_shadow_mode():
+        try:
+            from session_cache import compute_cache_key, get_cached_result
+            cache_key = compute_cache_key(f"cj:{cmd_str}||{context}", cwd=cwd, scope=scope, agent_id=agent_id, origin=origin)
+            cached = get_cached_result(cache_key)
+            if cached:
+                return cached["is_safe"], cached["safety_reason"]
+        except Exception:
+            pass
+
+    target_endpoint, target_model, target_key = resolve_guard_llm_config(endpoint, model, api_key)
+    if not target_endpoint:
+        return False, "Cloud judge not configured; deferred to human review"
+
+    user_content = f"Inspect and decide whether to auto-approve this command:\n```\n{redact_for_cloud(cmd_str)}\n```"
+    if context:
+        user_content += f"\n\nContext:\n{redact_for_cloud(context)}"
+
+    messages = [
+        {"role": "system", "content": GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+    try:
+        data = post_cloud_judge(messages, target_endpoint, target_model, target_key, reasoning_effort)
+        content_str = data["choices"][0].get("message", {}).get("content", "")
+        parsed = parse_json_verdict(content_str)
+        if parsed is not None:
+            _cache_cloud_verdict(cache_key, cmd_str, parsed[0], parsed[1], "CLOUD_JUDGE", cwd, scope, agent_id, origin)
+            return parsed
+        if raise_on_error:
+            raise RuntimeError(f"Unparseable cloud judge output: {content_str}")
+        return False, f"[Cloud Judge] Uncertain verdict: {content_str[:80]}; deferred to human"
+    except Exception as e:
+        if raise_on_error:
+            raise
+        return False, f"Cloud judge offline ({e}); deferred to human"
+
+
 def audit_dynamic_substitution_with_llm(
     cmd_str: str,
     endpoint: Optional[str] = None,
-    model: str = DEFAULT_GPT_OSS_MODEL,
+    model: Optional[str] = None,
     api_key: Optional[str] = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     max_hops: int = 2,
@@ -520,12 +601,10 @@ def audit_dynamic_substitution_with_llm(
     agent_id: str = "default",
     origin: str = "I"
 ) -> Tuple[bool, str]:
-    """Helper for semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails and scoped LLM caching.
-    
-    In the AGY architecture, dynamic substitutions stream directly to the active AGY session,
-    where Antigravity native subagents (e.g. gpt-oss:120b under weekly limits) inspect parameters.
-    If an external endpoint is explicitly configured, performs HTTP validation; otherwise returns
-    the in-session escalation verdict.
+    """Semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails and scoped LLM caching.
+
+    Routes to the configured OpenAI-compatible cloud judge (deepseek-chat default). If no
+    endpoint is configured, or the judge is unreachable / uncertain, fails closed to human review.
     """
     # Check scoped LLM cache (B1: cache strictly scoped to expensive LLM tier)
     cache_key = None
@@ -539,103 +618,70 @@ def audit_dynamic_substitution_with_llm(
         except Exception:
             pass
 
-    target_endpoint = endpoint if endpoint is not None else DEFAULT_GPT_OSS_ENDPOINT
+    target_endpoint, target_model, target_key = resolve_guard_llm_config(endpoint, model, api_key)
     if not target_endpoint:
-        return False, "Dynamic command substitution $(cat ...) detected; escalated to AGY Session (gpt-oss:120b native subagent) for parameter inspection"
+        return False, "Dynamic command substitution $(cat ...) detected; cloud judge not configured; deferred to human review"
 
     messages = [
         {"role": "system", "content": MINIMAL_INSPECTOR_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Inspect the dynamic parameters of this command before approval:\n```\n{cmd_str}\n```"}
+        {"role": "user", "content": f"Inspect the dynamic parameters of this command before approval:\n```\n{redact_for_cloud(cmd_str)}\n```"}
     ]
 
     visited_paths = set()
 
     for hop in range(max_hops):
-        req_body: Dict[str, Any] = {
-            "model": model,
-            "temperature": 0.0,
-            "max_tokens": 300,
-            "messages": messages,
-            "tools": INSPECTOR_TOOLS,
-            "tool_choice": "auto"
-        }
-        # Only inject reasoning_effort if explicitly configured and targeting a reasoning model
-        if reasoning_effort and reasoning_effort.lower() not in ("off", "none", "") and ("reason" in model.lower() or "gpt-oss" in model.lower()):
-            req_body["reasoning_effort"] = reasoning_effort.lower()
-
-        payload = json.dumps(req_body).encode("utf-8")
-        headers = {"Content-Type": "application/json"}
-        effective_key = api_key if api_key is not None else DEFAULT_GPT_OSS_API_KEY
-        if effective_key:
-            headers["Authorization"] = f"Bearer {effective_key}"
-
-        req = urllib.request.Request(
-            target_endpoint,
-            data=payload,
-            headers=headers
-        )
-
         try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.load(resp)
-                choice = data["choices"][0]
-                message = choice.get("message", {})
-                tool_calls = message.get("tool_calls", [])
+            data = post_cloud_judge(
+                messages, target_endpoint, target_model, target_key, reasoning_effort,
+                tools=INSPECTOR_TOOLS
+            )
+            choice = data["choices"][0]
+            message = choice.get("message", {})
+            tool_calls = message.get("tool_calls", [])
 
-                if tool_calls:
-                    if hop >= max_hops:
-                        return False, f"Dynamic substitution inspection hop limit exceeded (Max Hops: {max_hops}); requires human review"
+            if tool_calls:
+                messages.append(message)
+                for tc in tool_calls:
+                    fn_name = tc.get("function", {}).get("name")
+                    fn_args_raw = tc.get("function", {}).get("arguments", "{}")
+                    try:
+                        fn_args = json.loads(fn_args_raw)
+                    except Exception:
+                        fn_args = {}
 
-                    messages.append(message)
-                    for tc in tool_calls:
-                        fn_name = tc.get("function", {}).get("name")
-                        fn_args_raw = tc.get("function", {}).get("arguments", "{}")
-                        try:
-                            fn_args = json.loads(fn_args_raw)
-                        except Exception:
-                            fn_args = {}
+                    if fn_name == "read_file_content":
+                        target_file = fn_args.get("file_path", "")
+                        norm_path = str(Path(target_file).expanduser().resolve())
 
-                        if fn_name == "read_file_content":
-                            target_file = fn_args.get("file_path", "")
-                            norm_path = str(Path(target_file).expanduser().resolve())
+                        if norm_path in visited_paths:
+                            tool_result = f"Error: Circular reference loop detected for '{norm_path}'"
+                        else:
+                            visited_paths.add(norm_path)
+                            success, content = safe_read_file_content(target_file)
+                            tool_result = content if success else f"Error: {content}"
 
-                            if norm_path in visited_paths:
-                                tool_result = f"Error: Circular reference loop detected for '{norm_path}'"
-                            else:
-                                visited_paths.add(norm_path)
-                                success, content = safe_read_file_content(target_file)
-                                tool_result = content if success else f"Error: {content}"
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", "call_1"),
+                            "content": redact_for_cloud(tool_result)
+                        })
+                continue  # Next turn in loop
 
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", "call_1"),
-                                "content": tool_result
-                            })
-                    continue  # Next turn in loop
-
-                # Final text response
-                content_str = message.get("content", "")
-                # Try parsing JSON response
-                try:
-                    # Clean json fences if present
-                    clean_json = re.sub(r"^```json\s*", "", content_str.strip(), flags=re.IGNORECASE)
-                    clean_json = re.sub(r"\s*```$", "", clean_json)
-                    res = json.loads(clean_json)
-                    is_safe = bool(res.get("is_safe", False))
-                    reason = f"[GPT-OSS 120B Inspector] {res.get('reason', 'Inspected dynamic parameters')}"
-                    return is_safe, reason
-                except Exception:
-                    if "true" in content_str.lower() and "safe" in content_str.lower() and "not" not in content_str.lower():
-                        return True, f"[GPT-OSS 120B Inspector] Safe: {content_str[:80]}"
-                    if raise_on_error:
-                        raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
-                    return False, f"[GPT-OSS 120B Inspector] Uncertain verdict: {content_str[:80]}; delegating to human"
+            # Final text response
+            content_str = message.get("content", "")
+            parsed = parse_json_verdict(content_str)
+            if parsed is not None:
+                _cache_cloud_verdict(cache_key, cmd_str, parsed[0], parsed[1], "LLM_INSPECTOR", cwd, scope, agent_id, origin)
+                return parsed
+            if raise_on_error:
+                raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
+            return False, f"[Cloud Judge] Uncertain verdict: {content_str[:80]}; delegating to human"
 
         except Exception as e:
             if raise_on_error:
                 raise
-            # Fail-Safe to Human Review when private LLM inspector is unreachable
-            return False, f"Dynamic substitution detected & LLM Inspector offline ({e}); requires human review"
+            # Fail-Safe to Human Review when the cloud inspector is unreachable
+            return False, f"Dynamic substitution detected & cloud judge offline ({e}); requires human review"
 
     if raise_on_error:
         raise RuntimeError("Dynamic substitution inspection could not be completed within max hops")
@@ -709,6 +755,7 @@ class DecisionLayer(str, Enum):
     PYTHON_AST = "PYTHON_AST"                 # Layer 4: Python static AST analysis (eval/exec, opens, subprocess writes)
     SECRET_GUARD = "SECRET_GUARD"             # Layer 5: Sensitive file & secret pattern matching (.env, id_rsa, hosts.yml)
     LLM_INSPECTOR = "LLM_INSPECTOR"           # Layer 6: L2 Tool-Calling LLM Dynamic Parameter Semantic Inspector
+    CLOUD_JUDGE = "CLOUD_JUDGE"               # Layer 6b: Second-tier OpenAI-compatible cloud judge (gray-zone PROMPT, unhandled dialogs)
     GRAY_ZONE_MATRIX = "GRAY_ZONE_MATRIX"     # Layer 7: Non-VCS Irreversible Mutation Matrix (ADR-004 / SOP-12)
     FAST_TRACK_AST = "FAST_TRACK_AST"         # Layer 8: Fast-track static safe development operations
 
@@ -716,7 +763,10 @@ class DecisionLayer(str, Enum):
 def _audit_static_shell_command(
     cmd_str: str,
     use_llm_judge: bool = False,
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    cwd: str = "",
+    scope: str = "default",
+    agent_id: str = "default"
 ) -> Tuple[bool, str, str]:
     """Audit static shell command line with PATH, Managed Git rules, and AST judge."""
     # Normalize leading/trailing whitespace so dialog dispatch (startswith / ==)
@@ -765,9 +815,23 @@ def _audit_static_shell_command(
             return False, f"Critical OS/Secret resource read blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
         return True, f"Verified safe file read: '{target_path}'", DecisionLayer.FAST_TRACK_AST
 
-    # 0a-4. opencode unhandled / doom-loop dialogs must never be auto-approved.
-    if cmd_str == "doom_loop" or cmd_str.startswith("unhandled_dialog "):
-        return False, "Unhandled opencode permission type; requires human review", DecisionLayer.SHELL_CRITICAL
+    # 0a-4. opencode doom-loop dialogs must NEVER be auto-approved.
+    if cmd_str == "doom_loop":
+        return False, "Doom loop detected; requires human review", DecisionLayer.SHELL_CRITICAL
+
+    # 0a-5. Unhandled opencode dialogs: route to the second-tier cloud judge (fail-closed to human).
+    if cmd_str.startswith("unhandled_dialog "):
+        cloud_safe, cloud_reason = audit_with_cloud_judge(
+            cmd_str,
+            context="An opencode permission dialog of an unrecognized type was intercepted. Only auto-approve if it is obviously read-only and safe.",
+            reasoning_effort=reasoning_effort,
+            cwd=cwd,
+            scope=scope,
+            agent_id=agent_id
+        )
+        if cloud_safe:
+            return True, f"Unhandled dialog cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
+        return False, f"Unhandled opencode permission type deferred to human ({cloud_reason})", DecisionLayer.SHELL_CRITICAL
 
     # 0b. Check Managed Git command rules if targeting Managed Git host
     if MANAGED_GIT_HOST_PATTERN.search(cmd_str):
@@ -843,7 +907,18 @@ def _audit_static_shell_command(
     if gz_verdict == Verdict.BLOCK:
         return False, f"Non-VCS Gray-Zone Guard [BLOCK]: {gz_reason}", DecisionLayer.GRAY_ZONE_MATRIX
     if gz_verdict == Verdict.PROMPT and gz_payload:
-        return False, format_decision_guidance(gz_payload), DecisionLayer.GRAY_ZONE_MATRIX
+        guidance = format_decision_guidance(gz_payload)
+        cloud_safe, cloud_reason = audit_with_cloud_judge(
+            cmd_str,
+            context=guidance,
+            reasoning_effort=reasoning_effort,
+            cwd=cwd,
+            scope=scope,
+            agent_id=agent_id
+        )
+        if cloud_safe:
+            return True, f"Gray-zone cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
+        return False, f"Gray-zone deferred to human ({cloud_reason}):\n{guidance}", DecisionLayer.GRAY_ZONE_MATRIX
 
     is_degraded = (isinstance(sc_details, dict) and sc_details.get("degraded")) or (isinstance(sem_details, dict) and sem_details.get("degraded"))
     if is_degraded:
@@ -887,13 +962,13 @@ def audit_shell_command(
             return is_safe, reason, DecisionLayer.LLM_INSPECTOR
 
         # 5c. All substitutions resolved -> audit resulting static command
-        exp_safe, exp_reason, exp_layer = _audit_static_shell_command(res_cmd, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
+        exp_safe, exp_reason, exp_layer = _audit_static_shell_command(res_cmd, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id)
         if exp_safe:
             return True, f"Dynamic substitution verified safe ({sanitize_output(res_cmd)[:60]}): {exp_reason}", DecisionLayer.FAST_TRACK_AST
         else:
             return False, f"Dynamic substitution expanded to unsafe command: {exp_reason}", exp_layer
 
-    return _audit_static_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort)
+    return _audit_static_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id)
 
 
 def derive_taxonomy(
@@ -925,9 +1000,13 @@ def derive_taxonomy(
     # Determine Consequence and Mechanism with pattern-level precision
     if is_safe:
         consequence = Consequence.NONE
-        mechanism = "user-allowlist" if layer == DecisionLayer.ALLOWLIST else "fast-track-verified"
         if layer == DecisionLayer.ALLOWLIST:
+            mechanism = "user-allowlist"
             origin = Origin.HUMAN
+        elif layer == DecisionLayer.CLOUD_JUDGE:
+            mechanism = "cloud-judge-verified"
+        else:
+            mechanism = "fast-track-verified"
     elif cmd_str == "doom_loop" or cmd_str.startswith("unhandled_dialog "):
         consequence = Consequence.INTEGRITY
         mechanism = "doom-loop" if cmd_str == "doom_loop" else "unhandled-dialog"

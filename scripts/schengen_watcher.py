@@ -64,11 +64,9 @@ from security_evaluator import (
     Origin,
     Consequence,
     GateState,
-    is_shadow_mode,
-    DEFAULT_GPT_OSS_MODEL,
-    DEFAULT_GPT_OSS_ENDPOINT,
-    DEFAULT_REASONING_EFFORT
+    is_shadow_mode
 )
+from cloud_judge import DEFAULT_REASONING_EFFORT
 from herdr_client import (
     run_cmd,
     get_all_panes,
