@@ -11,7 +11,6 @@ Combines:
 """
 
 import ast
-from enum import Enum
 import io
 import json
 import os
@@ -20,27 +19,27 @@ import shlex
 import stat
 import textwrap
 import tokenize as _tokenize
+from enum import Enum
 from pathlib import Path
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Any, Optional
 
-from gray_zone_evaluator import (
-    evaluate_gray_zone_operation,
-    Verdict,
-    format_decision_guidance,
-    ResourceTier,
-    OperationType,
-    classify_resource_tier,
-)
-from shellcheck_evaluator import audit_shell_with_shellcheck
-from semgrep_evaluator import audit_script_with_semgrep
-from redaction import redact_for_cloud
 from cloud_judge import (
     DEFAULT_REASONING_EFFORT,
     GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT,
-    resolve_guard_llm_config,
     parse_json_verdict,
     post_cloud_judge,
+    resolve_guard_llm_config,
 )
+from gray_zone_evaluator import (
+    ResourceTier,
+    Verdict,
+    classify_resource_tier,
+    evaluate_gray_zone_operation,
+    format_decision_guidance,
+)
+from redaction import redact_for_cloud
+from semgrep_evaluator import audit_script_with_semgrep
+from shellcheck_evaluator import audit_shell_with_shellcheck
 
 # 1. Sensitive file patterns (Secrets & Credentials)
 SEP = r"(^|[\s/\"'@:=])"
@@ -72,7 +71,9 @@ SENSITIVE_DIRECTORY_PATTERN = re.compile(
 )
 
 # 3. Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) allowed endpoint patterns
-MANAGED_GIT_HOST_PATTERN = re.compile(r"https?://(192\.168\.10\.102:3000|api\.github\.com|gitlab\.com/api|[^/]*gitea[^/]*/api)")
+MANAGED_GIT_HOST_PATTERN = re.compile(
+    r"https?://(192\.168\.10\.102:3000|api\.github\.com|gitlab\.com/api|[^/]*gitea[^/]*/api)"
+)
 MANAGED_GIT_ISSUES_PATTERN = re.compile(
     r"https?://(192\.168\.10\.102:3000/api/v1/repos/[^/]+/[^/]+/issues|"
     r"api\.github\.com/repos/[^/]+/[^/]+/(issues|pulls)|"
@@ -94,8 +95,14 @@ CRITICAL_SHELL_PATTERNS = [
     # Git Remote Push Safeguards (Allows non-force feature branch pushes, blocks force/delete/mirror/protected branch push)
     (r"\bgit\s+push\b.*(--force\b|-f\b|\+[\w/.-]+)", "Destructive Git force push / overwrite (--force / -f / +ref)"),
     (r"\bgit\s+push\b.*(--delete\b|:\w+)", "Destructive Git remote branch deletion (--delete)"),
-    (r"\bgit\s+push\b.*(--all\b|--mirror\b|--tags\b)", "Dangerous global or mirror Git push (--all / --mirror / --tags)"),
-    (r"\bgit\s+push\b.*(?:\borigin\s+|\s+|HEAD:)(main\b|master\b|develop\b|release[/_-][^\s]+|prod\b|production\b)", "Direct Git push to protected branch (main/master/develop/release/prod)"),
+    (
+        r"\bgit\s+push\b.*(--all\b|--mirror\b|--tags\b)",
+        "Dangerous global or mirror Git push (--all / --mirror / --tags)",
+    ),
+    (
+        r"\bgit\s+push\b.*(?:\borigin\s+|\s+|HEAD:)(main\b|master\b|develop\b|release[/_-][^\s]+|prod\b|production\b)",
+        "Direct Git push to protected branch (main/master/develop/release/prod)",
+    ),
     (r"\bgit\s+reset\s+--hard\b", "Destructive Git reset"),
     (r"\bgit\s+clean\s+-[fF]", "Destructive Git clean"),
     (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Denial of Service / Fork bomb"),
@@ -105,7 +112,7 @@ CRITICAL_SHELL_PATTERNS = [
         r"\b(mkfs|newfs_[a-z0-9_]+|dd|fdisk|pdisk|parted|gpt)\b|"
         r"\basr\s+restore\b.*(--erase|-erase)|"
         r"\btmutil\s+(delete|deletelocalsnapshots|deleteappliancesnapshot)\b",
-        "Destructive disk / volume formatting and partitioning"
+        "Destructive disk / volume formatting and partitioning",
     ),
     # macOS System Security, Integrity, & Firmware (SIP, NVRAM, Gatekeeper, Bootloader)
     (
@@ -114,47 +121,55 @@ CRITICAL_SHELL_PATTERNS = [
         r"\bbputil\s+(-k|-s|-p)\b|"
         r"\bnvram\s+(-c|-d\b|[a-zA-Z0-9_-]+=[^\s]+)|"
         r"\bbless\s+(--mount|--setBoot|--folder)\b",
-        "macOS System security / firmware integrity mutation"
+        "macOS System security / firmware integrity mutation",
     ),
     # macOS Directory Services & User Account Deletion / Password Mutation
     (
-        r"\bdscl\s+[\w\./-]+\s+(-delete|-passwd|-create)\b|"
-        r"\bsysadminctl\s+-(deleteUser|resetPasswordFor)\b",
-        "macOS User account / Directory Services mutation"
+        r"\bdscl\s+[\w\./-]+\s+(-delete|-passwd|-create)\b|" r"\bsysadminctl\s+-(deleteUser|resetPasswordFor)\b",
+        "macOS User account / Directory Services mutation",
     ),
     # macOS Keychain & Certificate Deletion
     (
         r"\bsecurity\s+(delete-keychain|delete-generic-password|delete-internet-password|delete-certificate|delete-identity|remove-identity-preference|create-keychain)\b",
-        "macOS Keychain & credentials deletion"
+        "macOS Keychain & credentials deletion",
     ),
     # macOS Firewall & Network Disruption
     (
         r"\bpfctl\s+(-f|-F\s+all|-d\b)|"
         r"\bnetworksetup\s+(-setdnsservers|-setsearchdomains|-setmanual|-removeallnetworkservices|-ordernetworkservices)\b",
-        "macOS Firewall / Network disruption"
+        "macOS Firewall / Network disruption",
     ),
     # Bitwarden CLI: mass secret dump & irreversible vault destruction (Rule 17 + Rule 9)
     (
         r"\bbw\b.*?\blist\s+items\b",
-        "Bitwarden mass secret dump (bw list items) - violates Secret Redacted-Read Mandate (Rule 17)"
+        "Bitwarden mass secret dump (bw list items) - violates Secret Redacted-Read Mandate (Rule 17)",
     ),
     (
         r"\bbw\b.*?\bdelete\s+item\b(?!-)",
-        "Bitwarden irreversible vault item deletion (bw delete item) - Non-VCS T4 irreversible mutation (Rule 9)"
+        "Bitwarden irreversible vault item deletion (bw delete item) - Non-VCS T4 irreversible mutation (Rule 9)",
     ),
 ]
 
 # 5. Commands that READ or EXFILTRATE files
 READ_COMMANDS = {
-    "cat", "head", "tail", "grep", "less", "more", "awk", "sed",
-    "strings", "base64", "xxd", "jq", "source"
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "less",
+    "more",
+    "awk",
+    "sed",
+    "strings",
+    "base64",
+    "xxd",
+    "jq",
+    "source",
 }
 NETWORK_EXFIL_COMMANDS = {"curl", "wget", "nc", "ncat", "socat", "scp", "rsync", "ssh"}
 
 # 6. Shell file write commands targeting Hermes sandbox
-SHELL_WRITE_COMMANDS = {
-    "cp", "mv", "touch", "mkdir", "rsync", "tar", "unzip", "tee", "wget", "curl", "dd"
-}
+SHELL_WRITE_COMMANDS = {"cp", "mv", "touch", "mkdir", "rsync", "tar", "unzip", "tee", "wget", "curl", "dd"}
 
 # 7. Dynamic Substitution Patterns $(cat ...) or `cat ...`
 DYNAMIC_SUBSTITUTION_PATTERN = re.compile(
@@ -162,7 +177,7 @@ DYNAMIC_SUBSTITUTION_PATTERN = re.compile(
         \$\(\s*(cat|head|tail|grep|find|awk|sed|<)\b|
         `\s*(cat|head|tail|grep|find|awk|sed|<)\b
     )""",
-    re.VERBOSE | re.IGNORECASE
+    re.VERBOSE | re.IGNORECASE,
 )
 
 # 7b. Resolvable Static Dynamic Substitution Patterns $(cat ...), $(< ...), `cat ...`
@@ -171,7 +186,7 @@ STATIC_RESOLVABLE_SUBSTITUTION_PATTERN = re.compile(
         \$\(\s*(?:cat|<)\s+([^)$|;&`]+?)\s*\)|
         `\s*cat\s+([^`$|;&]+?)\s*`
     )""",
-    re.VERBOSE | re.IGNORECASE
+    re.VERBOSE | re.IGNORECASE,
 )
 
 # 8. Dangerous Python AST modules & functions
@@ -199,10 +214,7 @@ def _strip_strings_and_comments(code_str: str) -> str:
         tokens = list(_tokenize.generate_tokens(io.StringIO(code_str).readline))
     except Exception:
         return code_str  # untokenizable (e.g. split token) -> scan raw text
-    return "".join(
-        tok.string for tok in tokens
-        if tok.type not in (_tokenize.STRING, _tokenize.COMMENT)
-    )
+    return "".join(tok.string for tok in tokens if tok.type not in (_tokenize.STRING, _tokenize.COMMENT))
 
 
 def _compact_dangerous_token(code_str: str) -> Optional[str]:
@@ -219,6 +231,7 @@ def _compact_dangerous_token(code_str: str) -> Optional[str]:
     m = _DANGEROUS_COMPACT_PATTERN.search(compact_clean)
     return m.group(0) if m else None
 
+
 # Tool Definition for Tool-Calling Semantic Inspector
 INSPECTOR_TOOLS = [
     {
@@ -229,19 +242,16 @@ INSPECTOR_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Path to the file to inspect (e.g. 'safe_list.txt')"
-                    }
+                    "file_path": {"type": "string", "description": "Path to the file to inspect (e.g. 'safe_list.txt')"}
                 },
-                "required": ["file_path"]
-            }
-        }
+                "required": ["file_path"],
+            },
+        },
     }
 ]
 
 
-def safe_read_file_content(file_path: str, max_bytes: int = 8192) -> Tuple[bool, str]:
+def safe_read_file_content(file_path: str, max_bytes: int = 8192) -> tuple[bool, str]:
     """Safely read text file content with 5 defensive guardrails:
     1. Canonical realpath resolution (prevents symlink loops)
     2. S_ISREG check (prevents FIFOs, sockets, character/block devices)
@@ -258,7 +268,11 @@ def safe_read_file_content(file_path: str, max_bytes: int = 8192) -> Tuple[bool,
             return False, f"Refused read: Path contains sensitive credentials '{path_str}'"
 
         # Guard: Never read system root directories (including macOS /private/etc, /private/var logs)
-        if re.search(r"^/(?:etc|System|Library|dev|proc|sys|private/etc|var/(?!folders/|tmp/)|private/var/(?!folders/|tmp/))", path_str, re.IGNORECASE):
+        if re.search(
+            r"^/(?:etc|System|Library|dev|proc|sys|private/etc|var/(?!folders/|tmp/)|private/var/(?!folders/|tmp/))",
+            path_str,
+            re.IGNORECASE,
+        ):
             return False, f"Refused read: System/device directory path '{path_str}'"
 
         if not clean_path.exists():
@@ -268,7 +282,7 @@ def safe_read_file_content(file_path: str, max_bytes: int = 8192) -> Tuple[bool,
         if not stat.S_ISREG(st.st_mode):
             return False, f"Refused read: Target is not a regular file (FIFO/socket/device): '{path_str}'"
 
-        with open(clean_path, "r", encoding="utf-8", errors="replace") as f:
+        with open(clean_path, encoding="utf-8", errors="replace") as f:
             content = f.read(max_bytes)
             return True, content
     except Exception as e:
@@ -276,19 +290,18 @@ def safe_read_file_content(file_path: str, max_bytes: int = 8192) -> Tuple[bool,
 
 
 def resolve_dynamic_substitutions_locally(
-    cmd_str: str,
-    max_hops: int = 2
-) -> Tuple[bool, str, Optional[str], Optional[str]]:
+    cmd_str: str, max_hops: int = 2
+) -> tuple[bool, str, Optional[str], Optional[str]]:
     """Deterministically resolve static local dynamic substitutions (e.g. $(cat file), `cat file`, $(< file))
     using safe_read_file_content with 5 Anti-Loop Guardrails.
-    
+
     Returns:
         (is_resolved: bool, resulting_cmd_or_error: str, layer_if_error: Optional[str], error_reason: Optional[str])
     """
     current_cmd = cmd_str
     visited_files = set()
 
-    for hop in range(max_hops):
+    for _hop in range(max_hops):
         matches = list(STATIC_RESOLVABLE_SUBSTITUTION_PATTERN.finditer(current_cmd))
         if not matches:
             break
@@ -298,7 +311,12 @@ def resolve_dynamic_substitutions_locally(
             full_sub = match.group(0)
             raw_arg = (match.group(2) or match.group(3) or "").strip()
             if not raw_arg:
-                return False, current_cmd, DecisionLayer.LLM_INSPECTOR, f"Empty file argument in dynamic substitution '{full_sub}'"
+                return (
+                    False,
+                    current_cmd,
+                    DecisionLayer.LLM_INSPECTOR,
+                    f"Empty file argument in dynamic substitution '{full_sub}'",
+                )
 
             try:
                 sub_files = shlex.split(raw_arg)
@@ -309,14 +327,26 @@ def resolve_dynamic_substitutions_locally(
             for fpath in sub_files:
                 norm_path = str(Path(fpath.strip().strip("'\"")).expanduser().resolve())
                 if norm_path in visited_files:
-                    return False, current_cmd, DecisionLayer.LLM_INSPECTOR, f"Circular reference loop detected for '{fpath}'"
+                    return (
+                        False,
+                        current_cmd,
+                        DecisionLayer.LLM_INSPECTOR,
+                        f"Circular reference loop detected for '{fpath}'",
+                    )
                 visited_files.add(norm_path)
 
                 success, content = safe_read_file_content(fpath)
                 if not success:
-                    if SENSITIVE_FILE_PATTERN.search(fpath) or "sensitive" in content.lower() or "secret" in content.lower():
+                    if (
+                        SENSITIVE_FILE_PATTERN.search(fpath)
+                        or "sensitive" in content.lower()
+                        or "secret" in content.lower()
+                    ):
                         err_layer = DecisionLayer.SECRET_GUARD
-                    elif re.search(r"^/(etc|var|System|Library|dev|proc|sys|private/(etc|var))/", fpath) or "system" in content.lower():
+                    elif (
+                        re.search(r"^/(etc|var|System|Library|dev|proc|sys|private/(etc|var))/", fpath)
+                        or "system" in content.lower()
+                    ):
                         err_layer = DecisionLayer.SHELL_CRITICAL
                     else:
                         err_layer = DecisionLayer.LLM_INSPECTOR
@@ -326,7 +356,7 @@ def resolve_dynamic_substitutions_locally(
                 combined_chunks.append(clean_lines)
 
             replacement = " ".join(combined_chunks)
-            current_cmd = current_cmd[:match.start()] + replacement + current_cmd[match.end():]
+            current_cmd = current_cmd[: match.start()] + replacement + current_cmd[match.end() :]
 
     return True, current_cmd, None, None
 
@@ -337,7 +367,7 @@ class PythonASTAuditor(ast.NodeVisitor):
     def __init__(self, raw_code: str = ""):
         self.raw_code = raw_code
         self.is_safe = True
-        self.reasons: List[str] = []
+        self.reasons: list[str] = []
         self.imported_net_modules = set()
         self.has_non_forgejo_net = False
 
@@ -379,14 +409,24 @@ class PythonASTAuditor(ast.NodeVisitor):
                             mode = str(kw.value.value)
                     if any(m in mode for m in ("w", "a", "x", "+")):
                         self.is_safe = False
-                        self.reasons.append(f"Forbidden write operation to Hermes Sandbox: '{path_str}' (mode='{mode}')")
+                        self.reasons.append(
+                            f"Forbidden write operation to Hermes Sandbox: '{path_str}' (mode='{mode}')"
+                        )
 
         # subprocess / os.system check
-        if isinstance(node.func, ast.Attribute) and node.func.attr in ("run", "Popen", "system", "call", "check_output"):
+        if isinstance(node.func, ast.Attribute) and node.func.attr in (
+            "run",
+            "Popen",
+            "system",
+            "call",
+            "check_output",
+        ):
             for arg in node.args:
                 if isinstance(arg, ast.Constant):
                     val_str = str(arg.value)
-                    if HERMES_SANDBOX_PATTERN.search(val_str) and any(w in val_str for w in (">", "cp ", "mv ", "touch ", "rm ")):
+                    if HERMES_SANDBOX_PATTERN.search(val_str) and any(
+                        w in val_str for w in (">", "cp ", "mv ", "touch ", "rm ")
+                    ):
                         self.is_safe = False
                         self.reasons.append(f"Process call attempting write/mutation to Hermes Sandbox: '{val_str}'")
 
@@ -400,7 +440,9 @@ class PythonASTAuditor(ast.NodeVisitor):
         urls = re.findall(r"https?://[a-zA-Z0-9_.:/-]+", self.raw_code)
         if not urls:
             self.is_safe = False
-            self.reasons.append(f"Network module imported without identifiable URL literal: {self.imported_net_modules}")
+            self.reasons.append(
+                f"Network module imported without identifiable URL literal: {self.imported_net_modules}"
+            )
             return
 
         for url in urls:
@@ -409,22 +451,27 @@ class PythonASTAuditor(ast.NodeVisitor):
                 self.reasons.append(f"Network call to external (non-Forgejo) target: '{url}'")
                 return
 
-            if re.search(r"method\s*=\s*['\"]DELETE['\"]", self.raw_code, re.IGNORECASE) or \
-               re.search(r"requests\.delete\(", self.raw_code, re.IGNORECASE):
+            if re.search(r"method\s*=\s*['\"]DELETE['\"]", self.raw_code, re.IGNORECASE) or re.search(
+                r"requests\.delete\(", self.raw_code, re.IGNORECASE
+            ):
                 self.is_safe = False
                 self.reasons.append(f"Forbidden HTTP DELETE request to Forgejo: '{url}'")
                 return
 
             is_issues = bool(FORGEJO_ISSUES_PATTERN.search(url))
-            has_post_patch = bool(re.search(r"(method\s*=\s*['\"](POST|PATCH|PUT)['\"]|data\s*=|requests\.(post|patch|put)\()", self.raw_code))
-            
+            has_post_patch = bool(
+                re.search(
+                    r"(method\s*=\s*['\"](POST|PATCH|PUT)['\"]|data\s*=|requests\.(post|patch|put)\()", self.raw_code
+                )
+            )
+
             if has_post_patch and not is_issues:
                 if not re.search(r"/api/v1/(user|users)", url):
                     self.is_safe = False
                     self.reasons.append(f"Non-GET request to non-issues Forgejo endpoint: '{url}'")
 
 
-def _python_normalization_candidates(code_str: str) -> List[str]:
+def _python_normalization_candidates(code_str: str) -> list[str]:
     """Generate ordered parseable normalization candidates for inline Python source.
 
     Handles formatting artifacts captured from TUI/agent dialogs:
@@ -445,7 +492,7 @@ def _python_normalization_candidates(code_str: str) -> List[str]:
     tabs_expanded = textwrap.dedent(raw.expandtabs(4))
     flattened = " ".join(line.strip() for line in raw.splitlines())
 
-    candidates: List[str] = []
+    candidates: list[str] = []
     for cand in (
         raw,
         dedented,
@@ -459,7 +506,7 @@ def _python_normalization_candidates(code_str: str) -> List[str]:
     return candidates
 
 
-def audit_python_code(code_str: str) -> Tuple[bool, str]:
+def audit_python_code(code_str: str) -> tuple[bool, str]:
     """Parse and audit Python source code with Forgejo whitelist."""
     # Whitespace-insensitive dangerous-token guard (defeats split-token evasions
     # that a normalization candidate could otherwise reconstruct as benign).
@@ -499,11 +546,11 @@ MINIMAL_INSPECTOR_SYSTEM_PROMPT = (
     "2) System root paths (/etc, /System, /var, /usr, /dev), "
     "3) Destructive commands or dangerous payloads. "
     "Respond ONLY in JSON format: "
-    "{\"is_safe\": true|false, \"reason\": \"<concise explanation>\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"NONE\"|\"EXFIL\"|\"DEST\"|\"INT\"|\"AVAIL\"|\"PERS\", \"mechanism\": \"string\"}}\n"
+    '{"is_safe": true|false, "reason": "<concise explanation>", "taxonomy": {"origin": "I", "consequence": "NONE"|"EXFIL"|"DEST"|"INT"|"AVAIL"|"PERS", "mechanism": "string"}}\n'
     "Adversarial Exemplars:\n"
-    "- Target `/tmp/safe.txt` ('hello world'): {\"is_safe\": true, \"reason\": \"File content verified safe\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"NONE\", \"mechanism\": \"verified-param\"}}\n"
-    "- Target `.env` ('API_KEY=xyz'): {\"is_safe\": false, \"reason\": \"Detected API key credentials\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"EXFIL\", \"mechanism\": \"env-leak-attempt\"}}\n"
-    "- Target `/etc/shadow` ('root:...'): {\"is_safe\": false, \"reason\": \"Access to system sensitive shadow database\", \"taxonomy\": {\"origin\": \"I\", \"consequence\": \"DEST\", \"mechanism\": \"system-root-access\"}}"
+    '- Target `/tmp/safe.txt` (\'hello world\'): {"is_safe": true, "reason": "File content verified safe", "taxonomy": {"origin": "I", "consequence": "NONE", "mechanism": "verified-param"}}\n'
+    '- Target `.env` (\'API_KEY=xyz\'): {"is_safe": false, "reason": "Detected API key credentials", "taxonomy": {"origin": "I", "consequence": "EXFIL", "mechanism": "env-leak-attempt"}}\n'
+    '- Target `/etc/shadow` (\'root:...\'): {"is_safe": false, "reason": "Access to system sensitive shadow database", "taxonomy": {"origin": "I", "consequence": "DEST", "mechanism": "system-root-access"}}'
 )
 
 
@@ -513,6 +560,7 @@ def _cache_cloud_verdict(cache_key, cmd_str, is_safe, reason, decision_layer, cw
         return
     try:
         from session_cache import store_cached_result
+
         store_cached_result(
             cache_key=cache_key,
             raw_cmd=cmd_str,
@@ -540,8 +588,8 @@ def audit_with_cloud_judge(
     scope: str = "default",
     agent_id: str = "default",
     origin: str = "A",
-    raise_on_error: bool = False
-) -> Tuple[bool, str]:
+    raise_on_error: bool = False,
+) -> tuple[bool, str]:
     """Second-tier cloud judge for uncertain cases (gray-zone PROMPT, unhandled dialogs).
 
     Returns (is_safe, reason). Fail-closed: any error / unparseable / uncertain
@@ -552,7 +600,10 @@ def audit_with_cloud_judge(
     if not is_shadow_mode():
         try:
             from session_cache import compute_cache_key, get_cached_result
-            cache_key = compute_cache_key(f"cj:{cmd_str}||{context}", cwd=cwd, scope=scope, agent_id=agent_id, origin=origin)
+
+            cache_key = compute_cache_key(
+                f"cj:{cmd_str}||{context}", cwd=cwd, scope=scope, agent_id=agent_id, origin=origin
+            )
             cached = get_cached_result(cache_key)
             if cached:
                 return cached["is_safe"], cached["safety_reason"]
@@ -599,8 +650,8 @@ def audit_dynamic_substitution_with_llm(
     cwd: str = "",
     scope: str = "default",
     agent_id: str = "default",
-    origin: str = "I"
-) -> Tuple[bool, str]:
+    origin: str = "I",
+) -> tuple[bool, str]:
     """Semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails and scoped LLM caching.
 
     Routes to the configured OpenAI-compatible cloud judge (deepseek-chat default). If no
@@ -611,6 +662,7 @@ def audit_dynamic_substitution_with_llm(
     if not is_shadow_mode():
         try:
             from session_cache import compute_cache_key, get_cached_result
+
             cache_key = compute_cache_key(cmd_str, cwd=cwd, scope=scope, agent_id=agent_id, origin=origin)
             cached = get_cached_result(cache_key)
             if cached:
@@ -620,20 +672,25 @@ def audit_dynamic_substitution_with_llm(
 
     target_endpoint, target_model, target_key = resolve_guard_llm_config(endpoint, model, api_key)
     if not target_endpoint:
-        return False, "Dynamic command substitution $(cat ...) detected; cloud judge not configured; deferred to human review"
+        return (
+            False,
+            "Dynamic command substitution $(cat ...) detected; cloud judge not configured; deferred to human review",
+        )
 
     messages = [
         {"role": "system", "content": MINIMAL_INSPECTOR_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Inspect the dynamic parameters of this command before approval:\n```\n{redact_for_cloud(cmd_str)}\n```"}
+        {
+            "role": "user",
+            "content": f"Inspect the dynamic parameters of this command before approval:\n```\n{redact_for_cloud(cmd_str)}\n```",
+        },
     ]
 
     visited_paths = set()
 
-    for hop in range(max_hops):
+    for _hop in range(max_hops):
         try:
             data = post_cloud_judge(
-                messages, target_endpoint, target_model, target_key, reasoning_effort,
-                tools=INSPECTOR_TOOLS
+                messages, target_endpoint, target_model, target_key, reasoning_effort, tools=INSPECTOR_TOOLS
             )
             choice = data["choices"][0]
             message = choice.get("message", {})
@@ -660,18 +717,22 @@ def audit_dynamic_substitution_with_llm(
                             success, content = safe_read_file_content(target_file)
                             tool_result = content if success else f"Error: {content}"
 
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.get("id", "call_1"),
-                            "content": redact_for_cloud(tool_result)
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.get("id", "call_1"),
+                                "content": redact_for_cloud(tool_result),
+                            }
+                        )
                 continue  # Next turn in loop
 
             # Final text response
             content_str = message.get("content", "")
             parsed = parse_json_verdict(content_str)
             if parsed is not None:
-                _cache_cloud_verdict(cache_key, cmd_str, parsed[0], parsed[1], "LLM_INSPECTOR", cwd, scope, agent_id, origin)
+                _cache_cloud_verdict(
+                    cache_key, cmd_str, parsed[0], parsed[1], "LLM_INSPECTOR", cwd, scope, agent_id, origin
+                )
                 return parsed
             if raise_on_error:
                 raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
@@ -688,7 +749,7 @@ def audit_dynamic_substitution_with_llm(
     return False, "Dynamic substitution inspection could not be completed; requires human review"
 
 
-def is_managed_git_safe_command(cmd_str: str) -> Tuple[bool, Optional[str]]:
+def is_managed_git_safe_command(cmd_str: str) -> tuple[bool, Optional[str]]:
     """Check if curl/shell command is a safe Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) operation."""
     if not MANAGED_GIT_HOST_PATTERN.search(cmd_str):
         return False, None
@@ -714,27 +775,30 @@ is_forgejo_safe_command = is_managed_git_safe_command
 
 class Origin(str, Enum):
     """Origin axis of 2D Taxonomy: who authored/triggered the command."""
-    HUMAN = "H"         # Explicit human user direction
-    AGENT = "A"         # Autonomous agent reasoning
-    INJECTED = "I"      # Prompt injection / untrusted third-party payload
-    EMERGENT = "E"      # Latent / unbound variable disaster
+
+    HUMAN = "H"  # Explicit human user direction
+    AGENT = "A"  # Autonomous agent reasoning
+    INJECTED = "I"  # Prompt injection / untrusted third-party payload
+    EMERGENT = "E"  # Latent / unbound variable disaster
 
 
 class Consequence(str, Enum):
     """Consequence axis of 2D Taxonomy: what security boundary is threatened."""
-    NONE = "NONE"       # Benign operation without harmful side-effects
-    DESTRUCTION = "DEST" # Data loss / filesystem deletion / disk wipe
-    EXFILTRATION = "EXFIL" # Confidentiality breach / credential egress
-    INTEGRITY = "INT"   # Silent tampering / config pollution / corruption
-    AVAILABILITY = "AVAIL" # DoS / resource exhaustion / fork bombs
-    PERSISTENCE = "PERS" # Privilege escalation / backdoor / unauthorized ssh key
+
+    NONE = "NONE"  # Benign operation without harmful side-effects
+    DESTRUCTION = "DEST"  # Data loss / filesystem deletion / disk wipe
+    EXFILTRATION = "EXFIL"  # Confidentiality breach / credential egress
+    INTEGRITY = "INT"  # Silent tampering / config pollution / corruption
+    AVAILABILITY = "AVAIL"  # DoS / resource exhaustion / fork bombs
+    PERSISTENCE = "PERS"  # Privilege escalation / backdoor / unauthorized ssh key
 
 
 class GateState(str, Enum):
     """Schengen Gate operation posture."""
-    ENFORCE = "ENFORCE"   # Active blocking & gatekeeping
-    OBSERVE = "OBSERVE"   # Shadow mode: counterfactual evaluation without blocking
-    DEGRADED = "DEGRADED" # Fail-open for local safe reads, fail-closed for egress/mutations
+
+    ENFORCE = "ENFORCE"  # Active blocking & gatekeeping
+    OBSERVE = "OBSERVE"  # Shadow mode: counterfactual evaluation without blocking
+    DEGRADED = "DEGRADED"  # Fail-open for local safe reads, fail-closed for egress/mutations
 
 
 def is_shadow_mode() -> bool:
@@ -745,19 +809,22 @@ def is_shadow_mode() -> bool:
 
 class DecisionLayer(str, Enum):
     """Standard inspection layers for Herdr Schengen (SmartGate)."""
-    ALLOWLIST = "ALLOWLIST"                   # Layer 0: User-persisted allowlist regex
-    MANAGED_GIT_GUARD = "MANAGED_GIT_GUARD"   # Layer 1: Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) policy
-    FORGEJO_GUARD = "MANAGED_GIT_GUARD"       # Layer 1 (Alias for backward compatibility)
-    SAST_SHELLCHECK = "SAST_SHELLCHECK"       # Layer 2a: SAST ShellCheck variable hazard pre-filter (SC2115, SC2154)
-    SAST_SEMGREP = "SAST_SEMGREP"             # Layer 2b: SAST Semgrep remote pipe & reverse shell pre-filter
-    SHELL_CRITICAL = "SHELL_CRITICAL"         # Layer 2: Critical destructive shell operations (rm -rf, sudo, git reset --hard)
-    SANDBOX_GUARD = "SANDBOX_GUARD"           # Layer 3: Hermes Docker/microVM Sandbox write isolation
-    PYTHON_AST = "PYTHON_AST"                 # Layer 4: Python static AST analysis (eval/exec, opens, subprocess writes)
-    SECRET_GUARD = "SECRET_GUARD"             # Layer 5: Sensitive file & secret pattern matching (.env, id_rsa, hosts.yml)
-    LLM_INSPECTOR = "LLM_INSPECTOR"           # Layer 6: L2 Tool-Calling LLM Dynamic Parameter Semantic Inspector
-    CLOUD_JUDGE = "CLOUD_JUDGE"               # Layer 6b: Second-tier OpenAI-compatible cloud judge (gray-zone PROMPT, unhandled dialogs)
-    GRAY_ZONE_MATRIX = "GRAY_ZONE_MATRIX"     # Layer 7: Non-VCS Irreversible Mutation Matrix (ADR-004 / SOP-12)
-    FAST_TRACK_AST = "FAST_TRACK_AST"         # Layer 8: Fast-track static safe development operations
+
+    ALLOWLIST = "ALLOWLIST"  # Layer 0: User-persisted allowlist regex
+    MANAGED_GIT_GUARD = "MANAGED_GIT_GUARD"  # Layer 1: Managed Git SCM (Forgejo, Gitea, GitHub, GitLab) policy
+    FORGEJO_GUARD = "MANAGED_GIT_GUARD"  # Layer 1 (Alias for backward compatibility)
+    SAST_SHELLCHECK = "SAST_SHELLCHECK"  # Layer 2a: SAST ShellCheck variable hazard pre-filter (SC2115, SC2154)
+    SAST_SEMGREP = "SAST_SEMGREP"  # Layer 2b: SAST Semgrep remote pipe & reverse shell pre-filter
+    SHELL_CRITICAL = "SHELL_CRITICAL"  # Layer 2: Critical destructive shell operations (rm -rf, sudo, git reset --hard)
+    SANDBOX_GUARD = "SANDBOX_GUARD"  # Layer 3: Hermes Docker/microVM Sandbox write isolation
+    PYTHON_AST = "PYTHON_AST"  # Layer 4: Python static AST analysis (eval/exec, opens, subprocess writes)
+    SECRET_GUARD = "SECRET_GUARD"  # Layer 5: Sensitive file & secret pattern matching (.env, id_rsa, hosts.yml)
+    LLM_INSPECTOR = "LLM_INSPECTOR"  # Layer 6: L2 Tool-Calling LLM Dynamic Parameter Semantic Inspector
+    CLOUD_JUDGE = (
+        "CLOUD_JUDGE"  # Layer 6b: Second-tier OpenAI-compatible cloud judge (gray-zone PROMPT, unhandled dialogs)
+    )
+    GRAY_ZONE_MATRIX = "GRAY_ZONE_MATRIX"  # Layer 7: Non-VCS Irreversible Mutation Matrix (ADR-004 / SOP-12)
+    FAST_TRACK_AST = "FAST_TRACK_AST"  # Layer 8: Fast-track static safe development operations
 
 
 def _audit_static_shell_command(
@@ -766,8 +833,8 @@ def _audit_static_shell_command(
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     cwd: str = "",
     scope: str = "default",
-    agent_id: str = "default"
-) -> Tuple[bool, str, str]:
+    agent_id: str = "default",
+) -> tuple[bool, str, str]:
     """Audit static shell command line with PATH, Managed Git rules, and AST judge."""
     # Normalize leading/trailing whitespace so dialog dispatch (startswith / ==)
     # and pattern matching are robust against TUI-captured indentation.
@@ -784,31 +851,63 @@ def _audit_static_shell_command(
         op_type = "creation" if cmd_str.startswith("create_file ") else "edit"
         target_path = cmd_str.split(" ", 1)[1].strip()
         if HERMES_SANDBOX_PATTERN.search(target_path):
-            return False, f"Forbidden file {op_type} targeting Hermes Sandbox: '{target_path}'", DecisionLayer.SANDBOX_GUARD
-        if SENSITIVE_FILE_PATTERN.search(target_path) and "dot_zshenv.tmpl" not in target_path and ".zshenv.local" not in target_path:
-            return False, f"Attempting to perform file {op_type} on sensitive credential file: '{target_path}'", DecisionLayer.SECRET_GUARD
+            return (
+                False,
+                f"Forbidden file {op_type} targeting Hermes Sandbox: '{target_path}'",
+                DecisionLayer.SANDBOX_GUARD,
+            )
+        if (
+            SENSITIVE_FILE_PATTERN.search(target_path)
+            and "dot_zshenv.tmpl" not in target_path
+            and ".zshenv.local" not in target_path
+        ):
+            return (
+                False,
+                f"Attempting to perform file {op_type} on sensitive credential file: '{target_path}'",
+                DecisionLayer.SECRET_GUARD,
+            )
         # Check gray zone classification for the target path
         gz_tier = classify_resource_tier(target_path)
         if gz_tier == ResourceTier.T4_CRITICAL:
-            return False, f"Critical OS/Secret resource {op_type} blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
+            return (
+                False,
+                f"Critical OS/Secret resource {op_type} blocked: '{target_path}'",
+                DecisionLayer.GRAY_ZONE_MATRIX,
+            )
         return True, f"Verified safe file {op_type}: '{target_path}'", DecisionLayer.FAST_TRACK_AST
 
     # 0a-2. Check opencode external-directory access dialog (access_directory <path>)
     if cmd_str.startswith("access_directory "):
         target = cmd_str.split(" ", 1)[1].strip()
         if HERMES_SANDBOX_PATTERN.search(target):
-            return False, f"Forbidden external directory access to Hermes Sandbox: '{target}'", DecisionLayer.SANDBOX_GUARD
+            return (
+                False,
+                f"Forbidden external directory access to Hermes Sandbox: '{target}'",
+                DecisionLayer.SANDBOX_GUARD,
+            )
         if SENSITIVE_FILE_PATTERN.search(target) or SENSITIVE_DIRECTORY_PATTERN.search(target):
-            return False, f"Forbidden external directory access to sensitive location: '{target}'", DecisionLayer.SECRET_GUARD
+            return (
+                False,
+                f"Forbidden external directory access to sensitive location: '{target}'",
+                DecisionLayer.SECRET_GUARD,
+            )
         gz_tier = classify_resource_tier(target)
         if gz_tier == ResourceTier.T4_CRITICAL:
-            return False, f"Critical OS/Secret resource directory access blocked: '{target}'", DecisionLayer.GRAY_ZONE_MATRIX
+            return (
+                False,
+                f"Critical OS/Secret resource directory access blocked: '{target}'",
+                DecisionLayer.GRAY_ZONE_MATRIX,
+            )
         return True, f"Verified safe external directory access: '{target}'", DecisionLayer.FAST_TRACK_AST
 
     # 0a-3. Check opencode file-read dialog (read_file <path>)
     if cmd_str.startswith("read_file "):
         target_path = cmd_str.split(" ", 1)[1].strip()
-        if SENSITIVE_FILE_PATTERN.search(target_path) and "dot_zshenv.tmpl" not in target_path and ".zshenv.local" not in target_path:
+        if (
+            SENSITIVE_FILE_PATTERN.search(target_path)
+            and "dot_zshenv.tmpl" not in target_path
+            and ".zshenv.local" not in target_path
+        ):
             return False, f"Attempting to READ sensitive credential file: '{target_path}'", DecisionLayer.SECRET_GUARD
         gz_tier = classify_resource_tier(target_path)
         if gz_tier == ResourceTier.T4_CRITICAL:
@@ -827,11 +926,15 @@ def _audit_static_shell_command(
             reasoning_effort=reasoning_effort,
             cwd=cwd,
             scope=scope,
-            agent_id=agent_id
+            agent_id=agent_id,
         )
         if cloud_safe:
             return True, f"Unhandled dialog cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
-        return False, f"Unhandled opencode permission type deferred to human ({cloud_reason})", DecisionLayer.SHELL_CRITICAL
+        return (
+            False,
+            f"Unhandled opencode permission type deferred to human ({cloud_reason})",
+            DecisionLayer.SHELL_CRITICAL,
+        )
 
     # 0b. Check Managed Git command rules if targeting Managed Git host
     if MANAGED_GIT_HOST_PATTERN.search(cmd_str):
@@ -845,7 +948,9 @@ def _audit_static_shell_command(
     #    Heredoc allows optional '-' (python3 - <<EOF), no '-' (python3 <<EOF),
     #    and tab-stripping '<<-' (python3 <<-EOF). Escaped-quote truncation is
     #    avoided in -c via a negative lookbehind on the closing quote.
-    heredoc_match = re.search(r"python[0-9.]*\s+(?:-\s*)?<<-?\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n([\s\S]*?)\n\s*\1", cmd_str)
+    heredoc_match = re.search(
+        r"python[0-9.]*\s+(?:-\s*)?<<-?\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n([\s\S]*?)\n\s*\1", cmd_str
+    )
     if heredoc_match:
         py_code = heredoc_match.group(2)
         safe, reason = audit_python_code(py_code)
@@ -875,20 +980,32 @@ def _audit_static_shell_command(
             return False, f"Critical risk detected: {desc}", DecisionLayer.SHELL_CRITICAL
 
     # Check system directory access (exclude PATH=... variable assignments)
-    cleaned_cmd = re.sub(r'PATH=["\']?[^"\';\s]+["\']?', '', cmd_str)
-    if re.search(r"\b(cd|ls|cat|rm|cp|mv)\s+/(?:etc|usr|bin|sbin|Library|System|private/etc|var/(?!folders/|tmp/)|private/var/(?!folders/|tmp/))\b", cleaned_cmd, re.IGNORECASE):
+    cleaned_cmd = re.sub(r'PATH=["\']?[^"\';\s]+["\']?', "", cmd_str)
+    if re.search(
+        r"\b(cd|ls|cat|rm|cp|mv)\s+/(?:etc|usr|bin|sbin|Library|System|private/etc|var/(?!folders/|tmp/)|private/var/(?!folders/|tmp/))\b",
+        cleaned_cmd,
+        re.IGNORECASE,
+    ):
         return False, "System directory direct mutation/access", DecisionLayer.SHELL_CRITICAL
 
     # 3. Check Hermes Sandbox WRITE attempts
     if HERMES_SANDBOX_PATTERN.search(cmd_str):
         if re.search(r">>?[^|;&\n]*(\.hermes/sandboxes|hermes_sandbox)", cmd_str, re.IGNORECASE):
-            return False, f"Forbidden shell redirection WRITE to Hermes Sandbox: '{cmd_str}'", DecisionLayer.SANDBOX_GUARD
+            return (
+                False,
+                f"Forbidden shell redirection WRITE to Hermes Sandbox: '{cmd_str}'",
+                DecisionLayer.SANDBOX_GUARD,
+            )
         sub_commands = re.split(r"[;&|]+", cmd_str)
         for sub_cmd in sub_commands:
             sub_cmd = sub_cmd.strip()
             for write_bin in SHELL_WRITE_COMMANDS:
                 if re.search(rf"\b{write_bin}\b.*(\.hermes/sandboxes|hermes_sandbox)", sub_cmd, re.IGNORECASE):
-                    return False, f"Forbidden WRITE command ({write_bin}) targeting Hermes Sandbox: '{sub_cmd}'", DecisionLayer.SANDBOX_GUARD
+                    return (
+                        False,
+                        f"Forbidden WRITE command ({write_bin}) targeting Hermes Sandbox: '{sub_cmd}'",
+                        DecisionLayer.SANDBOX_GUARD,
+                    )
 
     # 4. Check sensitive file reading or network exfiltration
     if SENSITIVE_FILE_PATTERN.search(cmd_str) and not FORGEJO_HOST_PATTERN.search(cmd_str):
@@ -909,18 +1026,15 @@ def _audit_static_shell_command(
     if gz_verdict == Verdict.PROMPT and gz_payload:
         guidance = format_decision_guidance(gz_payload)
         cloud_safe, cloud_reason = audit_with_cloud_judge(
-            cmd_str,
-            context=guidance,
-            reasoning_effort=reasoning_effort,
-            cwd=cwd,
-            scope=scope,
-            agent_id=agent_id
+            cmd_str, context=guidance, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
         )
         if cloud_safe:
             return True, f"Gray-zone cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
         return False, f"Gray-zone deferred to human ({cloud_reason}):\n{guidance}", DecisionLayer.GRAY_ZONE_MATRIX
 
-    is_degraded = (isinstance(sc_details, dict) and sc_details.get("degraded")) or (isinstance(sem_details, dict) and sem_details.get("degraded"))
+    is_degraded = (isinstance(sc_details, dict) and sc_details.get("degraded")) or (
+        isinstance(sem_details, dict) and sem_details.get("degraded")
+    )
     if is_degraded:
         return True, "Safe [DEGRADED_UNAVAILABLE: SAST tools absent]", DecisionLayer.FAST_TRACK_AST
 
@@ -933,10 +1047,10 @@ def audit_shell_command(
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     cwd: str = "",
     scope: str = "default",
-    agent_id: str = "default"
-) -> Tuple[bool, str, str]:
+    agent_id: str = "default",
+) -> tuple[bool, str, str]:
     """Audit shell command line with PATH, Managed Git rules, dynamic substitution inspection, and AST judge.
-    
+
     Returns:
         (is_safe: bool, reason: str, layer: str)
     """
@@ -948,44 +1062,53 @@ def audit_shell_command(
         # 5a. Attempt deterministic local resolution with 5 Anti-Loop Guardrails
         resolved, res_cmd, err_layer, err_reason = resolve_dynamic_substitutions_locally(cmd_str)
         if not resolved:
-            return False, err_reason or "Dynamic substitution security guard triggered", err_layer or DecisionLayer.LLM_INSPECTOR
+            return (
+                False,
+                err_reason or "Dynamic substitution security guard triggered",
+                err_layer or DecisionLayer.LLM_INSPECTOR,
+            )
 
         # 5b. If dynamic substitutions still remain (complex expressions like $(find ...), $(awk ...))
         if DYNAMIC_SUBSTITUTION_PATTERN.search(res_cmd):
             is_safe, reason = audit_dynamic_substitution_with_llm(
-                res_cmd,
-                reasoning_effort=reasoning_effort,
-                cwd=cwd,
-                scope=scope,
-                agent_id=agent_id
+                res_cmd, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
             )
             return is_safe, reason, DecisionLayer.LLM_INSPECTOR
 
         # 5c. All substitutions resolved -> audit resulting static command
-        exp_safe, exp_reason, exp_layer = _audit_static_shell_command(res_cmd, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id)
+        exp_safe, exp_reason, exp_layer = _audit_static_shell_command(
+            res_cmd,
+            use_llm_judge=use_llm_judge,
+            reasoning_effort=reasoning_effort,
+            cwd=cwd,
+            scope=scope,
+            agent_id=agent_id,
+        )
         if exp_safe:
-            return True, f"Dynamic substitution verified safe ({sanitize_output(res_cmd)[:60]}): {exp_reason}", DecisionLayer.FAST_TRACK_AST
+            return (
+                True,
+                f"Dynamic substitution verified safe ({sanitize_output(res_cmd)[:60]}): {exp_reason}",
+                DecisionLayer.FAST_TRACK_AST,
+            )
         else:
             return False, f"Dynamic substitution expanded to unsafe command: {exp_reason}", exp_layer
 
-    return _audit_static_shell_command(cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id)
+    return _audit_static_shell_command(
+        cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
+    )
 
 
 def derive_taxonomy(
-    cmd_str: str,
-    layer: DecisionLayer,
-    is_safe: bool,
-    reason: str,
-    origin: Origin = Origin.AGENT
-) -> Dict[str, Any]:
+    cmd_str: str, layer: DecisionLayer, is_safe: bool, reason: str, origin: Origin = Origin.AGENT
+) -> dict[str, Any]:
     """Derive 2D Taxonomy (Origin x Consequence + Mechanism) from evaluation result.
-    
+
     Origin:
       - 'H' (Human): User-persisted allowlist bypass or explicit human prompt
       - 'A' (Agent): Default autonomous agent execution in terminal
       - 'I' (Injected): Reserved for Layer 6 LLM Inspector & adversarial prompt injection
       - 'E' (Emergent): Reserved for Phase 1 SAST Scoped ShellCheck (unbound variables)
-      
+
     Consequence:
       - 'NONE': Safe benign operations
       - 'DEST': File/directory deletion, disk formatting, git reset --hard
@@ -1057,9 +1180,17 @@ def derive_taxonomy(
         else:
             mechanism = "unbound-variable-sc2154"
     elif layer == DecisionLayer.SAST_SEMGREP:
-        consequence = Consequence.PERSISTENCE if ("piped" in reason.lower() or "reverse" in reason.lower()) else Consequence.INTEGRITY
+        consequence = (
+            Consequence.PERSISTENCE
+            if ("piped" in reason.lower() or "reverse" in reason.lower())
+            else Consequence.INTEGRITY
+        )
         origin = Origin.INJECTED if ("piped" in reason.lower() or "reverse" in reason.lower()) else Origin.EMERGENT
-        mechanism = "piped-remote-script-execution" if "piped" in reason.lower() else ("reverse-shell" if "reverse" in reason.lower() else "semgrep-sast-rule")
+        mechanism = (
+            "piped-remote-script-execution"
+            if "piped" in reason.lower()
+            else ("reverse-shell" if "reverse" in reason.lower() else "semgrep-sast-rule")
+        )
     elif layer == DecisionLayer.SHELL_CRITICAL:
         if re.search(r"\b(sudo|su)\b", cmd_str, re.IGNORECASE):
             consequence = Consequence.PERSISTENCE
@@ -1076,13 +1207,17 @@ def derive_taxonomy(
         elif re.search(r"\b(pfctl|networksetup)\b", cmd_str, re.IGNORECASE):
             consequence = Consequence.AVAILABILITY
             mechanism = "network-disruption"
-        elif re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", cmd_str) or re.search(r"\b(killall|pkill)\s+-9\s+(launchd|init|systemd|Dock|Finder)", cmd_str):
+        elif re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", cmd_str) or re.search(
+            r"\b(killall|pkill)\s+-9\s+(launchd|init|systemd|Dock|Finder)", cmd_str
+        ):
             consequence = Consequence.AVAILABILITY
             mechanism = "dos-fork-bomb"
         elif re.search(r"\bgit\s+(push\b|reset\s+--hard|clean\s+-[fF]|rm\s+-[rfRF]+)", cmd_str):
             consequence = Consequence.DESTRUCTION
             mechanism = "git-destructive"
-        elif re.search(r"\b(diskutil\s+(erase|partition|zero)|mkfs|dd|gpt\s+destroy|asr\s+restore|tmutil\s+delete)", cmd_str):
+        elif re.search(
+            r"\b(diskutil\s+(erase|partition|zero)|mkfs|dd|gpt\s+destroy|asr\s+restore|tmutil\s+delete)", cmd_str
+        ):
             consequence = Consequence.DESTRUCTION
             mechanism = "disk-format-wipe"
         else:
@@ -1116,23 +1251,18 @@ def audit_shell_command_with_taxonomy(
     origin: Origin = Origin.AGENT,
     cwd: str = "",
     scope: str = "default",
-    agent_id: str = "default"
-) -> Tuple[bool, str, DecisionLayer, Dict[str, Any]]:
+    agent_id: str = "default",
+) -> tuple[bool, str, DecisionLayer, dict[str, Any]]:
     """Audit shell command and return safety, reason, layer, and 2D taxonomy metadata.
-    
+
     Deterministic guards (Fast-Track AST, ShellCheck SAST, Critical Regex, Gray-Zone)
     run unconditionally on every invocation. Dynamic parameter evaluations use the scoped LLM cache.
-    
+
     If SCHENGEN_SHADOW_MODE=1 is active, dangerous commands return is_safe=True with
     counterfactual logging metadata.
     """
     is_safe, reason, layer = audit_shell_command(
-        cmd_str,
-        use_llm_judge=use_llm_judge,
-        reasoning_effort=reasoning_effort,
-        cwd=cwd,
-        scope=scope,
-        agent_id=agent_id
+        cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
     )
     taxonomy = derive_taxonomy(cmd_str, layer, is_safe, reason, origin=origin)
 
@@ -1146,5 +1276,10 @@ def audit_shell_command_with_taxonomy(
 
 def sanitize_output(output_str: str) -> str:
     """Sanitize secrets from command output/logs."""
-    masked = re.sub(r"(token|secret|key|password|api[_-]?key)\s*[:=]\s*['\"][^'\"]+['\"]", r"\1: '***MASKED***'", output_str, flags=re.IGNORECASE)
+    masked = re.sub(
+        r"(token|secret|key|password|api[_-]?key)\s*[:=]\s*['\"][^'\"]+['\"]",
+        r"\1: '***MASKED***'",
+        output_str,
+        flags=re.IGNORECASE,
+    )
     return masked

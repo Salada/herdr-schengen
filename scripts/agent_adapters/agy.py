@@ -2,8 +2,9 @@
 
 import re
 
-from agent_adapters.base import AgentAdapter, register
 from herdr_client import run_cmd
+
+from agent_adapters.base import AgentAdapter, register
 
 
 @register
@@ -37,12 +38,19 @@ class AgyAdapter(AgentAdapter):
             return m1.group(1).strip()
 
         # Pattern 2: Multi-line Command box with Requesting permission
-        m2 = re.search(r"Command\s*\n[─-]+\s*\n\s*Requesting permission for:\s*\n([\s\S]*?)\n\s*(> 1\. Yes|Do you want to proceed)", visible_text)
+        m2 = re.search(
+            r"Command\s*\n[─-]+\s*\n\s*Requesting permission for:\s*\n([\s\S]*?)\n\s*(> 1\. Yes|Do you want to proceed)",
+            visible_text,
+        )
         if m2:
             return m2.group(1).strip()
 
         # Pattern 3: AGY File Edit Confirmation Dialog
-        if "Accept this file edit?" in visible_text or "Accept this change?" in visible_text or "Pending edit" in visible_text:
+        if (
+            "Accept this file edit?" in visible_text
+            or "Accept this change?" in visible_text
+            or "Pending edit" in visible_text
+        ):
             m_file = re.search(r"Pending edit\s*\n[─-]+\s*\n\s*([^\n\s]+)", visible_text)
             if not m_file:
                 m_file = re.search(r"(/[^\s]+\.[a-zA-Z0-9_\-\.]+)\s+[+-]\d+", visible_text)
@@ -50,7 +58,11 @@ class AgyAdapter(AgentAdapter):
             return f"edit_file {file_path}"
 
         # Pattern 3b: AGY File Creation Confirmation Dialog
-        if "Allow creation of this file?" in visible_text or "Allow creation" in visible_text or "Yes, allow creation" in visible_text:
+        if (
+            "Allow creation of this file?" in visible_text
+            or "Allow creation" in visible_text
+            or "Yes, allow creation" in visible_text
+        ):
             m_file = re.search(r"WriteToFile\(([^\)]+)\)", visible_text)
             if not m_file:
                 m_file = re.search(r"Creating file:\s*([^\n\s]+)", visible_text)
@@ -71,7 +83,9 @@ class AgyAdapter(AgentAdapter):
 
         # Pattern 6: Menu options (> 1. Yes) with python3 heredoc or bash command above
         if "> 1. Yes" in visible_text or "Do you want to proceed?" in visible_text:
-            py_match = re.search(r"(python[0-9.]*\s+(?:-\s*)?<<-?\s*['\"]?([A-Za-z0-9_]+)['\"]?[\s\S]*?\n\s*\2)", visible_text)
+            py_match = re.search(
+                r"(python[0-9.]*\s+(?:-\s*)?<<-?\s*['\"]?([A-Za-z0-9_]+)['\"]?[\s\S]*?\n\s*\2)", visible_text
+            )
             if py_match:
                 return py_match.group(1).strip()
             bash_match = re.findall(r"●\s*Bash\(([\s\S]*?)\)", visible_text)

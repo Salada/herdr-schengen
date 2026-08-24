@@ -33,48 +33,38 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import importlib
-import guard_db
-import gray_zone_evaluator
-import security_evaluator
 
+import gray_zone_evaluator
+import guard_db
+import security_evaluator
+from agent_adapters import get_adapter, target_agent_kinds
+from cloud_judge import DEFAULT_REASONING_EFFORT
 from guard_db import (
-    record_audit_log,
+    DB_DIR,
     check_persisted_allowlist,
+    enqueue_pending_escalation,
     get_pattern_analysis,
     get_recent_audit_logs,
-    search_audit_logs,
     get_state_file_paths,
-    tail_state_log,
     init_db,
-    enqueue_pending_escalation,
-    get_pending_escalations,
-    mark_escalation_delivered,
+    record_audit_log,
     resolve_escalation,
-    cleanup_escalations,
-    DB_DIR,
-    DB_PATH
+    search_audit_logs,
+    tail_state_log,
 )
-from security_evaluator import (
-    audit_shell_command,
-    audit_shell_command_with_taxonomy,
-    derive_taxonomy,
-    audit_python_code,
-    sanitize_output,
-    DecisionLayer,
-    Origin,
-    Consequence,
-    GateState,
-    is_shadow_mode
-)
-from cloud_judge import DEFAULT_REASONING_EFFORT
 from herdr_client import (
-    run_cmd,
+    detect_self_pane_id,
     get_all_panes,
     get_pane_info,
     get_pane_text,
-    detect_self_pane_id,
+    run_cmd,
 )
-from agent_adapters import get_adapter, target_agent_kinds
+from security_evaluator import (
+    DecisionLayer,
+    Origin,
+    audit_shell_command_with_taxonomy,
+    derive_taxonomy,
+)
 
 LOCK_FILE = DB_DIR / "schengen.lock"
 LOG_FILE = DB_DIR / "schengen.log"
@@ -117,7 +107,7 @@ def list_active_guard_locks() -> list:
 
         pid = None
         try:
-            with open(lf, "r") as f:
+            with open(lf) as f:
                 content = f.read().strip()
                 if content and content.isdigit():
                     cand_pid = int(content)
@@ -149,14 +139,16 @@ def acquire_scoped_lock(target: str = "auto"):
         lock_fd.write(f"{os.getpid()}\n")
         lock_fd.flush()
         return lock_fd, lock_file
-    except (IOError, BlockingIOError):
+    except (OSError, BlockingIOError):
         running_pid = "unknown"
         try:
-            with open(lock_file, "r") as f:
+            with open(lock_file) as f:
                 running_pid = f.read().strip()
         except Exception:
             pass
-        print(f"⚠️  Another SmartGate / Herdr Schengen watcher is already running for target '{target}' (PID: {running_pid}). Exiting.")
+        print(
+            f"⚠️  Another SmartGate / Herdr Schengen watcher is already running for target '{target}' (PID: {running_pid}). Exiting."
+        )
         sys.exit(0)
 
 
@@ -173,7 +165,7 @@ def get_running_guard_pid(target: str = "auto"):
         else:
             return None
     try:
-        with open(lock_file, "r") as f:
+        with open(lock_file) as f:
             pid_str = f.read().strip()
         if pid_str and pid_str.isdigit():
             pid = int(pid_str)
@@ -221,7 +213,7 @@ def show_guard_status():
         print(f"   • Pane {pane_id:<6} | Agent: {agent:<8} | Status: {agent_status:<8} | CWD: {cwd}{guard_label}")
 
     # Recent Audit Log Entries
-    print(f"\n📜 Recent SmartGate Audit Events (from SQLite3):")
+    print("\n📜 Recent SmartGate Audit Events (from SQLite3):")
     try:
         rows = get_recent_audit_logs(limit=5)
         if not rows:
@@ -229,7 +221,9 @@ def show_guard_status():
         for r in rows:
             symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
             cmd_preview = (r["raw_command"][:60] + "...") if len(r["raw_command"]) > 60 else r["raw_command"]
-            print(f"   {symbol} [{r['timestamp'][:19]}] #{r['id']} {r['pane_id']} - {r['decision']} [Layer: {r['decision_layer']}] ({r['safety_reason']})")
+            print(
+                f"   {symbol} [{r['timestamp'][:19]}] #{r['id']} {r['pane_id']} - {r['decision']} [Layer: {r['decision_layer']}] ({r['safety_reason']})"
+            )
             print(f"      Cmd: {cmd_preview}")
     except Exception as e:
         print(f"   (Failed to read audit logs: {e})")
@@ -286,10 +280,12 @@ def reload_running_guard(target=None):
     else:
         targets_to_reload = active_daemons
 
-    for tgt, lpath, dpid in targets_to_reload:
+    for tgt, _lpath, dpid in targets_to_reload:
         try:
             os.kill(dpid, signal.SIGHUP)
-            print(f"🔄 Sent SIGHUP dynamic reload signal to daemon '{tgt}' (PID: {dpid}). Modules will reload instantly.")
+            print(
+                f"🔄 Sent SIGHUP dynamic reload signal to daemon '{tgt}' (PID: {dpid}). Modules will reload instantly."
+            )
         except Exception as e:
             print(f"❌ Failed to signal reload for '{tgt}' (PID: {dpid}): {e}")
 
@@ -306,12 +302,18 @@ def find_git_repo_and_rel_path(mod_path: Path):
     try:
         res = subprocess.run(
             ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, check=False, timeout=1.0
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1.0,
         )
         if res.returncode == 0 and res.stdout.strip() == "true":
             rel_res = subprocess.run(
                 ["git", "-C", str(parent_dir), "ls-files", "--full-name", str(mod_path)],
-                capture_output=True, text=True, check=False, timeout=1.0
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1.0,
             )
             rel_path = rel_res.stdout.strip()
             if rel_path:
@@ -326,7 +328,10 @@ def find_git_repo_and_rel_path(mod_path: Path):
         try:
             rel_res = subprocess.run(
                 ["git", "-C", str(ssot_repo), "ls-files", "--error-unmatch", rel_candidate],
-                capture_output=True, text=True, check=False, timeout=1.0
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1.0,
             )
             if rel_res.returncode == 0 and rel_res.stdout.strip():
                 return ssot_repo, rel_candidate
@@ -350,7 +355,7 @@ def verify_module_integrity(module_obj) -> bool:
         content = mod_path.read_text(encoding="utf-8")
         if not content.strip():
             return False
-        
+
         # 1. Syntax check
         ast.parse(content)
 
@@ -361,7 +366,10 @@ def verify_module_integrity(module_obj) -> bool:
 
         head_blob_res = subprocess.run(
             ["git", "-C", str(repo_dir), "rev-parse", f"HEAD:{rel_path}"],
-            capture_output=True, text=True, check=False, timeout=1.0
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1.0,
         )
         if head_blob_res.returncode != 0:
             return False
@@ -369,7 +377,10 @@ def verify_module_integrity(module_obj) -> bool:
 
         file_blob_res = subprocess.run(
             ["git", "-C", str(repo_dir), "hash-object", str(mod_path)],
-            capture_output=True, text=True, check=False, timeout=1.0
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1.0,
         )
         if file_blob_res.returncode != 0:
             return False
@@ -392,27 +403,44 @@ def execute_graceful_reload():
         # Pre-reload AST integrity verification
         for mod in (guard_db, gray_zone_evaluator, security_evaluator):
             if not verify_module_integrity(mod):
-                print(f"🛑 [GRACEFUL_RELOAD_ABORTED] Module integrity/AST verification failed for {getattr(mod, '__name__', str(mod))}. Rejecting reload.", flush=True)
+                print(
+                    f"🛑 [GRACEFUL_RELOAD_ABORTED] Module integrity/AST verification failed for {getattr(mod, '__name__', str(mod))}. Rejecting reload.",
+                    flush=True,
+                )
                 return False
 
         importlib.reload(guard_db)
         importlib.reload(gray_zone_evaluator)
         importlib.reload(security_evaluator)
         from security_evaluator import (
-            audit_shell_command as _asc,
-            audit_shell_command_with_taxonomy as _asct,
-            derive_taxonomy as _dt,
-            audit_python_code as _apc,
-            sanitize_output as _so,
-            DecisionLayer as _dl
+            DecisionLayer as _dl,
         )
+        from security_evaluator import (
+            audit_python_code as _apc,
+        )
+        from security_evaluator import (
+            audit_shell_command as _asc,
+        )
+        from security_evaluator import (
+            audit_shell_command_with_taxonomy as _asct,
+        )
+        from security_evaluator import (
+            derive_taxonomy as _dt,
+        )
+        from security_evaluator import (
+            sanitize_output as _so,
+        )
+
         audit_shell_command = _asc
         audit_shell_command_with_taxonomy = _asct
         derive_taxonomy = _dt
         audit_python_code = _apc
         sanitize_output = _so
         DecisionLayer = _dl
-        print(f"✨ [GRACEFUL_RELOAD] Successfully reloaded guard modules and rulesets in-process at {datetime.now(timezone.utc).isoformat()}.", flush=True)
+        print(
+            f"✨ [GRACEFUL_RELOAD] Successfully reloaded guard modules and rulesets in-process at {datetime.now(timezone.utc).isoformat()}.",
+            flush=True,
+        )
         return True
     except Exception as e:
         print(f"⚠️  [GRACEFUL_RELOAD_ERROR] Failed to reload modules: {e}", flush=True)
@@ -485,7 +513,9 @@ def agent_matches(agent_kind: str, agent_filter) -> bool:
 
 def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer, agent_kind):
     """Enqueue a persistent escalation and emit intercept notifications. Returns escalation id."""
-    session_uuid = pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
+    session_uuid = (
+        pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
+    )
     esc_id = enqueue_pending_escalation(
         pane_id=pane_id,
         raw_command=req_cmd,
@@ -494,13 +524,27 @@ def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer,
         agent_kind=agent_kind,
         session_id=session_uuid,
     )
-    print(f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).", flush=True)
+    print(
+        f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).",
+        flush=True,
+    )
     print(f"   • Pane: {pane_id} ({agent_kind})", flush=True)
     print(f"   • Layer: {decision_layer}", flush=True)
     print(f"   • Reason: {safety_reason}", flush=True)
     print(f"   • Intercepted Command:\n     {req_cmd}", flush=True)
     # Herdr notification popup
-    run_cmd(["herdr", "notification", "show", "SmartGate Alert", "--body", f"Manual approval required on {pane_id} [Layer: {decision_layer}]: {safety_reason}", "--sound", "request"])
+    run_cmd(
+        [
+            "herdr",
+            "notification",
+            "show",
+            "SmartGate Alert",
+            "--body",
+            f"Manual approval required on {pane_id} [Layer: {decision_layer}]: {safety_reason}",
+            "--sound",
+            "request",
+        ]
+    )
     return esc_id
 
 
@@ -535,23 +579,51 @@ def find_blocked_panes(agent_filter=frozenset(), exclude_panes=None):
 def main():
     global _RELOAD_REQUESTED
     parser = argparse.ArgumentParser(description="Herdr SmartGate / Schengen Trusted Clearance Watcher (AGY Exclusive)")
-    parser.add_argument("--target", default="auto", help="Target pane ID (e.g. wP:p2) or 'auto' (default: auto - monitors all active & future panes)")
-    parser.add_argument("--agent-filter", default="agy", help="Target agent filter, comma-separated (e.g. 'agy,opencode') or 'all' (default: agy only)")
+    parser.add_argument(
+        "--target",
+        default="auto",
+        help="Target pane ID (e.g. wP:p2) or 'auto' (default: auto - monitors all active & future panes)",
+    )
+    parser.add_argument(
+        "--agent-filter",
+        default="agy",
+        help="Target agent filter, comma-separated (e.g. 'agy,opencode') or 'all' (default: agy only)",
+    )
     parser.add_argument("--exclude-pane", action="append", default=[], help="Pane ID to exclude from auto-approval")
     parser.add_argument("--interval", type=int, default=3, help="Polling interval in seconds (default: 3)")
-    parser.add_argument("--auto-exit", action="store_true", default=False, help="Automatically exit after idle timeout (default: False, runs continuously)")
+    parser.add_argument(
+        "--auto-exit",
+        action="store_true",
+        default=False,
+        help="Automatically exit after idle timeout (default: False, runs continuously)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Log decisions without injecting keys")
-    parser.add_argument("--recent", "-n", type=int, nargs="?", const=10, default=None, help="Display recent audit logs (default: 10)")
+    parser.add_argument(
+        "--recent", "-n", type=int, nargs="?", const=10, default=None, help="Display recent audit logs (default: 10)"
+    )
     parser.add_argument("--search", "-s", type=str, help="Search audit logs by keyword")
-    parser.add_argument("--tail", "-t", type=int, nargs="?", const=20, default=None, help="Tail schengen.log file (default: 20 lines)")
+    parser.add_argument(
+        "--tail", "-t", type=int, nargs="?", const=20, default=None, help="Tail schengen.log file (default: 20 lines)"
+    )
     parser.add_argument("--paths", "--find-state", action="store_true", help="Print SmartGate state file paths")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format for agent parsing")
     parser.add_argument("--stats", action="store_true", help="Display pattern analysis stats from DB and exit")
     parser.add_argument("--status", action="store_true", help="Display status of SmartGate daemon and monitored panes")
-    parser.add_argument("--use-gpt-oss", action="store_true", default=False, help="Enable private GPT-OSS 120B semantic judge")
-    parser.add_argument("--reasoning", choices=["off", "low", "medium", "high"], default=DEFAULT_REASONING_EFFORT, help="Reasoning effort for guard watcher (default: low)")
+    parser.add_argument(
+        "--use-gpt-oss", action="store_true", default=False, help="Enable private GPT-OSS 120B semantic judge"
+    )
+    parser.add_argument(
+        "--reasoning",
+        choices=["off", "low", "medium", "high"],
+        default=DEFAULT_REASONING_EFFORT,
+        help="Reasoning effort for guard watcher (default: low)",
+    )
     parser.add_argument("--stop", action="store_true", help="Stop running guard process for target (or all) and exit")
-    parser.add_argument("--reload", action="store_true", help="Gracefully reload modules/rulesets on running guard without restarting process")
+    parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Gracefully reload modules/rulesets on running guard without restarting process",
+    )
     args = parser.parse_args()
 
     if args.stop:
@@ -596,7 +668,9 @@ def main():
             print(f"🔍 Search results for '{args.search}' ({len(results)} found):")
             for r in results:
                 symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
-                print(f"{symbol} [{r['timestamp'][:19]}] #{r['id']} {r['pane_id']} - {r['decision']} [Layer: {r['decision_layer']}] ({r['safety_reason']})")
+                print(
+                    f"{symbol} [{r['timestamp'][:19]}] #{r['id']} {r['pane_id']} - {r['decision']} [Layer: {r['decision_layer']}] ({r['safety_reason']})"
+                )
                 print(f"   Cmd: {r['raw_command']}")
         return
 
@@ -613,7 +687,9 @@ def main():
             for r in logs:
                 symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
                 cmd_prev = (r["raw_command"][:70] + "...") if len(r["raw_command"]) > 70 else r["raw_command"]
-                print(f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}")
+                print(
+                    f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}"
+                )
                 print(f"   Reason: {r['safety_reason']}")
                 print(f"   Cmd   : {cmd_prev}")
                 print("-" * 90)
@@ -626,7 +702,9 @@ def main():
         if not stats:
             print("No command patterns recorded yet in DB.")
         for row in stats:
-            print(f"• Frequency: {row['total_occurrences']} (Approved: {row['auto_approved_count']}, Delegated: {row['delegated_count']})")
+            print(
+                f"• Frequency: {row['total_occurrences']} (Approved: {row['auto_approved_count']}, Delegated: {row['delegated_count']})"
+            )
             print(f"  Pattern: {row['pattern']}")
             print(f"  Last Seen: {row['last_seen']}")
             print("-" * 80)
@@ -652,7 +730,10 @@ def main():
     excluded = set(args.exclude_pane)
     if self_pane:
         excluded.add(self_pane)
-    print(f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning}, lock={lock_file_path.name})", flush=True)
+    print(
+        f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning}, lock={lock_file_path.name})",
+        flush=True,
+    )
 
     last_processed_prompt = {}
     idle_count = 0
@@ -666,7 +747,10 @@ def main():
 
             # P1 Guard against orphan process: verify parent AGY session is alive
             if not is_parent_alive(initial_ppid):
-                print(f"🛑 [SCHENGEN_LIFECYCLE] Parent AGY session (PID {initial_ppid}) terminated. Exiting SmartGate watcher to prevent orphan auto-approval.", flush=True)
+                print(
+                    f"🛑 [SCHENGEN_LIFECYCLE] Parent AGY session (PID {initial_ppid}) terminated. Exiting SmartGate watcher to prevent orphan auto-approval.",
+                    flush=True,
+                )
                 break
 
             target_panes = []
@@ -675,7 +759,11 @@ def main():
             if args.target == "auto":
                 target_panes = find_blocked_panes(agent_filter=agent_filter_set, exclude_panes=excluded)
                 if not target_panes:
-                    active = [p["pane_id"] for p in all_p if agent_matches(p.get("agent"), agent_filter_set) and p["pane_id"] not in excluded]
+                    active = [
+                        p["pane_id"]
+                        for p in all_p
+                        if agent_matches(p.get("agent"), agent_filter_set) and p["pane_id"] not in excluded
+                    ]
                     target_panes = active
             else:
                 if args.target in excluded:
@@ -731,14 +819,25 @@ def main():
                 now = time.time()
 
                 # If same command is pending review on this pane in the EXACT same turn state
-                if cached and cached.get("cmd") == req_cmd and cached.get("seq") == state_seq and cached.get("status") == agent_status:
+                if (
+                    cached
+                    and cached.get("cmd") == req_cmd
+                    and cached.get("seq") == state_seq
+                    and cached.get("status") == agent_status
+                ):
                     if not cached.get("is_safe", True):
                         if now - cached.get("last_alert_time", 0) > 30.0:
                             cached["last_alert_time"] = now
-                            print(f"⏳ [ESCALATION_REMINDER] Pane {pane_id} ({agent_kind}) is STILL waiting for approval: {req_cmd[:70]}", flush=True)
+                            print(
+                                f"⏳ [ESCALATION_REMINDER] Pane {pane_id} ({agent_kind}) is STILL waiting for approval: {req_cmd[:70]}",
+                                flush=True,
+                            )
                     continue
 
-                print(f"\n🔍 [Target: {pane_id} ({agent_kind})] Detected Script/Command Pre-Approval Request:\n----------------------------------------\n{req_cmd}\n----------------------------------------", flush=True)
+                print(
+                    f"\n🔍 [Target: {pane_id} ({agent_kind})] Detected Script/Command Pre-Approval Request:\n----------------------------------------\n{req_cmd}\n----------------------------------------",
+                    flush=True,
+                )
 
                 target_cwd = pane_info.get("foreground_cwd") or pane_info.get("cwd") or os.getcwd()
 
@@ -758,7 +857,7 @@ def main():
                         origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN,
                         cwd=target_cwd,
                         scope=pane_id,
-                        agent_id=agent_kind
+                        agent_id=agent_kind,
                     )
                     if tax.get("counterfactual_block"):
                         decision = "SHADOW_BLOCKED"
@@ -766,7 +865,10 @@ def main():
                         decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
 
                 state_tag = f"[{tax.get('gate_state', 'ENFORCE')}]"
-                print(f"⚖️  Safety Evaluation {state_tag}: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}, Origin: {tax.get('origin')}, Conseq: {tax.get('consequence')}]", flush=True)
+                print(
+                    f"⚖️  Safety Evaluation {state_tag}: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}, Origin: {tax.get('origin')}, Conseq: {tax.get('consequence')}]",
+                    flush=True,
+                )
 
                 # 2. Record to SQLite3 DB
                 record_audit_log(
@@ -790,7 +892,10 @@ def main():
                         current_text = get_pane_text(pane_id, lines=80)
                         current_req = adapter.parse_permission_request(current_text)
                         if current_req != req_cmd:
-                            print(f"⚠️  [TOCTOU_ABORT] Pane {pane_id} prompt modified during safety evaluation. Aborting key injection.", flush=True)
+                            print(
+                                f"⚠️  [TOCTOU_ABORT] Pane {pane_id} prompt modified during safety evaluation. Aborting key injection.",
+                                flush=True,
+                            )
                             continue
 
                         approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
@@ -798,13 +903,15 @@ def main():
                             print(f"🚨 [{agent_kind}] {inject_reason} on {pane_id}", flush=True)
                             # 'OPENCODE_FAILSAFE' is a watcher-level escalation marker, deliberately
                             # outside the command-classification DecisionLayer enum.
-                            escalate_request(pane_id, pane_info, req_cmd, inject_reason, "OPENCODE_FAILSAFE", agent_kind)
+                            escalate_request(
+                                pane_id, pane_info, req_cmd, inject_reason, "OPENCODE_FAILSAFE", agent_kind
+                            )
                             last_processed_prompt[pane_id] = {
                                 "cmd": req_cmd,
                                 "seq": state_seq,
                                 "status": agent_status,
                                 "is_safe": False,
-                                "last_alert_time": now
+                                "last_alert_time": now,
                             }
                             continue
                     else:
@@ -814,7 +921,7 @@ def main():
                         "seq": state_seq,
                         "status": agent_status,
                         "is_safe": True,
-                        "last_alert_time": now
+                        "last_alert_time": now,
                     }
                     resolve_escalation(pane_id=pane_id)
                 else:
@@ -825,7 +932,7 @@ def main():
                         "seq": state_seq,
                         "status": agent_status,
                         "is_safe": False,
-                        "last_alert_time": now
+                        "last_alert_time": now,
                     }
 
             time.sleep(args.interval)

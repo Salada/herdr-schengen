@@ -10,9 +10,9 @@ selects 'once'; arrows/numbers are NOT supported and MUST NOT be sent.
 import re
 import time
 
-from agent_adapters.base import AgentAdapter, register
-from herdr_client import run_cmd, get_pane_text
+from herdr_client import get_pane_text, run_cmd
 
+from agent_adapters.base import AgentAdapter, register
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Guard Watcher entry point (Alias of schengen_watcher.py for backward compatibility)."""
+
 import os
 import sys
 from pathlib import Path

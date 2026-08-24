@@ -10,32 +10,59 @@ Latency SLA: <80ms, non-blocking fallback if binary is absent.
 """
 
 import json
-import os
 import re
 import shutil
 import subprocess
-from typing import Tuple, Dict, Any, Optional, Set
+from typing import Any, Optional
 
 # Standard runtime environment variable whitelist to prevent false-positives
 # Note: Sensitive tokens/keys (e.g. FORGEJO_TOKEN, BW_SESSION) are excluded to ensure full scrutiny
-STANDARD_ENV_WHITELIST: Set[str] = {
-    "HOME", "USER", "LOGNAME", "PATH", "PWD", "OLDPWD", "SHELL", "TERM",
-    "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "EDITOR", "VISUAL", "PAGER",
-    "UID", "GID", "EUID", "OSTYPE", "MACHTYPE", "HOSTTYPE", "HOSTNAME",
-    "SHLVL", "RANDOM", "SECONDS", "LINENO", "IFS",
+STANDARD_ENV_WHITELIST: set[str] = {
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "PATH",
+    "PWD",
+    "OLDPWD",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "UID",
+    "GID",
+    "EUID",
+    "OSTYPE",
+    "MACHTYPE",
+    "HOSTTYPE",
+    "HOSTNAME",
+    "SHLVL",
+    "RANDOM",
+    "SECONDS",
+    "LINENO",
+    "IFS",
     # Safe Agent & Tooling runtime flags (non-secret)
-    "ANTIGRAVITY_AGENT", "HERDR_ENV", "HERMES_HOME", "SCHENGEN_SHADOW_MODE",
-    "CI", "NODE_ENV", "PYTHONPATH", "VIRTUAL_ENV", "CARGO_HOME", "RUSTUP_HOME"
+    "ANTIGRAVITY_AGENT",
+    "HERDR_ENV",
+    "HERMES_HOME",
+    "SCHENGEN_SHADOW_MODE",
+    "CI",
+    "NODE_ENV",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
 }
 
 # Critical shell operations where unbound variables are catastrophic (E x DEST)
-DESTRUCTIVE_VARIABLE_COMMANDS = re.compile(
-    r"\b(rm|unlink|mkfs|dd|chmod|chown|mv|truncate|cp)\b",
-    re.IGNORECASE
-)
+DESTRUCTIVE_VARIABLE_COMMANDS = re.compile(r"\b(rm|unlink|mkfs|dd|chmod|chown|mv|truncate|cp)\b", re.IGNORECASE)
 
 
-def get_runtime_env_whitelist() -> Set[str]:
+def get_runtime_env_whitelist() -> set[str]:
     """Return standard non-secret environment whitelist."""
     return set(STANDARD_ENV_WHITELIST)
 
@@ -46,16 +73,14 @@ def is_shellcheck_available() -> bool:
 
 
 def audit_shell_with_shellcheck(
-    cmd_str: str,
-    custom_env_whitelist: Optional[Set[str]] = None,
-    timeout: float = 0.2
-) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    cmd_str: str, custom_env_whitelist: Optional[set[str]] = None, timeout: float = 0.2
+) -> tuple[bool, str, Optional[dict[str, Any]]]:
     """Audit shell command line or script block with ShellCheck AST analyzer.
-    
+
     Latency SLA: <80ms typical, hard timeout at 200ms.
-    
+
     Returns:
-        (is_safe: bool, reason: str, details: Optional[Dict[str, Any]])
+        (is_safe: bool, reason: str, details: Optional[dict[str, Any]])
     """
     if not cmd_str or not cmd_str.strip():
         return True, "Safe: Empty command", None
@@ -67,10 +92,11 @@ def audit_shell_with_shellcheck(
     if not is_shellcheck_available():
         # If binary is absent and command has destructive variable usage, emit visible DEGRADED marker
         if DESTRUCTIVE_VARIABLE_COMMANDS.search(cmd_str) and re.search(r"(\$|`)", cmd_str):
-            return True, "ShellCheck SAST: [DEGRADED_UNAVAILABLE] shellcheck binary not installed; pass-through to Layer 2 pattern guards", {
-                "degraded": True,
-                "reason": "BINARY_ABSENT"
-            }
+            return (
+                True,
+                "ShellCheck SAST: [DEGRADED_UNAVAILABLE] shellcheck binary not installed; pass-through to Layer 2 pattern guards",
+                {"degraded": True, "reason": "BINARY_ABSENT"},
+            )
         return True, "ShellCheck binary not available; skipped SAST pre-filter", None
 
     try:
@@ -80,7 +106,7 @@ def audit_shell_with_shellcheck(
             input=cmd_str.encode("utf-8"),
             capture_output=True,
             timeout=timeout,
-            check=False
+            check=False,
         )
         if not proc.stdout.strip():
             return True, "ShellCheck SAST: No issues found", None
@@ -97,14 +123,18 @@ def audit_shell_with_shellcheck(
 
             # 1. SC2115: Catastrophic empty variable expanding to '/' or '/*'
             if code == 2115:
-                return False, f"Catastrophic variable wipe risk (SC2115): {msg}", {
-                    "code": 2115,
-                    "finding": f,
-                    "hazard": "CATASTROPHIC_ROOT_WIPE",
-                    "origin": "E",
-                    "consequence": "DEST",
-                    "mechanism": "unbound-variable-sc2115"
-                }
+                return (
+                    False,
+                    f"Catastrophic variable wipe risk (SC2115): {msg}",
+                    {
+                        "code": 2115,
+                        "finding": f,
+                        "hazard": "CATASTROPHIC_ROOT_WIPE",
+                        "origin": "E",
+                        "consequence": "DEST",
+                        "mechanism": "unbound-variable-sc2115",
+                    },
+                )
 
             # 2. SC2154: Variable referenced but not assigned
             if code == 2154:
@@ -118,23 +148,28 @@ def audit_shell_with_shellcheck(
 
                 # If the unassigned variable is used in a destructive command context -> BLOCK
                 if DESTRUCTIVE_VARIABLE_COMMANDS.search(cmd_str):
-                    return False, f"Unbound variable in destructive command (SC2154: '${var_name}'): {msg}", {
-                        "code": 2154,
-                        "var_name": var_name,
-                        "finding": f,
-                        "hazard": "UNBOUND_VARIABLE_DESTRUCTION",
-                        "origin": "E",
-                        "consequence": "DEST",
-                        "mechanism": "unbound-variable-sc2154"
-                    }
+                    return (
+                        False,
+                        f"Unbound variable in destructive command (SC2154: '${var_name}'): {msg}",
+                        {
+                            "code": 2154,
+                            "var_name": var_name,
+                            "finding": f,
+                            "hazard": "UNBOUND_VARIABLE_DESTRUCTION",
+                            "origin": "E",
+                            "consequence": "DEST",
+                            "mechanism": "unbound-variable-sc2154",
+                        },
+                    )
 
         return True, "ShellCheck SAST: Verified safe", None
 
     except subprocess.TimeoutExpired:
         # Fast fail-open with explicit degradation note if timeout exceeded (>200ms)
-        return True, "ShellCheck SAST: [DEGRADED_TIMEOUT] timeout exceeded (>200ms); pass-through to Layer 2", {
-            "degraded": True,
-            "reason": "TIMEOUT_EXCEEDED"
-        }
+        return (
+            True,
+            "ShellCheck SAST: [DEGRADED_TIMEOUT] timeout exceeded (>200ms); pass-through to Layer 2",
+            {"degraded": True, "reason": "TIMEOUT_EXCEEDED"},
+        )
     except Exception as e:
         return True, f"ShellCheck SAST execution error ({e}); pass-through to Layer 2", None

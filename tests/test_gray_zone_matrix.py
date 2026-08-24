@@ -9,10 +9,7 @@ Tests:
 6. 7-field Structured Decision Guidance Document formatting
 """
 
-import os
-import stat
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,15 +17,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from gray_zone_evaluator import (
-    ResourceTier,
+    BASE_GOVERNANCE_MATRIX,
     OperationType,
-    IrreversibilityGrade,
+    ResourceTier,
     Verdict,
-    classify_resource_tier,
     classify_operation,
+    classify_resource_tier,
     evaluate_gray_zone_operation,
     format_decision_guidance,
-    BASE_GOVERNANCE_MATRIX,
 )
 
 
@@ -42,27 +38,44 @@ class TestResourceTierClassification(unittest.TestCase):
         self.assertEqual(classify_resource_tier("/var/folders/ab/cd/T/temp_file.txt"), ResourceTier.T0_EPHEMERAL)
 
     def test_t1_regenerable_caches(self):
-        self.assertEqual(classify_resource_tier("/var/folders/ab/cd/C/com.apple.app/cache.db"), ResourceTier.T1_REGENERABLE)
-        self.assertEqual(classify_resource_tier("/Users/test/Library/Developer/Xcode/DerivedData/Build"), ResourceTier.T1_REGENERABLE)
+        self.assertEqual(
+            classify_resource_tier("/var/folders/ab/cd/C/com.apple.app/cache.db"), ResourceTier.T1_REGENERABLE
+        )
+        self.assertEqual(
+            classify_resource_tier("/Users/test/Library/Developer/Xcode/DerivedData/Build"), ResourceTier.T1_REGENERABLE
+        )
         self.assertEqual(classify_resource_tier("/Users/test/.cache/pip/wheels"), ResourceTier.T1_REGENERABLE)
         self.assertEqual(classify_resource_tier("/Users/test/.npm/_cacache/content-v2"), ResourceTier.T1_REGENERABLE)
 
     def test_t2_chezmoi_source(self):
-        self.assertEqual(classify_resource_tier("/Users/kyjbusan/.local/share/chezmoi/dot_zshrc.tmpl"), ResourceTier.T2_VERSION_CONTROLLED)
+        self.assertEqual(
+            classify_resource_tier("/Users/kyjbusan/.local/share/chezmoi/dot_zshrc.tmpl"),
+            ResourceTier.T2_VERSION_CONTROLLED,
+        )
 
     def test_t3_durable_gray_zone(self):
-        self.assertEqual(classify_resource_tier("/Users/test/.local/state/package_history/brew.log"), ResourceTier.T3_DURABLE_GRAY)
-        self.assertEqual(classify_resource_tier("/Users/test/.config/custom_app/config.json"), ResourceTier.T3_DURABLE_GRAY)
+        self.assertEqual(
+            classify_resource_tier("/Users/test/.local/state/package_history/brew.log"), ResourceTier.T3_DURABLE_GRAY
+        )
+        self.assertEqual(
+            classify_resource_tier("/Users/test/.config/custom_app/config.json"), ResourceTier.T3_DURABLE_GRAY
+        )
         self.assertEqual(classify_resource_tier("/Users/test/data/app.sqlite3"), ResourceTier.T3_DURABLE_GRAY)
-        self.assertEqual(classify_resource_tier("/Users/test/.hermes/memories/session.json"), ResourceTier.T3_DURABLE_GRAY)
+        self.assertEqual(
+            classify_resource_tier("/Users/test/.hermes/memories/session.json"), ResourceTier.T3_DURABLE_GRAY
+        )
 
     def test_t4_critical_assets(self):
         self.assertEqual(classify_resource_tier("/Users/test/.ssh/id_ed25519"), ResourceTier.T4_CRITICAL)
         self.assertEqual(classify_resource_tier("/Users/test/.ssh/deploy_key.pem"), ResourceTier.T4_CRITICAL)
-        self.assertEqual(classify_resource_tier("/Users/test/Library/Keychains/login.keychain-db"), ResourceTier.T4_CRITICAL)
+        self.assertEqual(
+            classify_resource_tier("/Users/test/Library/Keychains/login.keychain-db"), ResourceTier.T4_CRITICAL
+        )
         self.assertEqual(classify_resource_tier("/etc/hosts"), ResourceTier.T4_CRITICAL)
         self.assertEqual(classify_resource_tier("/System/Library/CoreServices"), ResourceTier.T4_CRITICAL)
-        self.assertEqual(classify_resource_tier("http://192.168.10.102:3000/api/v1/admin/users/bot/emails"), ResourceTier.T4_CRITICAL)
+        self.assertEqual(
+            classify_resource_tier("http://192.168.10.102:3000/api/v1/admin/users/bot/emails"), ResourceTier.T4_CRITICAL
+        )
 
 
 class TestOperationClassification(unittest.TestCase):
@@ -137,27 +150,49 @@ class TestFullGovernanceMatrixScenarios(unittest.TestCase):
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T1_REGENERABLE, OperationType.TRUNCATE)], Verdict.ALLOW)
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T1_REGENERABLE, OperationType.DELETE)], Verdict.ALLOW)
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T1_REGENERABLE, OperationType.MOVE)], Verdict.ALLOW)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T1_REGENERABLE, OperationType.MUTATING_API)], Verdict.PROMPT)
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T1_REGENERABLE, OperationType.MUTATING_API)], Verdict.PROMPT
+        )
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T1_REGENERABLE, OperationType.HEAVY_EXEC)], Verdict.ALLOW)
 
     def test_t2_clean_git_matrix(self):
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.READ)], Verdict.ALLOW)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.APPEND)], Verdict.ALLOW)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.OVERWRITE)], Verdict.ALLOW)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.TRUNCATE)], Verdict.ALLOW)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.DELETE)], Verdict.PROMPT)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.MOVE)], Verdict.ALLOW)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.MUTATING_API)], Verdict.PROMPT)
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.READ)], Verdict.ALLOW
+        )
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.APPEND)], Verdict.ALLOW
+        )
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.OVERWRITE)], Verdict.ALLOW
+        )
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.TRUNCATE)], Verdict.ALLOW
+        )
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.DELETE)], Verdict.PROMPT
+        )
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.MOVE)], Verdict.ALLOW
+        )
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T2_VERSION_CONTROLLED, OperationType.MUTATING_API)], Verdict.PROMPT
+        )
 
     def test_t3_durable_gray_zone_matrix(self):
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.READ)], Verdict.ALLOW)
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.APPEND)], Verdict.ALLOW)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.OVERWRITE)], Verdict.PROMPT)
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.OVERWRITE)], Verdict.PROMPT
+        )
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.TRUNCATE)], Verdict.BLOCK)
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.DELETE)], Verdict.PROMPT)
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.MOVE)], Verdict.PROMPT)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.MUTATING_API)], Verdict.PROMPT)
-        self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.HEAVY_EXEC)], Verdict.PROMPT)
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.MUTATING_API)], Verdict.PROMPT
+        )
+        self.assertEqual(
+            BASE_GOVERNANCE_MATRIX[(ResourceTier.T3_DURABLE_GRAY, OperationType.HEAVY_EXEC)], Verdict.PROMPT
+        )
 
     def test_t4_critical_matrix(self):
         self.assertEqual(BASE_GOVERNANCE_MATRIX[(ResourceTier.T4_CRITICAL, OperationType.READ)], Verdict.PROMPT)
@@ -174,19 +209,23 @@ class TestSpecialEdgeCasesAndGuidance(unittest.TestCase):
     """Test specialized edge cases: /var/folders sockets, log truncates, and 7-field template."""
 
     def test_truncate_t3_log_is_blocked(self):
-        verdict, reason, payload = evaluate_gray_zone_operation("echo '' > ~/.local/state/package_history/brew_dump.json")
+        verdict, reason, payload = evaluate_gray_zone_operation(
+            "echo '' > ~/.local/state/package_history/brew_dump.json"
+        )
         self.assertEqual(verdict, Verdict.BLOCK)
         self.assertIn("TRUNCATE", reason)
 
     def test_append_t3_log_is_allowed(self):
-        verdict, reason, payload = evaluate_gray_zone_operation("echo '2026-08-18 install pkg' >> ~/.local/state/package_history/history.log")
+        verdict, reason, payload = evaluate_gray_zone_operation(
+            "echo '2026-08-18 install pkg' >> ~/.local/state/package_history/history.log"
+        )
         self.assertEqual(verdict, Verdict.ALLOW)
 
     def test_delete_t3_sqlite_prompts_with_7_fields(self):
         verdict, reason, payload = evaluate_gray_zone_operation("rm ~/.local/state/herdr-schengen/schengen_history.db")
         self.assertEqual(verdict, Verdict.PROMPT)
         self.assertIsNotNone(payload)
-        
+
         doc = format_decision_guidance(payload)
         self.assertIn("[1] Target", doc)
         self.assertIn("[2] Operation", doc)

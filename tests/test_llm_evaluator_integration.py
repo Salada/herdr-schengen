@@ -3,9 +3,8 @@
 import os
 import sys
 import tempfile
-from pathlib import Path
-
 import unittest
+from pathlib import Path
 
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
@@ -44,7 +43,7 @@ class TestLLMEvaluatorIntegration(unittest.TestCase):
                 model=self.model,
                 api_key=self.api_key,
                 reasoning_effort="low",
-                raise_on_error=True
+                raise_on_error=True,
             )
             print(f"\n[Test Result - Safe]: is_safe={is_safe}, reason={reason}")
             self.assertTrue(is_safe, f"Expected safe verdict for benign manifest, got: {reason}")
@@ -66,7 +65,7 @@ class TestLLMEvaluatorIntegration(unittest.TestCase):
                 model=self.model,
                 api_key=self.api_key,
                 reasoning_effort="low",
-                raise_on_error=True
+                raise_on_error=True,
             )
             print(f"\n[Test Result - Danger System]: is_safe={is_safe}, reason={reason}")
             self.assertFalse(is_safe, f"Expected dangerous verdict for /etc/shadow, got: {reason}")
@@ -88,7 +87,7 @@ class TestLLMEvaluatorIntegration(unittest.TestCase):
                 model=self.model,
                 api_key=self.api_key,
                 reasoning_effort="low",
-                raise_on_error=True
+                raise_on_error=True,
             )
             print(f"\n[Test Result - Danger Secret]: is_safe={is_safe}, reason={reason}")
             self.assertFalse(is_safe, f"Expected dangerous verdict for secret credentials, got: {reason}")

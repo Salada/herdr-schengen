@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Trusted Clearance entry point (Alias of schengen_watcher.py)."""
+
 import os
 import sys
 from pathlib import Path
