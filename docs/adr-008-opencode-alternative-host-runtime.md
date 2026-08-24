@@ -40,12 +40,17 @@ Extend the host runtime gate from "AGY-only" to **agent-agnostic (AGY or OpenCod
 
 ## 🛡️ 3. Cost Model
 
-| Path | AGY host | OpenCode host |
+The daemon itself (`schengen_watcher.py`) already runs a `while True` poll loop
+on any host (0 tokens); the 7-field guidance is generated deterministically by
+`gray_zone_evaluator`, and the cloud judge (Phase 1-3) is host-agnostic. The
+token-cost delta between hosts comes only from how the daemon is launched and
+how escalations are drained/surfaced:
+
+| Concern | AGY host | OpenCode host |
 | :--- | :--- | :--- |
-| Daemon polling | `schedule()` heartbeat (tokens) | Python `while True` loop (0 tokens) |
-| Daemon output | streamed into AGY context | redirected to log file |
-| Escalation judgment | AGY formats 7-field guidance | cloud judge (`deepseek-chat`) + `noReply` render |
-| Human gate | AGY session prompt | `herdr notification` + CLI `--approve/--deny` |
+| Daemon launch | `run_command` streaming task — stdout into AGY context (tokens) | plugin `spawn` — stdout → log file (0 tokens) |
+| Escalation drain | `schedule()` heartbeat wakes the AGY model (tokens) | daemon loop + `herdr notification` (0 tokens) |
+| Escalation surfacing | AGY session stream prompt | `client.session.prompt(noReply: true)` render (0 tokens) |
 
 ## 📊 4. Consequences
 
@@ -54,3 +59,11 @@ Extend the host runtime gate from "AGY-only" to **agent-agnostic (AGY or OpenCod
 - **Negatives**: breaks ADR-003's "AGY-exclusive" wording (superseded here); the
   OpenCode host path (plugin spawn + `noReply` injection) adds an OpenCode-side
   component that lives outside this repository (OpenCode plugin config).
+
+## 📚 5. External Contract References
+
+- **OpenCode marker**: `OPENCODE=1` (set by the OpenCode runtime; verified in a
+  live OpenCode session alongside `OPENCODE_PID`).
+- **No-reply injection**: `client.session.prompt({ ..., body: { noReply: true,
+  parts: [...] } })` — OpenCode SDK (`@opencode-ai/sdk`), "Inject context without
+  triggering AI response".

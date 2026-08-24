@@ -14,28 +14,22 @@ from schengen_watcher import verify_agy_runtime_environment, verify_host_runtime
 _AGY_KEYS = ("ANTIGRAVITY_AGENT", "AI_AGENT", "ANTIGRAVITY_CONVERSATION_ID")
 
 
-def _clear_agent_markers():
-    for k in _AGY_KEYS:
-        os.environ.pop(k, None)
-    os.environ.pop("OPENCODE", None)
-
-
 class TestHostRuntimeEnvironment(unittest.TestCase):
     def test_agy_markers_accepted(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
-            _clear_agent_markers()
-            os.environ["ANTIGRAVITY_AGENT"] = "1"
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_AGENT": "1"}, clear=True):
             verify_host_runtime_environment()  # must not raise
 
     def test_opencode_marker_accepted(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
-            _clear_agent_markers()
-            os.environ["OPENCODE"] = "1"
+        with mock.patch.dict(os.environ, {"OPENCODE": "1"}, clear=True):
             verify_host_runtime_environment()  # must not raise
 
+    def test_opencode_falsy_value_rejected(self):
+        with mock.patch.dict(os.environ, {"OPENCODE": "0"}, clear=True):
+            with self.assertRaises(SystemExit):
+                verify_host_runtime_environment()
+
     def test_standalone_rejected(self):
-        with mock.patch.dict(os.environ, {}, clear=False):
-            _clear_agent_markers()
+        with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(SystemExit):
                 verify_host_runtime_environment()
 

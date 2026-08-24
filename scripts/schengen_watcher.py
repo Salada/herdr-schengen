@@ -457,7 +457,7 @@ def verify_host_runtime_environment():
         os.environ.get("ANTIGRAVITY_AGENT") == "1"
         or os.environ.get("AI_AGENT") == "antigravity"
         or bool(os.environ.get("ANTIGRAVITY_CONVERSATION_ID"))
-        or bool(os.environ.get("OPENCODE"))
+        or os.environ.get("OPENCODE") == "1"
     )
     if not is_host:
         sys.stderr.write(
@@ -720,7 +720,7 @@ def main():
             print("-" * 80)
         return
 
-    # Strictly verify AGY runtime environment (ADR-003 mandate)
+    # Strictly verify host runtime environment (ADR-003 / ADR-008 mandate)
     verify_host_runtime_environment()
 
     # Normalize the target agent filter into a set (None = match all).
