@@ -145,6 +145,9 @@ class TestDecisionLayers(unittest.TestCase):
             "git push origin test/audit-suite",
             "git push origin docs/architecture",
             "git push origin custom-branch-123",
+            # Regression: leaked opencode status bar (~/path:branch) must not match
+            # the `:branch` remote-delete refspec, so a normal push stays safe.
+            "cd ~/x && git push -u origin fix/27-28-cloud-judge-config-cache 2>&1 | tail -15 ~/code/herdr-schengen:main",
         ]
         for cmd in safe_pushes:
             safe, reason, layer = audit_shell_command(cmd)
