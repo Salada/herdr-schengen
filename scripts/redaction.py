@@ -26,7 +26,7 @@ _SECRET_VALUE_RULES = [
 _KEY_VALUE_RE = re.compile(
     r"(?i)\b(token|secret|password|passwd|api[_-]?key|api[_-]?secret|"
     r"client[_-]?secret|access[_-]?key|credential|auth[_-]?token)s?"
-    r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|\S+)"
+    r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^'\"\s]+)"
 )
 
 # Authorization headers.

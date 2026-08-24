@@ -59,6 +59,12 @@ class TestRedactForCloud(unittest.TestCase):
         cmd = "git status && pytest tests"
         self.assertEqual(redact_for_cloud(cmd), cmd)
 
+    def test_preserves_quoted_assignment_structure(self):
+        out = redact_for_cloud("echo 'token=value' > /tmp/x")
+        self.assertIn("token=***", out)
+        self.assertNotIn("token=value", out)
+        self.assertEqual(out.count("'"), 2, f"quotes unbalanced: {out!r}")
+
 
 class TestResolveGuardLlmConfig(unittest.TestCase):
     def setUp(self):

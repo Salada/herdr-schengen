@@ -217,13 +217,7 @@ def _compact_dangerous_token(code_str: str) -> Optional[str]:
 # 9. LLM / Cloud Judge Configuration (OpenAI-compatible, DeepSeek default)
 DEFAULT_GUARD_LLM_MODEL = os.environ.get("GUARD_LLM_MODEL", "deepseek-chat")
 DEFAULT_GUARD_LLM_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
-DEFAULT_GUARD_LLM_API_KEY = os.environ.get("GUARD_LLM_API_KEY") or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
 DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
-
-# Backward-compatible aliases (pre-cloud-judge naming)
-DEFAULT_GPT_OSS_MODEL = DEFAULT_GUARD_LLM_MODEL
-DEFAULT_GPT_OSS_ENDPOINT = ""
-DEFAULT_GPT_OSS_API_KEY = DEFAULT_GUARD_LLM_API_KEY
 
 
 def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
@@ -649,7 +643,7 @@ def audit_with_cloud_judge(
 def audit_dynamic_substitution_with_llm(
     cmd_str: str,
     endpoint: Optional[str] = None,
-    model: str = DEFAULT_GPT_OSS_MODEL,
+    model: Optional[str] = None,
     api_key: Optional[str] = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     max_hops: int = 2,
@@ -659,12 +653,10 @@ def audit_dynamic_substitution_with_llm(
     agent_id: str = "default",
     origin: str = "I"
 ) -> Tuple[bool, str]:
-    """Helper for semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails and scoped LLM caching.
-    
-    In the AGY architecture, dynamic substitutions stream directly to the active AGY session,
-    where Antigravity native subagents (e.g. gpt-oss:120b under weekly limits) inspect parameters.
-    If an external endpoint is explicitly configured, performs HTTP validation; otherwise returns
-    the in-session escalation verdict.
+    """Semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails and scoped LLM caching.
+
+    Routes to the configured OpenAI-compatible cloud judge (deepseek-chat default). If no
+    endpoint is configured, or the judge is unreachable / uncertain, fails closed to human review.
     """
     # Check scoped LLM cache (B1: cache strictly scoped to expensive LLM tier)
     cache_key = None
