@@ -35,6 +35,7 @@ def _clear_live_keys():
 # does not flag these clearly-benign test inputs.
 FAKE_PEM = "-----BEGIN " + "RSA PRIVATE KEY-----\nMIIEowIBAA\n-----END RSA PRIVATE KEY-----"
 FAKE_AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
+FAKE_SLACK = "xox" + "b-1234567890-abcdefghijklmnopqrstuv"
 
 
 class TestRedactForCloud(unittest.TestCase):
@@ -66,6 +67,17 @@ class TestRedactForCloud(unittest.TestCase):
         self.assertIn("token=***", out)
         self.assertNotIn("token=value", out)
         self.assertEqual(out.count("'"), 2, f"quotes unbalanced: {out!r}")
+
+    def test_masks_compound_underscore_keys(self):
+        self.assertEqual(redact_for_cloud("DB_PASSWORD=supersecret"), "DB_PASSWORD=***")
+        self.assertEqual(redact_for_cloud("AWS_SECRET_ACCESS_KEY=supersecret"), "AWS_SECRET_ACCESS_KEY=***")
+        self.assertEqual(redact_for_cloud("MYSQL_PWD=supersecret"), "MYSQL_PWD=***")
+        self.assertEqual(redact_for_cloud("export DB_PASSWORD=supersecret"), "export DB_PASSWORD=***")
+
+    def test_masks_uri_and_slack_shapes(self):
+        self.assertNotIn("pass@", redact_for_cloud("postgres://user:pass@host:5432/db"))
+        self.assertIn("uri-password", redact_for_cloud("postgres://user:pass@host:5432/db"))
+        self.assertIn("slack-token", redact_for_cloud(FAKE_SLACK))
 
 
 class TestResolveGuardLlmConfig(unittest.TestCase):

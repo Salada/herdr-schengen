@@ -19,18 +19,27 @@ _SECRET_VALUE_RULES = [
     (re.compile(r"\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,})"), "github-pat"),
     (re.compile(r"\b(AIza[A-Za-z0-9_-]{30,})"), "google-key"),
     (re.compile(r"\b(hf_[A-Za-z0-9]{20,})"), "hf-token"),
+    (re.compile(r"\b(xox[baprs]-[A-Za-z0-9-]{10,})"), "slack-token"),
+    (re.compile(r"\b(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"), "jwt"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"), "private-key"),
 ]
 
 # `KEY=value` / `KEY: value` assignments: keep the key NAME, mask the value.
+# The key side uses a negative lookbehind (?<![A-Za-z0-9]) instead of \b so that
+# underscore-prefixed compound keys (DB_PASSWORD, AWS_SECRET_ACCESS_KEY,
+# MYSQL_PWD, api_key) are matched — \b treats '_' as a word char and would skip
+# them, leaking the value to the cloud model.
 _KEY_VALUE_RE = re.compile(
-    r"(?i)\b(token|secret|password|passwd|api[_-]?key|api[_-]?secret|"
+    r"(?i)(?<![A-Za-z0-9])(token|secret|password|passwd|pwd|api[_-]?key|api[_-]?secret|"
     r"client[_-]?secret|access[_-]?key|credential|auth[_-]?token)s?"
     r"(\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^'\"\s]+)"
 )
 
 # Authorization headers.
 _BEARER_RE = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+
+# URI credentials (scheme://user:password@host): mask the password only.
+_URI_CREDENTIAL_RE = re.compile(r"(?i)([a-z][a-z0-9+.-]*://[^\s:/@]+:)[^\s@/]*@")
 
 
 def redact_for_cloud(text: str) -> str:
@@ -45,4 +54,5 @@ def redact_for_cloud(text: str) -> str:
         out = pat.sub(f"[REDACTED:{label}]", out)
     out = _KEY_VALUE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", out)
     out = _BEARER_RE.sub(r"\1 ***", out)
+    out = _URI_CREDENTIAL_RE.sub(r"\1[REDACTED:uri-password]@", out)
     return out
