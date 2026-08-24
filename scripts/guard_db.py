@@ -239,7 +239,6 @@ def set_cached_evaluation(
 ):
     """Store security evaluation result in both in-memory LRU and SQLite persistent cache."""
     import json
-    from datetime import timedelta
 
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()

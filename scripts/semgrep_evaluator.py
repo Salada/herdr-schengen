@@ -37,7 +37,7 @@ def audit_script_with_semgrep(cmd_str: str, timeout_sec: float = 0.2) -> tuple[b
     """Audit shell or inline script command using Semgrep security rules with fast local fallback.
 
     Returns:
-        (is_safe: bool, reason: str, details: Dict[str, Any])
+        (is_safe: bool, reason: str, details: dict[str, Any])
     """
     if not cmd_str or not cmd_str.strip():
         return True, "Safe: Empty command", {"degraded": False}

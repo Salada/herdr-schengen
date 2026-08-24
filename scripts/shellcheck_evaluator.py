@@ -80,7 +80,7 @@ def audit_shell_with_shellcheck(
     Latency SLA: <80ms typical, hard timeout at 200ms.
 
     Returns:
-        (is_safe: bool, reason: str, details: Optional[Dict[str, Any]])
+        (is_safe: bool, reason: str, details: Optional[dict[str, Any]])
     """
     if not cmd_str or not cmd_str.strip():
         return True, "Safe: Empty command", None
