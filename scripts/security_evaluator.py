@@ -94,7 +94,7 @@ CRITICAL_SHELL_PATTERNS = [
     (r"\bchown\b", "Ownership modification (chown)"),
     # Git Remote Push Safeguards (Allows non-force feature branch pushes, blocks force/delete/mirror/protected branch push)
     (r"\bgit\s+push\b.*(--force\b|-f\b|\+[\w/.-]+)", "Destructive Git force push / overwrite (--force / -f / +ref)"),
-    (r"\bgit\s+push\b.*(--delete\b|:\w+)", "Destructive Git remote branch deletion (--delete)"),
+    (r"\bgit\s+push\b.*(--delete\b|(?<!\S):\w+)", "Destructive Git remote branch deletion (--delete)"),
     (
         r"\bgit\s+push\b.*(--all\b|--mirror\b|--tags\b)",
         "Dangerous global or mirror Git push (--all / --mirror / --tags)",

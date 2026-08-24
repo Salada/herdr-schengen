@@ -227,51 +227,77 @@ class OpenCodeAdapter(AgentAdapter):
         return f"unhandled_dialog {title}"
 
     def inject_approval(self, pane_id, req_cmd):
-        """Inject a single 'enter' via the Q3 fail-safe ladder with bounded re-poll.
+        """Inject 'enter' via the Q3 fail-safe ladder with bounded re-poll and retry.
 
         Returns (approved: bool, reason: str).
-        """
-        # Step 4: inject a single enter (no arrows/numbers). run_cmd returns None
-        # on subprocess failure (herdr_client swallows CalledProcessError), so a
-        # failed key delivery is distinguishable from a slow dialog clear.
-        if run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"]) is None:
-            return False, "send-keys failed (herdr CLI error); enter not delivered"
 
-        # Step 5: post-inject self-correction backstop via bounded re-poll. Collect the
-        # observed stages and resolve once at the end, so a transient mid-redraw flicker
-        # cannot be misclassified as success (the pure loop-policy does the final call).
-        # The window is env-tunable; default 2.5s (was 0.5s) because opencode's dialog
-        # clear is an async round-trip (enter -> Bubble Tea key handling -> reply('once')
-        # -> server Deferred resolve -> TUI re-render) that exceeds 0.5s under LLM load.
+        A single `send-keys enter` can be lost if the dialog's key bindings are
+        not yet registered (Bubble Tea renders asynchronously), so if the dialog
+        is still at 'permission' after the re-poll window, we retry the enter
+        (bounded by SCHENGEN_OPENCODE_MAX_INJECT). Before EVERY enter — including
+        each retry — the live dialog is re-read and re-parsed, and the enter is
+        only sent while it still shows the SAME request (req_cmd). If the dialog
+        cleared (success) or switched to a different permission, we stop: a retry
+        must never approve a different (possibly dangerous) command.
+        """
         try:
             poll_seconds = float(os.environ.get("SCHENGEN_OPENCODE_REPOLL_SECONDS", "2.5"))
         except ValueError:
             poll_seconds = 2.5
+        try:
+            max_attempts = int(os.environ.get("SCHENGEN_OPENCODE_MAX_INJECT", "3"))
+        except ValueError:
+            max_attempts = 3
         poll_interval = 0.25
-        deadline = time.monotonic() + poll_seconds
-        stages = []
-        consecutive_unknown = 0
-        while time.monotonic() < deadline:
-            stage = self.classify_dialog_stage(get_pane_text(pane_id, lines=80))
-            stages.append(stage)
-            if stage == "unknown":
-                consecutive_unknown += 1
-                if consecutive_unknown >= 2:
-                    break
-            else:
-                consecutive_unknown = 0
-                if stage in ("always_confirm", "reject"):
-                    break
-            time.sleep(poll_interval)
 
-        verdict, reason = resolve_opencode_injection(stages)
-        if verdict in ("always_abort", "reject_abort"):
-            # A human-residual cursor position (on 'always' or 'reject') was hit by our
-            # enter. Press escape to exit the confirmation sub-dialog, and return the
-            # reason so the caller escalates (conveying it to the human via Herdr).
-            run_cmd(["herdr", "agent", "send-keys", pane_id, "escape"])
-            return False, reason
-        if verdict == "success":
-            print(f"🚀 Auto-approving opencode 'once' for {pane_id}...", flush=True)
-            return True, reason
+        reason = "post-inject: dialog not confirmed cleared after bounded re-poll; enter not registered"
+        for _ in range(max(1, max_attempts)):
+            # TOCTOU re-verification BEFORE each enter: the live dialog must still
+            # show the SAME permission request. A retry must not approve a
+            # different (possibly dangerous) command that appeared meanwhile.
+            visible = get_pane_text(pane_id, lines=80)
+            live_stage = self.classify_dialog_stage(visible)
+            if live_stage != "permission":
+                if live_stage == "unknown":
+                    print(f"🚀 Auto-approving opencode 'once' for {pane_id}...", flush=True)
+                    return True, "once approved (dialog cleared)"
+                return False, f"post-inject: dialog moved to '{live_stage}' before inject; aborted"
+            if self.parse_permission_request(visible) != req_cmd:
+                return False, "post-inject: dialog command changed before inject; aborted (TOCTOU)"
+
+            # Inject a single enter (no arrows/numbers). run_cmd returns None on
+            # subprocess failure (herdr_client swallows CalledProcessError).
+            if run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"]) is None:
+                return False, "send-keys failed (herdr CLI error); enter not delivered"
+
+            # Post-inject self-correction backstop via bounded re-poll.
+            deadline = time.monotonic() + poll_seconds
+            stages = []
+            consecutive_unknown = 0
+            while time.monotonic() < deadline:
+                stage = self.classify_dialog_stage(get_pane_text(pane_id, lines=80))
+                stages.append(stage)
+                if stage == "unknown":
+                    consecutive_unknown += 1
+                    if consecutive_unknown >= 2:
+                        break
+                else:
+                    consecutive_unknown = 0
+                    if stage in ("always_confirm", "reject"):
+                        break
+                time.sleep(poll_interval)
+
+            verdict, reason = resolve_opencode_injection(stages)
+            if verdict in ("always_abort", "reject_abort"):
+                # A human-residual cursor position (on 'always' or 'reject') was hit by our
+                # enter. Press escape to exit the confirmation sub-dialog, and return the
+                # reason so the caller escalates (conveying it to the human via Herdr).
+                run_cmd(["herdr", "agent", "send-keys", pane_id, "escape"])
+                return False, reason
+            if verdict == "success":
+                print(f"🚀 Auto-approving opencode 'once' for {pane_id}...", flush=True)
+                return True, reason
+            # verdict == "not_registered" -> dialog still at 'permission'; retry
+            # (the next loop iteration re-verifies the dialog before re-entering).
+
         return False, reason
