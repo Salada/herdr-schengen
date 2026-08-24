@@ -53,6 +53,7 @@ This repository serves as the single source of truth (SSOT) for the Schengen Sec
 | **[ADR-005](./docs/adr-005-autonomous-orchestration-and-deadlock-defense.md)** | Autonomous Multi-Agent Orchestration & Deadlock Defense Protocol |
 | **[ADR-006](./docs/adr-006-destructive-intent-taxonomy-and-sast-pre-execution-gate.md)** | Destructive Intent Taxonomy & Hybrid SAST Pre-Execution Security Gate |
 | **[ADR-007](./docs/adr-007-graceful-dynamic-reload-and-target-scoped-lockfiles.md)** | Graceful Dynamic Reload (SIGHUP) & Target-Scoped Lockfile Architecture |
+| **[ADR-008](./docs/adr-008-opencode-alternative-host-runtime.md)** | OpenCode as Alternative Host Runtime (Agent-Agnostic Session-Bound Governance) |
 
 ---
 

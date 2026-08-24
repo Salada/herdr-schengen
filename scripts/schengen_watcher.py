@@ -447,20 +447,30 @@ def execute_graceful_reload():
         return False
 
 
-def verify_agy_runtime_environment():
-    """Ensure Schengen watcher is executing strictly within an Antigravity agent runtime."""
-    is_agy = (
+def verify_host_runtime_environment():
+    """Ensure the watcher runs within a supported agent runtime (Antigravity or OpenCode).
+
+    ADR-003's session-bound mandate is extended by ADR-008 to permit OpenCode as
+    an alternative host. The watcher must still never run detached or orphaned.
+    """
+    is_host = (
         os.environ.get("ANTIGRAVITY_AGENT") == "1"
         or os.environ.get("AI_AGENT") == "antigravity"
         or bool(os.environ.get("ANTIGRAVITY_CONVERSATION_ID"))
+        or bool(os.environ.get("OPENCODE"))
     )
-    if not is_agy:
+    if not is_host:
         sys.stderr.write(
             "❌ [SCHENGEN_FATAL] Execution rejected: Herdr Schengen (SmartGate) must run exclusively\n"
-            "   within an active Antigravity (AGY) agent session (ANTIGRAVITY_AGENT=1 or AI_AGENT=antigravity).\n"
-            "   Standalone terminal execution or detached background daemons are forbidden by ADR-003 governance.\n"
+            "   within an active agent session (Antigravity: ANTIGRAVITY_AGENT=1 / AI_AGENT=antigravity;\n"
+            "   OpenCode: OPENCODE=1).\n"
+            "   Standalone terminal execution or detached background daemons are forbidden (ADR-003 / ADR-008).\n"
         )
         sys.exit(1)
+
+
+# Backward-compatible alias (pre-opencode-host naming)
+verify_agy_runtime_environment = verify_host_runtime_environment
 
 
 def is_parent_alive(initial_ppid: int) -> bool:
@@ -711,7 +721,7 @@ def main():
         return
 
     # Strictly verify AGY runtime environment (ADR-003 mandate)
-    verify_agy_runtime_environment()
+    verify_host_runtime_environment()
 
     # Normalize the target agent filter into a set (None = match all).
     agent_filter_set = parse_agent_filter(args.agent_filter)
