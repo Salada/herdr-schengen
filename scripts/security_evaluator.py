@@ -12,11 +12,14 @@ Combines:
 
 import ast
 from enum import Enum
+import io
 import json
 import os
 import re
 import shlex
 import stat
+import textwrap
+import tokenize as _tokenize
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -168,6 +171,47 @@ STATIC_RESOLVABLE_SUBSTITUTION_PATTERN = re.compile(
 # 8. Dangerous Python AST modules & functions
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
+
+# 8b. Whitespace-insensitive dangerous-token guard. Normalization candidates
+# (dedent/flatten) can reconstruct a benign-looking AST from a split dangerous
+# token (e.g. "__impor\nt__(...)" or "import sock\net"), turning a fail-closed
+# SyntaxError into a fail-open SAFE. Compacting all whitespace before matching
+# defeats that evasion regardless of the candidate that ultimately parses.
+# Trailing (?![a-zA-Z0-9_]) boundaries avoid false-positives on benign module
+# prefixes (socketio, httpclient, urllib3).
+_DANGEROUS_COMPACT_PATTERN = re.compile(
+    r"__import__(?![a-zA-Z0-9_])|eval\(|exec\(|compile\(|"
+    r"(?:import|from)(?:socket|requests|urllib|ftplib|smtplib|http)(?![a-zA-Z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def _strip_strings_and_comments(code_str: str) -> str:
+    """Remove STRING and COMMENT tokens so literals/comments that merely mention a
+    dangerous term do not trigger the compact dangerous-token guard."""
+    try:
+        tokens = list(_tokenize.generate_tokens(io.StringIO(code_str).readline))
+    except Exception:
+        return code_str  # untokenizable (e.g. split token) -> scan raw text
+    return "".join(
+        tok.string for tok in tokens
+        if tok.type not in (_tokenize.STRING, _tokenize.COMMENT)
+    )
+
+
+def _compact_dangerous_token(code_str: str) -> Optional[str]:
+    """Return the matched dangerous token after whitespace-compacting the code with
+    string/comment literals removed, or None if no dangerous token is present."""
+    # Unescape first so '-c' captures that carry \" / \' escapes tokenize cleanly
+    # (otherwise a string literal like print(\"import socket\") cannot be recognized
+    # as a STRING token and would false-positive).
+    unescaped = code_str.replace('\\"', '"').replace("\\'", "'")
+    compact_raw = re.sub(r"\s+", "", unescaped)
+    if not _DANGEROUS_COMPACT_PATTERN.search(compact_raw):
+        return None  # fast path: nothing dangerous even before stripping literals
+    compact_clean = re.sub(r"\s+", "", _strip_strings_and_comments(unescaped))
+    m = _DANGEROUS_COMPACT_PATTERN.search(compact_clean)
+    return m.group(0) if m else None
 
 # 9. LLM / GPT-OSS 120B Model Configuration (Antigravity Native Subagent)
 DEFAULT_GPT_OSS_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-oss:120b")
@@ -380,20 +424,54 @@ class PythonASTAuditor(ast.NodeVisitor):
                     self.reasons.append(f"Non-GET request to non-issues Forgejo endpoint: '{url}'")
 
 
+def _python_normalization_candidates(code_str: str) -> List[str]:
+    """Generate ordered parseable normalization candidates for inline Python source.
+
+    Handles formatting artifacts captured from TUI/agent dialogs:
+    1. Common leading indentation across all lines (textwrap.dedent).
+    2. Tab/space mixing (expandtabs before dedent).
+    3. Escaped quotes (unescape candidates).
+    4. TUI soft-wrap flattening a single logical line onto multiple screen rows.
+
+    Candidates are ordered most-preserving -> most-normalized so semantic
+    fidelity is preferred whenever a variant parses. Per-line lstrip is
+    deliberately NOT included: it is semantic-changing and can reconstruct a
+    benign-but-different AST from a split+indented dangerous token (fail-open).
+    """
+    raw = code_str
+    unescaped = raw.replace('\\"', '"').replace("\\'", "'")
+    dedented = textwrap.dedent(raw)
+    dedented_unescaped = textwrap.dedent(unescaped)
+    tabs_expanded = textwrap.dedent(raw.expandtabs(4))
+    flattened = " ".join(line.strip() for line in raw.splitlines())
+
+    candidates: List[str] = []
+    for cand in (
+        raw,
+        dedented,
+        unescaped,
+        dedented_unescaped,
+        tabs_expanded,
+        flattened,
+    ):
+        if cand and cand not in candidates:
+            candidates.append(cand)
+    return candidates
+
+
 def audit_python_code(code_str: str) -> Tuple[bool, str]:
     """Parse and audit Python source code with Forgejo whitelist."""
+    # Whitespace-insensitive dangerous-token guard (defeats split-token evasions
+    # that a normalization candidate could otherwise reconstruct as benign).
+    compact_hit = _compact_dangerous_token(code_str)
+    if compact_hit:
+        return False, f"Python AST: dangerous token detected '{compact_hit}'"
+
     tree = None
     effective_code = code_str
     syntax_err = None
 
-    candidates = [
-        code_str,
-        code_str.replace('\\"', '"').replace("\\'", "'"),
-        " ".join(line.strip() for line in code_str.splitlines()),
-        " ".join(line.strip() for line in code_str.splitlines()).replace('\\"', '"').replace("\\'", "'"),
-    ]
-
-    for cand in candidates:
+    for cand in _python_normalization_candidates(code_str):
         try:
             tree = ast.parse(cand)
             effective_code = cand
@@ -641,7 +719,10 @@ def _audit_static_shell_command(
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
 ) -> Tuple[bool, str, str]:
     """Audit static shell command line with PATH, Managed Git rules, and AST judge."""
-    if not cmd_str or not cmd_str.strip():
+    # Normalize leading/trailing whitespace so dialog dispatch (startswith / ==)
+    # and pattern matching are robust against TUI-captured indentation.
+    cmd_str = cmd_str.strip()
+    if not cmd_str:
         return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
     # 0. Check CLI feedback survey skip
@@ -697,14 +778,17 @@ def _audit_static_shell_command(
             return True, f"Managed Git security guard: {mg_reason}", DecisionLayer.MANAGED_GIT_GUARD
 
     # 1. Check for inline python execution (Here-doc or -c)
-    heredoc_match = re.search(r"python[0-9.]*\s+-\s*<<\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n([\s\S]*?)\n\s*\1", cmd_str)
+    #    Heredoc allows optional '-' (python3 - <<EOF), no '-' (python3 <<EOF),
+    #    and tab-stripping '<<-' (python3 <<-EOF). Escaped-quote truncation is
+    #    avoided in -c via a negative lookbehind on the closing quote.
+    heredoc_match = re.search(r"python[0-9.]*\s+(?:-\s*)?<<-?\s*['\"]?([A-Za-z0-9_]+)['\"]?\s*\n([\s\S]*?)\n\s*\1", cmd_str)
     if heredoc_match:
         py_code = heredoc_match.group(2)
         safe, reason = audit_python_code(py_code)
         if not safe:
             return False, f"Inline Python risk: {reason}", DecisionLayer.PYTHON_AST
 
-    dash_c_match = re.search(r"python[0-9.]*\s+-c\s+(['\"])([\s\S]*?)\1", cmd_str)
+    dash_c_match = re.search(r"python[0-9.]*\s+-c\s*(['\"])([\s\S]*?)(?<!\\)\1", cmd_str)
     if dash_c_match:
         py_code = dash_c_match.group(2)
         safe, reason = audit_python_code(py_code)

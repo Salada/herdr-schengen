@@ -71,7 +71,7 @@ class AgyAdapter(AgentAdapter):
 
         # Pattern 6: Menu options (> 1. Yes) with python3 heredoc or bash command above
         if "> 1. Yes" in visible_text or "Do you want to proceed?" in visible_text:
-            py_match = re.search(r"(python[0-9.]*\s+-\s*<<\s*['\"]?([A-Za-z0-9_]+)['\"]?[\s\S]*?\n\s*\2)", visible_text)
+            py_match = re.search(r"(python[0-9.]*\s+(?:-\s*)?<<-?\s*['\"]?([A-Za-z0-9_]+)['\"]?[\s\S]*?\n\s*\2)", visible_text)
             if py_match:
                 return py_match.group(1).strip()
             bash_match = re.findall(r"●\s*Bash\(([\s\S]*?)\)", visible_text)
