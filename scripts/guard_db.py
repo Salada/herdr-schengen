@@ -128,6 +128,8 @@ def init_db():
         p_columns = [c[1] for c in cursor.fetchall()]
         if "session_id" not in p_columns:
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN session_id TEXT")
+        if "dialog_snapshot" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN dialog_snapshot TEXT")
 
         # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
@@ -501,6 +503,7 @@ def enqueue_pending_escalation(
     decision_layer: str,
     agent_kind: str = "unknown",
     session_id: Optional[str] = None,
+    dialog_snapshot: Optional[str] = None,
 ) -> int:
     """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once)."""
     import hashlib
@@ -514,17 +517,18 @@ def enqueue_pending_escalation(
         cursor.execute(
             """
             INSERT INTO pending_escalations (
-                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, last_transitioned_at
+                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, last_transitioned_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
             ON CONFLICT(pane_id, command_hash) DO UPDATE SET
                 session_id = excluded.session_id,
                 status = 'PENDING',
                 safety_reason = excluded.safety_reason,
                 decision_layer = excluded.decision_layer,
+                dialog_snapshot = excluded.dialog_snapshot,
                 last_transitioned_at = excluded.last_transitioned_at
         """,
-            (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, now_iso, now_iso),
+            (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, dialog_snapshot, now_iso, now_iso),
         )
         last_id = cursor.lastrowid
         if not last_id:
@@ -551,7 +555,7 @@ def get_pending_escalations(
     """
     init_db()
     statuses = "('PENDING', 'DELIVERED')" if include_delivered else "('PENDING')"
-    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, delivered_at, last_transitioned_at FROM pending_escalations WHERE status IN {statuses}"
+    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, delivered_at, last_transitioned_at FROM pending_escalations WHERE status IN {statuses}"
     params = []
     if pane_id:
         query += " AND pane_id = ?"

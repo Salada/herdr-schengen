@@ -17,7 +17,7 @@ from typing import Optional
 
 
 class ResourceTier(str, enum.Enum):
-    T0_EPHEMERAL = "T0_EPHEMERAL"  # /tmp, /var/tmp, /var/folders/**/T/ (non-socket)
+    T0_EPHEMERAL = "T0_EPHEMERAL"  # /tmp, /var/tmp, /var/folders/**/T/, /dev/{null,zero,random,urandom} (non-durable discard sinks)
     T1_REGENERABLE = "T1_REGENERABLE"  # /var/folders/**/C/, DerivedData, package caches
     T2_VERSION_CONTROLLED = "T2_VERSION_CONTROLLED"  # Chezmoi source, Git clean & committed
     T3_DURABLE_GRAY = "T3_DURABLE_GRAY"  # ~/.local/state, SQLite DB, uncommitted git tree
@@ -239,6 +239,7 @@ def classify_resource_tier(target_str: str, context: Optional[dict] = None) -> R
         or canon_str.startswith("/private/tmp")
         or canon_str.startswith("/var/tmp")
         or canon_str.startswith("/private/var/tmp")
+        or canon_str in ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom")
     ):
         return ResourceTier.T0_EPHEMERAL
 

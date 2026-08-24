@@ -37,6 +37,17 @@ class TestResourceTierClassification(unittest.TestCase):
         self.assertEqual(classify_resource_tier("/var/tmp/scratch.log"), ResourceTier.T0_EPHEMERAL)
         self.assertEqual(classify_resource_tier("/var/folders/ab/cd/T/temp_file.txt"), ResourceTier.T0_EPHEMERAL)
 
+    def test_t0_device_sinks_are_ephemeral(self):
+        for dev in ("/dev/null", "/dev/zero", "/dev/random", "/dev/urandom"):
+            self.assertEqual(classify_resource_tier(dev), ResourceTier.T0_EPHEMERAL)
+
+    def test_dev_null_redirect_is_not_blocked(self):
+        # Regression: `command -v ruff >/dev/null` was misclassified as a T3 TRUNCATE
+        # (BLOCK), blocking read-only lint commands. Redirect-to-device-sink must be ALLOW.
+        cmd = "cd ~/x && (command -v ruff >/dev/null && ruff check a.py 2>&1 || echo not-found)"
+        verdict, reason, _ = evaluate_gray_zone_operation(cmd)
+        self.assertEqual(verdict, Verdict.ALLOW, reason)
+
     def test_t1_regenerable_caches(self):
         self.assertEqual(
             classify_resource_tier("/var/folders/ab/cd/C/com.apple.app/cache.db"), ResourceTier.T1_REGENERABLE

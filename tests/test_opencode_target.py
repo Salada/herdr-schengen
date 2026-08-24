@@ -318,6 +318,16 @@ class TestOpenCodeInjectionDecision(unittest.TestCase):
         verdict, _ = resolve_opencode_injection([])
         self.assertEqual(verdict, "not_registered")
 
+    def test_resolve_single_unknown_is_not_success(self):
+        # A single transient 'unknown' (mid-redraw flicker) must not be read as success.
+        verdict, _ = resolve_opencode_injection(["unknown"])
+        self.assertEqual(verdict, "not_registered")
+
+    def test_resolve_permission_then_unknown_is_not_success(self):
+        # Dialog still at 'permission' then a flicker to 'unknown' — not a confirmed clear.
+        verdict, _ = resolve_opencode_injection(["permission", "unknown"])
+        self.assertEqual(verdict, "not_registered")
+
 
 class TestAgentDispatch(unittest.TestCase):
     def test_agy_adapter_parses_agy_dialog(self):

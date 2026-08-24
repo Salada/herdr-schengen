@@ -197,6 +197,11 @@ def main():
                 print(f"  Reason : {item['safety_reason']}")
                 print(f"  Started: {item['started_at']}")
                 print(f"  Command: {item['raw_command']}")
+                snapshot = item.get("dialog_snapshot")
+                if snapshot:
+                    print(f"  Dialog :")
+                    for line in snapshot.splitlines()[-20:]:
+                        print(f"           {line}")
                 print("-" * 90)
         return
 
