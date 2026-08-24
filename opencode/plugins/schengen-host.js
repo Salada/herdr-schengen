@@ -7,13 +7,18 @@
 // closes (die-with-parent), matching ADR-003/ADR-008 session-bound governance.
 //
 // Install: copy this file to ~/.config/opencode/plugins/ and restart OpenCode.
+//
+// Die-with-parent has two layers:
+//   1. `tui.lifecycle.onDispose` (the same hook the Herdr integration uses in
+//      herdr-tui-session.js) kills the daemon on graceful session close.
+//   2. The daemon runs with SCHENGEN_STRICT_PARENT=1, so its `is_parent_alive`
+//      P1 guard exits when this OpenCode process dies (even on crash).
 
-import { spawn } from "node:child_process";
+import { spawn } from "node:child_process"; // Bun implements node:* builtins
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// Resolve the watcher daemon path (runtime skill mirror by default).
 const WATCHER_PATH =
   process.env.SCHENGEN_WATCHER_PATH ||
   path.join(os.homedir(), ".agents", "skills", "herdr-schengen", "scripts", "schengen_watcher.py");
@@ -24,9 +29,9 @@ const LOG_PATH =
 
 const POLL_MS = parseInt(process.env.SCHENGEN_HOST_POLL_MS || "15000", 10);
 
-let child = null; // { pid, proc } or null
-let desired = false; // user has asked for the guard to run
-let pollTimer = null;
+let child = null; // the spawned process (may be exited), or null
+let desired = false; // user asked for the guard to run
+let rearm = null; // setTimeout handle for crash re-spawn
 
 function inRuntime() {
   return process.env.HERDR_ENV === "1" && process.env.OPENCODE === "1";
@@ -34,9 +39,9 @@ function inRuntime() {
 
 function start() {
   if (!inRuntime()) {
-    return "not running inside Herdr + OpenCode; refusing to start";
+    return "refusing to start: not running inside Herdr + OpenCode";
   }
-  if (child && child.proc.exitCode === null) {
+  if (child && child.exitCode === null && child.signalCode === null) {
     return `already running (pid ${child.pid})`;
   }
 
@@ -44,42 +49,49 @@ function start() {
   const proc = spawn("python3", [WATCHER_PATH, "--target", "auto"], {
     detached: false,
     stdio: ["ignore", logFd, logFd],
+    env: { ...process.env, SCHENGEN_STRICT_PARENT: "1" },
   });
   fs.closeSync(logFd);
 
-  child = { pid: proc.pid, proc };
+  child = proc;
   desired = true;
-  ensurePolling();
+
+  proc.on("exit", (code) => {
+    if (!desired) return; // stopped intentionally
+    child = null;
+    if (code === 0) {
+      // Singleton yield: another host already holds the flock -> we are not
+      // the host. Do NOT re-spawn (avoids a spawn/exit loop).
+      desired = false;
+      return;
+    }
+    // Unexpected death (crash) -> watcher-of-the-watcher re-spawn.
+    rearm = setTimeout(() => {
+      if (desired) start();
+    }, POLL_MS);
+  });
 
   return `started schengen guard (pid ${proc.pid}); this session is now the host`;
 }
 
 function stop() {
   desired = false;
-  if (child && child.proc.exitCode === null) {
-    child.proc.kill("SIGTERM");
+  if (rearm) {
+    clearTimeout(rearm);
+    rearm = null;
+  }
+  if (child && child.exitCode === null) {
+    child.kill("SIGTERM");
   }
   child = null;
   return "stopped";
 }
 
 function status() {
-  if (child && child.proc.exitCode === null) {
+  if (child && child.exitCode === null) {
     return `running (pid ${child.pid})`;
   }
   return `stopped${desired ? " (restart pending)" : ""}`;
-}
-
-// Watcher-of-the-watcher: re-spawn only when the user has asked for it
-// (desired) and the daemon died unexpectedly (crash / external kill).
-function ensurePolling() {
-  if (pollTimer) return;
-  pollTimer = setInterval(() => {
-    if (desired && (!child || child.proc.exitCode !== null)) {
-      start();
-    }
-  }, POLL_MS);
-  pollTimer.unref?.();
 }
 
 export default async () => {
@@ -111,7 +123,6 @@ export default async () => {
     tui: async (api) => {
       api.lifecycle.onDispose(() => {
         stop();
-        if (pollTimer) clearInterval(pollTimer);
       });
     },
   };

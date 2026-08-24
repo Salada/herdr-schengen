@@ -481,6 +481,10 @@ def is_parent_alive(initial_ppid: int) -> bool:
             return True
         except (ProcessLookupError, OSError):
             pass
+    # Strict die-with-parent (OpenCode host, ADR-008): no Herdr fallback — the
+    # daemon must exit when its parent process dies, regardless of Herdr.
+    if os.environ.get("SCHENGEN_STRICT_PARENT") == "1":
+        return False
     # Fallback: verify Herdr environment is responsive
     try:
         res = subprocess.run(["herdr", "pane", "list"], capture_output=True, timeout=5)
