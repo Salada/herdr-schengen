@@ -517,11 +517,14 @@ def agent_matches(agent_kind: str, agent_filter) -> bool:
     return agent_kind in agent_filter
 
 
-def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer, agent_kind):
+def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer, agent_kind, visible_text=None):
     """Enqueue a persistent escalation and emit intercept notifications. Returns escalation id."""
     session_uuid = (
         pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
     )
+    # Capture the raw dialog/situation (tail-most 8K chars) so the host LLM can
+    # later inspect exactly what was on screen without re-deriving it (ADR-008).
+    snapshot = (visible_text or "").strip()[-8000:] or None
     esc_id = enqueue_pending_escalation(
         pane_id=pane_id,
         raw_command=req_cmd,
@@ -529,6 +532,7 @@ def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer,
         decision_layer=decision_layer,
         agent_kind=agent_kind,
         session_id=session_uuid,
+        dialog_snapshot=snapshot,
     )
     print(
         f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).",
@@ -905,7 +909,7 @@ def main():
                             # 'OPENCODE_FAILSAFE' is a watcher-level escalation marker, deliberately
                             # outside the command-classification DecisionLayer enum.
                             escalate_request(
-                                pane_id, pane_info, req_cmd, inject_reason, "OPENCODE_FAILSAFE", agent_kind
+                                pane_id, pane_info, req_cmd, inject_reason, "OPENCODE_FAILSAFE", agent_kind, visible_text=visible_text
                             )
                             last_processed_prompt[pane_id] = {
                                 "cmd": req_cmd,
@@ -927,7 +931,7 @@ def main():
                     resolve_escalation(pane_id=pane_id)
                 else:
                     # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
-                    escalate_request(pane_id, pane_info, req_cmd, reason, layer, agent_kind)
+                    escalate_request(pane_id, pane_info, req_cmd, reason, layer, agent_kind, visible_text=visible_text)
                     last_processed_prompt[pane_id] = {
                         "cmd": req_cmd,
                         "seq": state_seq,

@@ -7,6 +7,7 @@ alternate-screen Bubble Tea TUI, with 'once' pre-selected on fresh mount
 selects 'once'; arrows/numbers are NOT supported and MUST NOT be sent.
 """
 
+import os
 import re
 import time
 
@@ -86,9 +87,12 @@ def resolve_opencode_injection(stages):
         return "reject_abort", "post-inject: 'reject' confirmation detected (human residual cursor); aborted via escape"
     if stages and stages[-1] == "permission":
         return "not_registered", "post-inject: dialog still at 'permission' after bounded re-poll; enter not registered"
-    if stages and stages[-1] == "unknown":
-        return "success", "once approved (dialog cleared, no always/reject confirm)"
-    return "not_registered", "post-inject: no dialog signal after bounded re-poll; enter not registered"
+    # Success requires TWO consecutive cleared ('unknown') stages — a single
+    # transient 'unknown' (mid-redraw flicker) must not be misread as the dialog
+    # being gone while the permission prompt is still live.
+    if len(stages) >= 2 and stages[-1] == "unknown" and stages[-2] == "unknown":
+        return "success", "once approved (dialog cleared for 2 consecutive polls, no always/reject confirm)"
+    return "not_registered", "post-inject: dialog not confirmed cleared after bounded re-poll; enter not registered"
 
 
 @register
@@ -227,16 +231,38 @@ class OpenCodeAdapter(AgentAdapter):
 
         Returns (approved: bool, reason: str).
         """
-        # Step 4: inject a single enter (no arrows/numbers).
-        run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
+        # Step 4: inject a single enter (no arrows/numbers). run_cmd returns None
+        # on subprocess failure (herdr_client swallows CalledProcessError), so a
+        # failed key delivery is distinguishable from a slow dialog clear.
+        if run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"]) is None:
+            return False, "send-keys failed (herdr CLI error); enter not delivered"
 
         # Step 5: post-inject self-correction backstop via bounded re-poll. Collect the
         # observed stages and resolve once at the end, so a transient mid-redraw flicker
         # cannot be misclassified as success (the pure loop-policy does the final call).
+        # The window is env-tunable; default 2.5s (was 0.5s) because opencode's dialog
+        # clear is an async round-trip (enter -> Bubble Tea key handling -> reply('once')
+        # -> server Deferred resolve -> TUI re-render) that exceeds 0.5s under LLM load.
+        try:
+            poll_seconds = float(os.environ.get("SCHENGEN_OPENCODE_REPOLL_SECONDS", "2.5"))
+        except ValueError:
+            poll_seconds = 2.5
+        poll_interval = 0.25
+        deadline = time.monotonic() + poll_seconds
         stages = []
-        for _ in range(5):
-            time.sleep(0.1)
-            stages.append(self.classify_dialog_stage(get_pane_text(pane_id, lines=80)))
+        consecutive_unknown = 0
+        while time.monotonic() < deadline:
+            stage = self.classify_dialog_stage(get_pane_text(pane_id, lines=80))
+            stages.append(stage)
+            if stage == "unknown":
+                consecutive_unknown += 1
+                if consecutive_unknown >= 2:
+                    break
+            else:
+                consecutive_unknown = 0
+                if stage in ("always_confirm", "reject"):
+                    break
+            time.sleep(poll_interval)
 
         verdict, reason = resolve_opencode_injection(stages)
         if verdict in ("always_abort", "reject_abort"):
