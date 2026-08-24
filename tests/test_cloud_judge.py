@@ -9,13 +9,15 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from redaction import redact_for_cloud
-from security_evaluator import (
+from cloud_judge import (
     resolve_guard_llm_config,
+    DEFAULT_GUARD_LLM_ENDPOINT,
+    DEFAULT_GUARD_LLM_MODEL,
+)
+from security_evaluator import (
     audit_with_cloud_judge,
     _audit_static_shell_command,
     DecisionLayer,
-    DEFAULT_GUARD_LLM_ENDPOINT,
-    DEFAULT_GUARD_LLM_MODEL,
 )
 
 

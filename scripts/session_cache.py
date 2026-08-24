@@ -23,7 +23,8 @@ from guard_db import (
 
 def get_dynamic_ruleset_version() -> str:
     """Compute deterministic dynamic ruleset version from cryptographic hash of prompt and rules."""
-    from security_evaluator import MINIMAL_INSPECTOR_SYSTEM_PROMPT, GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT, CRITICAL_SHELL_PATTERNS
+    from security_evaluator import MINIMAL_INSPECTOR_SYSTEM_PROMPT, CRITICAL_SHELL_PATTERNS
+    from cloud_judge import GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT
     hasher = hashlib.sha256()
     hasher.update(MINIMAL_INSPECTOR_SYSTEM_PROMPT.encode("utf-8"))
     hasher.update(GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT.encode("utf-8"))
