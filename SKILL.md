@@ -1,11 +1,11 @@
 ---
 name: herdr-schengen
-description: Herdr Schengen (SmartGate) - Autonomous border-free flow with strict denylist defense for AGY coding agents in the Herdr multiplexer. Auto-approves safe commands in 0.1s via 1ms AST parsing and inspects dynamic substitutions via private tool-calling LLMs, while blocking critical risks (rm -rf, sudo, .env leak, sandbox writes). Triggered by 'herdr-schengen', 'trusted-clearance', 'smartgate', 'herdr-smartgate', 'herdr clearance', 'herdr auto approve'.
+description: Herdr Schengen (SmartGate) - Autonomous border-free flow with strict denylist defense for AGY & OpenCode coding agents in the Herdr multiplexer. Auto-approves safe commands in 0.1s via 1ms AST parsing and inspects dynamic substitutions via private tool-calling LLMs, while blocking critical risks (rm -rf, sudo, .env leak, sandbox writes). Triggered by 'herdr-schengen', 'trusted-clearance', 'smartgate', 'herdr-smartgate', 'herdr clearance', 'herdr auto approve'.
 ---
 
 # Herdr Schengen (SmartGate / Trusted Clearance) 🌍🛂🛃
 
-`herdr-schengen` (aliases: `trusted-clearance`, `smartgate`) is an automated **Trusted Clearance & SmartGate** security daemon for **Antigravity (AGY)** agents operating in the **Herdr terminal multiplexer** environment.
+`herdr-schengen` (aliases: `trusted-clearance`, `smartgate`) is an automated **Trusted Clearance & SmartGate** security daemon for **Antigravity (AGY)** and **OpenCode** agents operating in the **Herdr terminal multiplexer** environment.
 
 - **Schengen Fast-Track (Border-Free Flow / SmartGate)**: Verified safe development operations (AST validated) pass border control in **0.1 seconds** without manual confirmation prompts.
 - **Strict Denylist & Border Control**: Secret credential access (`.env`, `id_rsa`), Hermes Sandbox write mutations, and destructive commands (`rm -rf`, `sudo`, `git push --force`) are immediately blocked and delegated to human review.
@@ -13,12 +13,12 @@ description: Herdr Schengen (SmartGate) - Autonomous border-free flow with stric
 
 ---
 
-## 🚀 Quick Start & AGY Execution Models
+## 🚀 Quick Start & Host Execution Models
 
-### 1. AGY-Native Session Clearance & Auto-Recovery Mandate (Method A, Primary Model)
-> **🚨 Mandatory Session-Bound Governance (ADR-003 / SOP-13)**:
-> - **Session-Bound Lifetime**: Schengen watcher **MUST** run as a tracked background task (`run_command` / `task-<id>`) directly within the orchestrating **AGY agent session**. It must never run detached or orphaned.
-> - **Proactive Auto-Recovery**: Whenever the watcher daemon terminates (due to crash, patch reload, or task completion), the active AGY agent session **MUST immediately re-launch the daemon** (`--target auto`) before proceeding with other work.
+### 1. Host Session Clearance & Auto-Recovery Mandate (AGY or OpenCode)
+> **🚨 Mandatory Session-Bound Governance (ADR-003 / ADR-008)**:
+> - **Session-Bound Lifetime**: Schengen watcher **MUST** run as a child process of a living host agent session — AGY (`run_command` / `task-<id>`) or OpenCode (plugin `spawn`). It must never run detached or orphaned; the `is_parent_alive` guard self-terminates the daemon when the host exits.
+> - **Proactive Auto-Recovery**: Whenever the watcher daemon terminates (due to crash, patch reload, or task completion), the active host session **MUST immediately re-launch the daemon** (`--target auto`) before proceeding with other work.
 > - **Graceful Dynamic Reload**: When patching code or updating rulesets, **NEVER** kill the daemon. Always invoke `python3 .../schengen_watcher.py --reload` to trigger in-process `SIGHUP` reload via `importlib.reload()`.
 
 ```bash
