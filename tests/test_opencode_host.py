@@ -16,15 +16,21 @@ _AGY_KEYS = ("ANTIGRAVITY_AGENT", "AI_AGENT", "ANTIGRAVITY_CONVERSATION_ID")
 
 class TestHostRuntimeEnvironment(unittest.TestCase):
     def test_agy_markers_accepted(self):
-        with mock.patch.dict(os.environ, {"ANTIGRAVITY_AGENT": "1"}, clear=True):
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_AGENT": "1", "HERDR_ENV": "1"}, clear=True):
             verify_host_runtime_environment()  # must not raise
 
     def test_opencode_marker_accepted(self):
-        with mock.patch.dict(os.environ, {"OPENCODE": "1"}, clear=True):
+        with mock.patch.dict(os.environ, {"OPENCODE": "1", "HERDR_ENV": "1"}, clear=True):
             verify_host_runtime_environment()  # must not raise
 
     def test_opencode_falsy_value_rejected(self):
-        with mock.patch.dict(os.environ, {"OPENCODE": "0"}, clear=True):
+        with mock.patch.dict(os.environ, {"OPENCODE": "0", "HERDR_ENV": "1"}, clear=True):
+            with self.assertRaises(SystemExit):
+                verify_host_runtime_environment()
+
+    def test_herdr_required_rejected(self):
+        # OPENCODE=1 but not under Herdr (HERDR_ENV unset) -> rejected.
+        with mock.patch.dict(os.environ, {"OPENCODE": "1"}, clear=True):
             with self.assertRaises(SystemExit):
                 verify_host_runtime_environment()
 

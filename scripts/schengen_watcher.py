@@ -7,7 +7,7 @@ event into SQLite3 database (~/.local/state/herdr-schengen/schengen_history.db),
 and auto-approves safe commands (SmartGate flow) while delegating risky commands to human review.
 
 Key Architecture:
-- MULTI-AGENT TARGET SCOPE: Auto-approves designated coding agents (agy, opencode) while excluding Hermes, bare shells, and the caller pane. Default target is 'agy'; opencode is opt-in via --agent-filter agy,opencode.
+- MULTI-AGENT TARGET SCOPE: Auto-approves all registered target agent kinds (agy, opencode) while excluding Hermes, bare shells, and the caller pane.
 - CONTINUOUS DISCOVERY: Dynamically polls all active and newly added Herdr panes in real-time.
 - STRICT SINGLETON FILELOCK (fcntl.flock): Prevents race conditions & duplicate key injection.
 - DAEMON & STATUS MANAGEMENT: Built-in --daemon, --status, and --stop lifecycle management.
@@ -448,10 +448,11 @@ def execute_graceful_reload():
 
 
 def verify_host_runtime_environment():
-    """Ensure the watcher runs within a supported agent runtime (Antigravity or OpenCode).
+    """Ensure the watcher runs within a supported agent runtime (Antigravity or OpenCode) under Herdr.
 
     ADR-003's session-bound mandate is extended by ADR-008 to permit OpenCode as
-    an alternative host. The watcher must still never run detached or orphaned.
+    an alternative host. The watcher must never run detached/orphaned, and must
+    run under the Herdr multiplexer (HERDR_ENV=1) — it is meaningless without it.
     """
     is_host = (
         os.environ.get("ANTIGRAVITY_AGENT") == "1"
@@ -459,11 +460,13 @@ def verify_host_runtime_environment():
         or bool(os.environ.get("ANTIGRAVITY_CONVERSATION_ID"))
         or os.environ.get("OPENCODE") == "1"
     )
-    if not is_host:
+    in_herdr = os.environ.get("HERDR_ENV") == "1"
+    if not is_host or not in_herdr:
         sys.stderr.write(
-            "❌ [SCHENGEN_FATAL] Execution rejected: Herdr Schengen (SmartGate) must run exclusively\n"
-            "   within an active agent session (Antigravity: ANTIGRAVITY_AGENT=1 / AI_AGENT=antigravity;\n"
-            "   OpenCode: OPENCODE=1).\n"
+            "❌ [SCHENGEN_FATAL] Execution rejected: Herdr Schengen (SmartGate) must run\n"
+            "   within an active agent session under the Herdr multiplexer\n"
+            "   (Antigravity: ANTIGRAVITY_AGENT=1 / AI_AGENT=antigravity; OpenCode: OPENCODE=1;\n"
+            "   Herdr: HERDR_ENV=1).\n"
             "   Standalone terminal execution or detached background daemons are forbidden (ADR-003 / ADR-008).\n"
         )
         sys.exit(1)
@@ -493,30 +496,12 @@ def is_parent_alive(initial_ppid: int) -> bool:
         return False
 
 
-AGENT_FILTER_ALL = "all"
-
-
-def parse_agent_filter(raw: str):
-    """Normalize --agent-filter into a frozenset of agent kinds.
-
-    Accepts a comma-separated list (e.g. 'agy,opencode') or the 'all' sentinel.
-    'all' expands to the registered target agent kinds; it does NOT match
-    non-target agents (hermes, bare shells, human). Empty input falls back to
-    the default {'agy'}.
-    """
-    raw = (raw or "").strip()
-    if raw.lower() == AGENT_FILTER_ALL:
-        return frozenset(target_agent_kinds())
-    kinds = frozenset(k.strip() for k in raw.split(",") if k.strip())
-    return kinds or frozenset({"agy"})
-
-
 def agent_matches(agent_kind: str, agent_filter) -> bool:
-    """Return True if agent_kind passes the parsed agent filter.
+    """Return True if agent_kind passes the agent filter.
 
-    agent_filter is expected to be a frozenset of agent kinds (from
-    parse_agent_filter). A bare string is treated as a single agent kind for
-    backward compatibility; None matches nothing (safe default, never match-all).
+    agent_filter is a frozenset of agent kinds (or a bare string treated as a
+    single kind for backward compatibility); None matches nothing (safe default,
+    never match-all).
     """
     if isinstance(agent_filter, str):
         return agent_kind == agent_filter
@@ -597,11 +582,6 @@ def main():
         "--target",
         default="auto",
         help="Target pane ID (e.g. wP:p2) or 'auto' (default: auto - monitors all active & future panes)",
-    )
-    parser.add_argument(
-        "--agent-filter",
-        default="agy",
-        help="Target agent filter, comma-separated (e.g. 'agy,opencode') or 'all' (default: agy only)",
     )
     parser.add_argument("--exclude-pane", action="append", default=[], help="Pane ID to exclude from auto-approval")
     parser.add_argument("--interval", type=int, default=3, help="Polling interval in seconds (default: 3)")
@@ -727,8 +707,8 @@ def main():
     # Strictly verify host runtime environment (ADR-003 / ADR-008 mandate)
     verify_host_runtime_environment()
 
-    # Normalize the target agent filter into a set (None = match all).
-    agent_filter_set = parse_agent_filter(args.agent_filter)
+    # Guard all registered target agent kinds (agy, opencode).
+    agent_filter_set = frozenset(target_agent_kinds())
 
     # Track parent PID for orphan prevention
     initial_ppid = os.getppid()
@@ -745,7 +725,7 @@ def main():
     if self_pane:
         excluded.add(self_pane)
     print(
-        f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter={args.agent_filter}, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning}, lock={lock_file_path.name})",
+        f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter=all, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning}, lock={lock_file_path.name})",
         flush=True,
     )
 

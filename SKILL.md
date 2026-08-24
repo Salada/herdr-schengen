@@ -13,82 +13,102 @@ description: Herdr Schengen (SmartGate) - Autonomous border-free flow with stric
 
 ---
 
-## 🚀 Quick Start & Host Execution Models
+## ⚙️ Host Runtime Dispatch
 
-### 1. Host Session Clearance & Auto-Recovery Mandate (AGY or OpenCode)
-> **🚨 Mandatory Session-Bound Governance (ADR-003 / ADR-008)**:
-> - **Session-Bound Lifetime**: Schengen watcher **MUST** run as a child process of a living host agent session — AGY (`run_command` / `task-<id>`) or OpenCode (plugin `spawn`). It must never run detached or orphaned; the `is_parent_alive` guard self-terminates the daemon when the host exits.
-> - **Proactive Auto-Recovery**: Whenever the watcher daemon terminates (due to crash, patch reload, or task completion), the active host session **MUST immediately re-launch the daemon** (`--target auto`) before proceeding with other work.
-> - **Graceful Dynamic Reload**: When patching code or updating rulesets, **NEVER** kill the daemon. Always invoke `python3 .../schengen_watcher.py --reload` to trigger in-process `SIGHUP` reload via `importlib.reload()`.
+This skill is loaded by **both** Antigravity (AGY) and OpenCode agents. Determine
+your runtime and follow **only** the matching host-execution section; ignore the
+other. All remaining sections (governance, decision layers, border policy) are
+shared.
+
+- `ANTIGRAVITY_AGENT=1` / `AI_AGENT=antigravity` → **🟢 AGY-Native Host Execution**.
+- `OPENCODE=1` → **🔵 OpenCode-Native Host Execution**.
+
+---
+
+## 🚀 Quick Start (Shared — daemon lifecycle, both hosts)
+
+> **🚨 Mandatory Session-Bound Governance (ADR-003 / ADR-008)**: the watcher MUST
+> run as a child of a living host agent session (never detached/orphaned); the
+> `is_parent_alive` guard self-terminates it when the host exits. Reload via
+> `--reload` (SIGHUP), never by killing the daemon.
 
 ```bash
-# Main command (AGY-native streaming background task mode)
+# Guard all target panes (AGY + OpenCode)
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto
 
-# In-process graceful hot reload (Zero downtime, no daemon restart)
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload
+# Enable the private tool-calling semantic inspector (dynamic $(cat ...) judge)
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto --use-gpt-oss
 
-# Target-specific graceful reload or stop
+# Target a specific pane / reload / stop
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target wP:p2
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload --target wS:pF
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --stop --target wS:pF
-```
-
-### 2. Enable Private Tool-Calling Semantic Inspector
-```bash
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto --use-gpt-oss
-```
-
-### 3. Target a Specific Herdr Pane
-```bash
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target wP:p2
-```
-
-### 4. Check SmartGate Status & Monitored Panes
-```bash
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --status
-```
-
-### 5. Inspect Recent Approvals, Search, & Tail Logs (Agent CLI Tools)
-```bash
-# View recent 10 audit logs with layer attribution
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py -n 10
-
-# Search past approvals / rejections by keyword
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --search "git"
-
-# Tail live daemon logs safely without raw shell tail
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --tail 20
-
-# Output structured JSON for AI agent parsing
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py -n 5 --json
-
-# Discover all SmartGate state & DB paths
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --paths
-```
-
-### 6. Stop SmartGate Daemon
-```bash
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --stop
-```
 
-### 7. Inspect Audit Statistics & Review Board
-```bash
+# Status / history / stats
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --status
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py -n 10
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --search "git"
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --tail 20
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py -n 5 --json
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --paths
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --stats
 ```
 
-### 8. Proactive Escalation Heartbeat & Exponential Drain Rule (Agent Skill Directive)
-> **🚨 Proactive Escalation Polling & Exponential Idle Defense Mandate**:
-> - **Exponential Wakeup Timer via `schedule` tool**: Whenever an orchestrator AGY session enters an idle phase while waiting for sibling/worker panes (`dev`, `wS:pF`), the agent **MUST arm a heartbeat timer** using the native agent tool with exponential intervals:
->   - **Interval Progression**: `60s` $\rightarrow$ `60s` $\rightarrow$ `120s` $\rightarrow$ `240s` $\rightarrow$ `360s` $\rightarrow$ ... (Exponential Backoff with upper cap of **30 minutes / 1800s**).
->   - **Reset on Event**: Any detected escalation, user message, or worker activity resets the heartbeat interval back to `60s`.
+---
+
+## 🟢 AGY-Native Host Execution (Antigravity only)
+
+> **Session-Bound Lifetime**: run the watcher as a tracked background task
+> (`run_command` / `task-<id>`) in the orchestrating AGY session; re-launch on
+> any termination.
+
+```bash
+python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto
+```
+
+> **Proactive Escalation Heartbeat & Exponential Drain Rule**:
+> - Arm a `schedule` heartbeat when idle: exponential `60s → 60s → 120s → 240s → 360s → …` (cap 1800s); reset to 60s on any event.
 >   ```json
 >   schedule(DurationSeconds=60, Prompt="Check pending escalations queue and drain blocked panes", TimerCondition="any")
 >   ```
-> - **Turn-Start Queue Drain Hook**: At the beginning of **EVERY** turn or timer wakeup, the agent MUST execute:
+> - At the start of EVERY turn / wakeup, drain the queue:
 >   ```bash
 >   python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --pending
 >   ```
-> - **Immediate Delegation**: If any active `PENDING` escalation is discovered for a living session, the agent must immediately evaluate and prompt the human / auto-resolve rather than waiting passively.
+> - If a `PENDING` escalation exists, immediately evaluate and prompt the human / auto-resolve.
+
+---
+
+## 🔵 OpenCode-Native Host Execution (OpenCode only)
+
+> **Activation**: install the host plugin once, then start the guard on-demand in
+> the specific session you want as host.
+
+```bash
+mkdir -p ~/.config/opencode/plugins
+cp opencode/plugins/schengen-host.js ~/.config/opencode/plugins/schengen-host.js
+# restart OpenCode
+```
+
+- `start the schengen guard` → `schengen_start` (spawns the daemon; this session becomes the host).
+- `stop the schengen guard` → `schengen_stop`.
+- `is the schengen guard running?` → `schengen_status`.
+- **die-with-parent**: `tui.lifecycle.onDispose` + `SCHENGEN_STRICT_PARENT=1` kill the daemon when the session closes.
+- **watcher-of-the-watcher**: the plugin re-spawns the daemon on crash while `desired`.
+- See `opencode/README.md` for config env vars and multi-session behavior.
+
+---
+
+## ⚠️ Known Limitations
+
+- **Pane ID staleness on `herdr pane move`**: `self_pane` (from the inherited
+  `HERDR_PANE_ID`) and any `--target <pane>` are captured once at launch. If a
+  pane is moved to another workspace it gets a new ID while the watcher's
+  inherited ID stays stale, so self-exclusion (or a specific `--target`) silently
+  stops matching. **Workaround**: restart the watcher after any `herdr pane move`
+  so it re-detects its self pane.
 
 ---
 
@@ -128,7 +148,7 @@ flowchart TD
 
 | Domain | Fast-Track Auto-Approved (`SAFE`) | Border Control Blocked (`DANGEROUS / MANUAL`) |
 | :--- | :--- | :--- |
-| **Target Agent** | **AGY (`agent: "agy"`) and OpenCode (`agent: "opencode"`, opt-in via `--agent-filter agy,opencode`)** | Hermes, bare shells, and caller pane (`self`) 100% excluded |
+| **Target Agent** | **AGY (`agent: "agy"`) and OpenCode (`agent: "opencode"`)** | Hermes, bare shells, and caller pane (`self`) 100% excluded |
 | **Managed Git SCM** | All `GET` requests, `/issues/...`, `/pulls/...` interactions (POST, PATCH) | Destructive `DELETE` requests (`-X DELETE`, `method='DELETE'`) |
 | **Environment / System** | `export PATH="..."` environment variable definitions | Direct mutations to `/etc`, `/System`, `/usr/bin` (`rm`, `chmod`) |
 | **Shell Commands** | `git status/diff/add/commit`, `mkdir`, `cd`, `ls`, file edits | `rm -rf`, `sudo`, `su`, `chmod`, `chown`, `git push`, `git reset --hard` |

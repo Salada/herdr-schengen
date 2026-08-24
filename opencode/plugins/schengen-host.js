@@ -29,10 +29,6 @@ const LOG_PATH =
 
 const POLL_MS = parseInt(process.env.SCHENGEN_HOST_POLL_MS || "15000", 10);
 
-// Which agent kinds the daemon guards. The watcher defaults to 'agy' only, so
-// we must pass this explicitly to also guard OpenCode panes.
-const AGENT_FILTER = process.env.SCHENGEN_AGENT_FILTER || "agy,opencode";
-
 let child = null; // the spawned process (may be exited), or null
 let desired = false; // user asked for the guard to run
 let rearm = null; // setTimeout handle for crash re-spawn
@@ -50,7 +46,7 @@ function start() {
   }
 
   const logFd = fs.openSync(LOG_PATH, "a");
-  const proc = spawn("python3", [WATCHER_PATH, "--target", "auto", "--agent-filter", AGENT_FILTER], {
+  const proc = spawn("python3", [WATCHER_PATH, "--target", "auto"], {
     detached: false,
     stdio: ["ignore", logFd, logFd],
     env: { ...process.env, SCHENGEN_STRICT_PARENT: "1" },

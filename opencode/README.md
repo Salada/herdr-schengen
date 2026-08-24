@@ -48,7 +48,6 @@ panes. Other OpenCode sessions do nothing unless the user starts it there too
 | `SCHENGEN_WATCHER_PATH` | `~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py` | Watcher daemon path |
 | `SCHENGEN_LOG_PATH` | `~/.local/state/herdr-schengen/schengen-host.log` | Daemon stdout/stderr |
 | `SCHENGEN_HOST_POLL_MS` | `15000` | Crash re-spawn delay |
-| `SCHENGEN_AGENT_FILTER` | `agy,opencode` | Which agent kinds the daemon guards (the watcher's own default is `agy` only) |
 
 ## Multi-session behavior
 

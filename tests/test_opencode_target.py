@@ -9,35 +9,10 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from agent_adapters import get_adapter, target_agent_kinds
 from agent_adapters.opencode import decide_opencode_injection, resolve_opencode_injection, strip_ansi, strip_tui
-from schengen_watcher import agent_matches, parse_agent_filter
+from schengen_watcher import agent_matches
 
 
-class TestAgentFilterParsing(unittest.TestCase):
-    def test_default_agy_only(self):
-        f = parse_agent_filter("agy")
-        self.assertIsNotNone(f)
-        self.assertIn("agy", f)
-        self.assertNotIn("opencode", f)
-
-    def test_comma_separated_list(self):
-        f = parse_agent_filter("agy,opencode")
-        self.assertIn("agy", f)
-        self.assertIn("opencode", f)
-        self.assertEqual(len(f), 2)
-
-    def test_all_sentinel_maps_to_target_kinds(self):
-        self.assertEqual(parse_agent_filter("all"), frozenset({"agy", "opencode"}))
-        self.assertEqual(parse_agent_filter("ALL"), frozenset({"agy", "opencode"}))
-
-    def test_empty_falls_back_to_agy(self):
-        self.assertEqual(parse_agent_filter(""), frozenset({"agy"}))
-        self.assertEqual(parse_agent_filter("   "), frozenset({"agy"}))
-
-    def test_empty_and_whitespace_tokens(self):
-        f = parse_agent_filter(" agy , opencode ")
-        self.assertIn("agy", f)
-        self.assertIn("opencode", f)
-
+class TestAgentMatches(unittest.TestCase):
     def test_agent_matches(self):
         f = frozenset({"agy", "opencode"})
         self.assertTrue(agent_matches("agy", f))
