@@ -569,13 +569,23 @@ def _cache_cloud_verdict(cache_key, cmd_str, is_safe, reason, decision_layer, cw
     try:
         from session_cache import store_cached_result
 
+        try:
+            layer = DecisionLayer(decision_layer)
+        except (ValueError, TypeError):
+            layer = DecisionLayer.CLOUD_JUDGE
+        try:
+            origin_enum = Origin(origin)
+        except (ValueError, TypeError):
+            origin_enum = Origin.AGENT
+        taxonomy = derive_taxonomy(cmd_str, layer, is_safe, reason, origin=origin_enum)
+
         store_cached_result(
             cache_key=cache_key,
             raw_cmd=cmd_str,
             is_safe=is_safe,
             safety_reason=reason,
             decision_layer=decision_layer,
-            taxonomy={"origin": origin, "consequence": "NONE" if is_safe else "DEST", "mechanism": "cloud-judge"},
+            taxonomy=taxonomy,
             cwd=cwd,
             scope=scope,
             agent_id=agent_id,
@@ -1231,6 +1241,9 @@ def derive_taxonomy(
         else:
             consequence = Consequence.DESTRUCTION
             mechanism = "rm-rf"
+    elif layer == DecisionLayer.CLOUD_JUDGE:
+        consequence = Consequence.DESTRUCTION
+        mechanism = "cloud-judge-defer"
     elif layer == DecisionLayer.LLM_INSPECTOR:
         consequence = Consequence.DESTRUCTION
         mechanism = "subshell-substitution"

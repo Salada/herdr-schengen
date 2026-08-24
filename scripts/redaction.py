@@ -9,6 +9,7 @@ not a blanket transform. Identifiers, paths, and command structure are left
 intact so the judge's safety decision is unaffected.
 """
 
+import hashlib
 import re
 
 # (pattern, label) pairs. The value is masked; the label preserves the secret
@@ -56,3 +57,20 @@ def redact_for_cloud(text: str) -> str:
     out = _BEARER_RE.sub(r"\1 ***", out)
     out = _URI_CREDENTIAL_RE.sub(r"\1[REDACTED:uri-password]@", out)
     return out
+
+
+def get_redaction_fingerprint() -> str:
+    """Return a deterministic SHA256 fingerprint of the redaction ruleset.
+
+    Encapsulates the private regex internals (`_SECRET_VALUE_RULES`,
+    `_KEY_VALUE_RE`, `_BEARER_RE`, `_URI_CREDENTIAL_RE`) so downstream callers
+    never reach into them. If the ruleset changes shape, the fingerprint changes
+    accordingly (issue #26).
+    """
+    hasher = hashlib.sha256()
+    for pat, _label in _SECRET_VALUE_RULES:
+        hasher.update(pat.pattern.encode("utf-8"))
+    hasher.update(_KEY_VALUE_RE.pattern.encode("utf-8"))
+    hasher.update(_BEARER_RE.pattern.encode("utf-8"))
+    hasher.update(_URI_CREDENTIAL_RE.pattern.encode("utf-8"))
+    return hasher.hexdigest()
