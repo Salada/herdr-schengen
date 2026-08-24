@@ -27,6 +27,25 @@ GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT = (
 )
 
 
+# OpenAI project / service-account keys use distinguishing prefixes. A bare
+# "sk-" is ambiguous (both OpenAI and DeepSeek use it), so we fall back to the
+# DeepSeek default to preserve backward-compat for plain DeepSeek keys.
+_OPENAI_KEY_PREFIXES = ("sk-proj-", "sk-svcacct-")
+
+
+def _infer_key_source(key: str) -> str:
+    """Infer the provider for an explicitly-supplied key whose env name does not
+    disambiguate it (explicit `api_key` arg / `GUARD_LLM_API_KEY`), so the default
+    endpoint matches the provider (issue #27).
+
+    Only OpenAI project/service-account keys are distinguishable by prefix;
+    anything else falls back to the DeepSeek default for backward-compat.
+    """
+    if key.startswith(_OPENAI_KEY_PREFIXES):
+        return "openai"
+    return "deepseek"
+
+
 def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
     """Resolve (endpoint, model, api_key) with documented precedence.
 
@@ -34,6 +53,7 @@ def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
     endpoint : explicit arg -> GUARD_LLM_ENDPOINT -> GUARD_LLM_BASE_URL + /chat/completions
                -> provider default (DeepSeek, or OpenAI when only OPENAI_API_KEY resolves)
     api_key  : explicit arg -> GUARD_LLM_API_KEY -> DEEPSEEK_API_KEY -> OPENAI_API_KEY
+               (explicit api_key / GUARD_LLM_API_KEY infer provider from key prefix)
     """
     effective_model = model or os.environ.get("GUARD_LLM_MODEL") or DEFAULT_GUARD_LLM_MODEL
 
@@ -41,10 +61,10 @@ def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
     # endpoint matches the provider the key belongs to (no key/endpoint mismatch).
     if api_key:
         effective_key = api_key
-        key_source = "deepseek"
+        key_source = _infer_key_source(api_key)
     elif os.environ.get("GUARD_LLM_API_KEY"):
         effective_key = os.environ["GUARD_LLM_API_KEY"]
-        key_source = "deepseek"
+        key_source = _infer_key_source(effective_key)
     elif os.environ.get("DEEPSEEK_API_KEY"):
         effective_key = os.environ["DEEPSEEK_API_KEY"]
         key_source = "deepseek"

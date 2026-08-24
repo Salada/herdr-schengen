@@ -555,8 +555,16 @@ MINIMAL_INSPECTOR_SYSTEM_PROMPT = (
 
 
 def _cache_cloud_verdict(cache_key, cmd_str, is_safe, reason, decision_layer, cwd, scope, agent_id, origin):
-    """Best-effort store of a resolved cloud-judge verdict into the scoped cache (B1)."""
+    """Best-effort store of a resolved cloud-judge verdict into the scoped cache (B1).
+
+    Only unsafe/defers (is_safe=False) are cached. A 'safe' verdict is NOT cached:
+    a correct 'safe' judgment could be replayed after the underlying file/context
+    changed (dynamic-substitution TOCTOU), silently auto-approving a now-dangerous
+    command. Unsafe verdicts remain safe to replay (they still defer to a human).
+    """
     if not cache_key:
+        return
+    if is_safe:
         return
     try:
         from session_cache import store_cached_result
