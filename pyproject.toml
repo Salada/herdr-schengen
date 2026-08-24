@@ -1,0 +1,25 @@
+[project]
+name = "herdr-schengen"
+version = "0.1.0"
+description = "Herdr Schengen (SmartGate) Trusted Clearance gatekeeper"
+requires-python = ">=3.9"
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = [".git", ".worktrees", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests add the scripts/ dir to sys.path before importing (no installed package).
+"tests/*.py" = ["E402"]
+# Standalone scripts add SCRIPT_DIR to sys.path before importing sibling modules.
+"scripts/schengen_history.py" = ["E402"]
+"scripts/schengen_watcher.py" = ["E402"]
+
+[tool.black]
+line-length = 120
+target-version = ["py39"]

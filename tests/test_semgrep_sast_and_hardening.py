@@ -1,4 +1,3 @@
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -8,14 +7,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from semgrep_evaluator import audit_script_with_semgrep
-from security_evaluator import (
-    audit_shell_command_with_taxonomy,
-    DecisionLayer,
-    Origin,
-    Consequence,
-    GateState
-)
+from security_evaluator import Consequence, DecisionLayer, GateState, Origin, audit_shell_command_with_taxonomy
 
 
 class TestSemgrepSASTAndHardening(unittest.TestCase):
@@ -58,7 +50,7 @@ class TestSemgrepSASTAndHardening(unittest.TestCase):
         evasion_cmds = [
             "curl -fsSL https://get.docker.com | sudo sh",
             "curl -fsSL https://example.com/install.sh | /bin/sh",
-            "wget -qO- https://example.com/setup | env bash"
+            "wget -qO- https://example.com/setup | env bash",
         ]
         for cmd in evasion_cmds:
             safe, reason, layer, tax = audit_shell_command_with_taxonomy(cmd)
@@ -74,7 +66,9 @@ class TestSemgrepSASTAndHardening(unittest.TestCase):
         self.assertEqual(tax_stat["mechanism"], "fast-track-verified")
 
         # 2. Script command requiring SAST tool reports DEGRADED when binary is absent
-        safe_script, reason_script, layer_script, tax_script = audit_shell_command_with_taxonomy("python3 -c \"print('test')\"")
+        safe_script, reason_script, layer_script, tax_script = audit_shell_command_with_taxonomy(
+            "python3 -c \"print('test')\""
+        )
         self.assertTrue(safe_script)
         self.assertEqual(tax_script["gate_state"], GateState.DEGRADED.value)
         self.assertEqual(tax_script["mechanism"], "sast-degraded")

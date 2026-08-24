@@ -13,44 +13,44 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 
 class ResourceTier(str, enum.Enum):
-    T0_EPHEMERAL = "T0_EPHEMERAL"              # /tmp, /var/tmp, /var/folders/**/T/ (non-socket)
-    T1_REGENERABLE = "T1_REGENERABLE"          # /var/folders/**/C/, DerivedData, package caches
-    T2_VERSION_CONTROLLED = "T2_VERSION_CONTROLLED" # Chezmoi source, Git clean & committed
-    T3_DURABLE_GRAY = "T3_DURABLE_GRAY"        # ~/.local/state, SQLite DB, uncommitted git tree
-    T4_CRITICAL = "T4_CRITICAL"                # Keychains, TCC, SSH keys, active sockets, Forgejo/DSM deletes
+    T0_EPHEMERAL = "T0_EPHEMERAL"  # /tmp, /var/tmp, /var/folders/**/T/ (non-socket)
+    T1_REGENERABLE = "T1_REGENERABLE"  # /var/folders/**/C/, DerivedData, package caches
+    T2_VERSION_CONTROLLED = "T2_VERSION_CONTROLLED"  # Chezmoi source, Git clean & committed
+    T3_DURABLE_GRAY = "T3_DURABLE_GRAY"  # ~/.local/state, SQLite DB, uncommitted git tree
+    T4_CRITICAL = "T4_CRITICAL"  # Keychains, TCC, SSH keys, active sockets, Forgejo/DSM deletes
 
 
 class OperationType(str, enum.Enum):
-    READ = "R"               # Read / Inspect (cat, ls, grep)
-    APPEND = "A"             # Append / Insert (>>, INSERT INTO)
-    OVERWRITE = "W"          # Overwrite / Modify in-place (cp, nano, echo > existing)
-    TRUNCATE = "T"           # Truncate / 0-byte (> existing, truncate)
-    DELETE = "D"             # Delete / Remove (rm, unlink)
-    MOVE = "M"               # Move / Rename (mv)
-    MUTATING_API = "X"       # Mutating API / System CLI (tccutil, defaults, curl POST/DELETE)
-    HEAVY_EXEC = "E"         # Heavy build / migration / execution
+    READ = "R"  # Read / Inspect (cat, ls, grep)
+    APPEND = "A"  # Append / Insert (>>, INSERT INTO)
+    OVERWRITE = "W"  # Overwrite / Modify in-place (cp, nano, echo > existing)
+    TRUNCATE = "T"  # Truncate / 0-byte (> existing, truncate)
+    DELETE = "D"  # Delete / Remove (rm, unlink)
+    MOVE = "M"  # Move / Rename (mv)
+    MUTATING_API = "X"  # Mutating API / System CLI (tccutil, defaults, curl POST/DELETE)
+    HEAVY_EXEC = "E"  # Heavy build / migration / execution
 
 
 class IrreversibilityGrade(str, enum.Enum):
-    R0_NONE = "R0"           # Trivial re-generation, near zero cost
-    R1_BACKUP_VCS = "R1"     # Fully recoverable from backup or clean VCS
-    R2_RECONSTRUCT = "R2"    # Recoverable only via re-running work (hours/CPU/network loss)
+    R0_NONE = "R0"  # Trivial re-generation, near zero cost
+    R1_BACKUP_VCS = "R1"  # Fully recoverable from backup or clean VCS
+    R2_RECONSTRUCT = "R2"  # Recoverable only via re-running work (hours/CPU/network loss)
     R3_OS_APP_RELOAD = "R3"  # Requires app re-login, daemon reload, or OS re-permissioning
-    R4_IRREVERSIBLE = "R4"   # True permanent loss (secrets, external server delete)
+    R4_IRREVERSIBLE = "R4"  # True permanent loss (secrets, external server delete)
 
 
 class Verdict(str, enum.Enum):
-    ALLOW = "ALLOW"          # 0.1s Fast-Track automated approval
-    PROMPT = "PROMPT"        # Intercept & present 7-field Structured Decision Guidance
-    BLOCK = "BLOCK"          # Hard block with alternative remediation advice
+    ALLOW = "ALLOW"  # 0.1s Fast-Track automated approval
+    PROMPT = "PROMPT"  # Intercept & present 7-field Structured Decision Guidance
+    BLOCK = "BLOCK"  # Hard block with alternative remediation advice
 
 
 # Base Matrix: Tier x Operation -> Verdict
-BASE_GOVERNANCE_MATRIX: Dict[Tuple[ResourceTier, OperationType], Verdict] = {
+BASE_GOVERNANCE_MATRIX: dict[tuple[ResourceTier, OperationType], Verdict] = {
     # T0 (Ephemeral)
     (ResourceTier.T0_EPHEMERAL, OperationType.READ): Verdict.ALLOW,
     (ResourceTier.T0_EPHEMERAL, OperationType.APPEND): Verdict.ALLOW,
@@ -60,7 +60,6 @@ BASE_GOVERNANCE_MATRIX: Dict[Tuple[ResourceTier, OperationType], Verdict] = {
     (ResourceTier.T0_EPHEMERAL, OperationType.MOVE): Verdict.ALLOW,
     (ResourceTier.T0_EPHEMERAL, OperationType.MUTATING_API): Verdict.ALLOW,
     (ResourceTier.T0_EPHEMERAL, OperationType.HEAVY_EXEC): Verdict.ALLOW,
-
     # T1 (Regenerable with Cost)
     (ResourceTier.T1_REGENERABLE, OperationType.READ): Verdict.ALLOW,
     (ResourceTier.T1_REGENERABLE, OperationType.APPEND): Verdict.ALLOW,
@@ -70,7 +69,6 @@ BASE_GOVERNANCE_MATRIX: Dict[Tuple[ResourceTier, OperationType], Verdict] = {
     (ResourceTier.T1_REGENERABLE, OperationType.MOVE): Verdict.ALLOW,
     (ResourceTier.T1_REGENERABLE, OperationType.MUTATING_API): Verdict.PROMPT,
     (ResourceTier.T1_REGENERABLE, OperationType.HEAVY_EXEC): Verdict.ALLOW,
-
     # T2 (Clean & Committed Version-Controlled)
     (ResourceTier.T2_VERSION_CONTROLLED, OperationType.READ): Verdict.ALLOW,
     (ResourceTier.T2_VERSION_CONTROLLED, OperationType.APPEND): Verdict.ALLOW,
@@ -80,7 +78,6 @@ BASE_GOVERNANCE_MATRIX: Dict[Tuple[ResourceTier, OperationType], Verdict] = {
     (ResourceTier.T2_VERSION_CONTROLLED, OperationType.MOVE): Verdict.ALLOW,
     (ResourceTier.T2_VERSION_CONTROLLED, OperationType.MUTATING_API): Verdict.PROMPT,
     (ResourceTier.T2_VERSION_CONTROLLED, OperationType.HEAVY_EXEC): Verdict.ALLOW,
-
     # T3 (Durable Gray Zone: Logs, State, DBs, Uncommitted Git Trees)
     (ResourceTier.T3_DURABLE_GRAY, OperationType.READ): Verdict.ALLOW,
     (ResourceTier.T3_DURABLE_GRAY, OperationType.APPEND): Verdict.ALLOW,
@@ -90,7 +87,6 @@ BASE_GOVERNANCE_MATRIX: Dict[Tuple[ResourceTier, OperationType], Verdict] = {
     (ResourceTier.T3_DURABLE_GRAY, OperationType.MOVE): Verdict.PROMPT,
     (ResourceTier.T3_DURABLE_GRAY, OperationType.MUTATING_API): Verdict.PROMPT,
     (ResourceTier.T3_DURABLE_GRAY, OperationType.HEAVY_EXEC): Verdict.PROMPT,
-
     # T4 (Irreversible & Critical: Secrets, OS State, Sockets, Admin APIs)
     (ResourceTier.T4_CRITICAL, OperationType.READ): Verdict.PROMPT,
     (ResourceTier.T4_CRITICAL, OperationType.APPEND): Verdict.PROMPT,
@@ -112,7 +108,7 @@ class DecisionGuidancePayload:
     blast_radius: str
     pre_alternative: str
     recovery_path: str
-    choices: List[str]
+    choices: list[str]
     verdict: Verdict
     reason: str
 
@@ -127,7 +123,9 @@ def is_inside_git_work_tree(path: Path) -> bool:
                     return True
                 res = subprocess.run(
                     ["git", "-C", str(cur), "rev-parse", "--is-inside-work-tree"],
-                    capture_output=True, text=True, check=False
+                    capture_output=True,
+                    text=True,
+                    check=False,
                 )
                 if res.returncode == 0 and res.stdout.strip() == "true":
                     return True
@@ -139,7 +137,7 @@ def is_inside_git_work_tree(path: Path) -> bool:
 
 def is_git_clean_and_committed(path: Path) -> bool:
     """Check if the path resides in a git repository and has a clean, committed working tree.
-    
+
     If the target file does not exist yet but resides in a Git repository work-tree,
     it represents a new file creation within a version-controlled workspace (T2).
     """
@@ -154,8 +152,7 @@ def is_git_clean_and_committed(path: Path) -> bool:
 
         # Check if inside git work tree
         is_git = subprocess.run(
-            ["git", "-C", str(cur), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True, text=True, check=False
+            ["git", "-C", str(cur), "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True, check=False
         )
         if is_git.returncode != 0 or is_git.stdout.strip() != "true":
             return False
@@ -166,8 +163,7 @@ def is_git_clean_and_committed(path: Path) -> bool:
 
         # Check working tree status for existing target path
         status = subprocess.run(
-            ["git", "-C", str(cur), "status", "--porcelain", str(path)],
-            capture_output=True, text=True, check=False
+            ["git", "-C", str(cur), "status", "--porcelain", str(path)], capture_output=True, text=True, check=False
         )
         # If porcelain status is empty, it is clean and committed
         return len(status.stdout.strip()) == 0
@@ -195,10 +191,10 @@ def canonicalize_path(raw_path_str: str) -> Path:
         return p.absolute()
 
 
-def classify_resource_tier(target_str: str, context: Optional[Dict] = None) -> ResourceTier:
+def classify_resource_tier(target_str: str, context: Optional[dict] = None) -> ResourceTier:
     """Dynamically classify a filesystem path or URI into T0 ~ T4 tiers."""
     target_clean = target_str.strip()
-    
+
     # 1. External REST API Endpoints
     if target_clean.startswith("http://") or target_clean.startswith("https://"):
         if re.search(r"/(admin/users|repos/[^/]+/[^/]+/archive|volumes|storagepools)", target_clean):
@@ -238,7 +234,12 @@ def classify_resource_tier(target_str: str, context: Optional[Dict] = None) -> R
             return ResourceTier.T4_CRITICAL
 
     # 4. Standard Ephemeral Roots (T0)
-    if canon_str.startswith("/tmp") or canon_str.startswith("/private/tmp") or canon_str.startswith("/var/tmp") or canon_str.startswith("/private/var/tmp"):
+    if (
+        canon_str.startswith("/tmp")
+        or canon_str.startswith("/private/tmp")
+        or canon_str.startswith("/var/tmp")
+        or canon_str.startswith("/private/var/tmp")
+    ):
         return ResourceTier.T0_EPHEMERAL
 
     # 5. Caches & DerivedData (T1)
@@ -276,7 +277,7 @@ def classify_resource_tier(target_str: str, context: Optional[Dict] = None) -> R
     return ResourceTier.T3_DURABLE_GRAY
 
 
-def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
+def classify_operation(cmd_str: str) -> tuple[OperationType, Optional[str]]:
     """Parse shell command string to determine OperationType (R, A, W, T, D, M, X, E) and primary target."""
     clean_cmd = cmd_str.strip()
 
@@ -296,7 +297,10 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
         return OperationType.APPEND, target
 
     # 3. Mutating System API / CLI / REST
-    if re.search(r"\b(tccutil|defaults\s+(write|delete)|launchctl\s+(bootstrap|bootout|load|unload|kill|disable|enable)|security\s+(add|delete|set|import)|scselect|systemsetup|pmset|networksetup|plutil\s+(-replace|-remove)|scutil\s+--set)\b", clean_cmd):
+    if re.search(
+        r"\b(tccutil|defaults\s+(write|delete)|launchctl\s+(bootstrap|bootout|load|unload|kill|disable|enable)|security\s+(add|delete|set|import)|scselect|systemsetup|pmset|networksetup|plutil\s+(-replace|-remove)|scutil\s+--set)\b",
+        clean_cmd,
+    ):
         return OperationType.MUTATING_API, clean_cmd.split()[0]
 
     if re.search(r"\bcurl\b.*-X\s*(POST|PUT|DELETE|PATCH)", clean_cmd):
@@ -315,11 +319,17 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
         filtered = [sc for sc in sub_cmds if sc not in ("true", "false", "exit 0", ":")]
         if not filtered:
             return OperationType.READ, None
-        
+
         # Evaluate each sub-command and return the highest risk operation
         for sc in filtered:
             sub_op, sub_target = classify_operation(sc)
-            if sub_op in (OperationType.DELETE, OperationType.TRUNCATE, OperationType.MUTATING_API, OperationType.OVERWRITE, OperationType.MOVE):
+            if sub_op in (
+                OperationType.DELETE,
+                OperationType.TRUNCATE,
+                OperationType.MUTATING_API,
+                OperationType.OVERWRITE,
+                OperationType.MOVE,
+            ):
                 return sub_op, sub_target
         return OperationType.READ, None
 
@@ -372,10 +382,8 @@ def classify_operation(cmd_str: str) -> Tuple[OperationType, Optional[str]]:
 
 
 def evaluate_gray_zone_operation(
-    cmd_str: str,
-    target_override: Optional[str] = None,
-    context: Optional[Dict] = None
-) -> Tuple[Verdict, str, Optional[DecisionGuidancePayload]]:
+    cmd_str: str, target_override: Optional[str] = None, context: Optional[dict] = None
+) -> tuple[Verdict, str, Optional[DecisionGuidancePayload]]:
     """Evaluate dynamic decision function and generate Structured Decision Guidance if needed."""
     op, detected_target = classify_operation(cmd_str)
     target = target_override or detected_target or "unknown_target"
@@ -392,7 +400,11 @@ def evaluate_gray_zone_operation(
     elif tier == ResourceTier.T2_VERSION_CONTROLLED:
         irrev = IrreversibilityGrade.R1_BACKUP_VCS
     elif tier == ResourceTier.T3_DURABLE_GRAY:
-        irrev = IrreversibilityGrade.R2_RECONSTRUCT if op in (OperationType.OVERWRITE, OperationType.DELETE, OperationType.TRUNCATE) else IrreversibilityGrade.R1_BACKUP_VCS
+        irrev = (
+            IrreversibilityGrade.R2_RECONSTRUCT
+            if op in (OperationType.OVERWRITE, OperationType.DELETE, OperationType.TRUNCATE)
+            else IrreversibilityGrade.R1_BACKUP_VCS
+        )
     else:  # T4
         irrev = IrreversibilityGrade.R4_IRREVERSIBLE
 
@@ -422,13 +434,13 @@ def evaluate_gray_zone_operation(
     else:
         pre_alt = f"Stage shadow copy: cp -a {target} {target}.bak"
 
-    recovery_path = f"Restore from backup copy (.bak) or rerun official state provisioning script."
+    recovery_path = "Restore from backup copy (.bak) or rerun official state provisioning script."
 
     choices = [
         "A) Create pre-backup and proceed safely (Recommended)",
         "B) Proceed without backup (Explicit risk acceptance)",
         "C) Execute non-destructive alternative (Move to trash / rotate)",
-        "D) Skip operation"
+        "D) Skip operation",
     ]
 
     payload = DecisionGuidancePayload(
@@ -441,7 +453,7 @@ def evaluate_gray_zone_operation(
         recovery_path=recovery_path,
         choices=choices,
         verdict=base_verdict,
-        reason=reason
+        reason=reason,
     )
 
     return base_verdict, reason, payload

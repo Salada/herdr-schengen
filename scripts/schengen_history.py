@@ -7,7 +7,7 @@ audit inspection for AI coding agents and human engineers.
 
 import argparse
 import json
-import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,23 +17,19 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from guard_db import (
-    get_recent_audit_logs,
-    search_audit_logs,
-    get_pattern_analysis,
-    get_state_file_paths,
-    tail_state_log,
-    init_db,
-    get_pending_escalations,
-    resolve_escalation,
     cleanup_escalations,
+    get_pattern_analysis,
+    get_pending_escalations,
+    get_recent_audit_logs,
+    get_state_file_paths,
+    search_audit_logs,
+    tail_state_log,
 )
 from security_evaluator import DecisionLayer
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Herdr Schengen / SmartGate History & Diagnostics CLI"
-    )
+    parser = argparse.ArgumentParser(description="Herdr Schengen / SmartGate History & Diagnostics CLI")
     parser.add_argument(
         "--version",
         "-V",
@@ -178,7 +174,9 @@ def main():
                 p_data = json.loads(res.stdout)
                 for p in p_data.get("result", {}).get("panes", []):
                     pid = p.get("pane_id")
-                    sess_uuid = p.get("agent_session", {}).get("value") if isinstance(p.get("agent_session"), dict) else None
+                    sess_uuid = (
+                        p.get("agent_session", {}).get("value") if isinstance(p.get("agent_session"), dict) else None
+                    )
                     if pid:
                         active_map[pid] = sess_uuid
         except Exception:
@@ -257,7 +255,9 @@ def main():
             for r in results:
                 symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
                 cmd_prev = (r["raw_command"][:70] + "...") if len(r["raw_command"]) > 70 else r["raw_command"]
-                print(f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}")
+                print(
+                    f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}"
+                )
                 print(f"   Reason: {r['safety_reason']}")
                 print(f"   Cmd   : {cmd_prev}")
                 print("-" * 90)
@@ -291,7 +291,9 @@ def main():
         for r in logs:
             symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
             cmd_prev = (r["raw_command"][:70] + "...") if len(r["raw_command"]) > 70 else r["raw_command"]
-            print(f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}")
+            print(
+                f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}"
+            )
             print(f"   Reason: {r['safety_reason']}")
             print(f"   Cmd   : {cmd_prev}")
             print("-" * 90)

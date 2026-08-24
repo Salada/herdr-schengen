@@ -7,9 +7,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from schengen_watcher import parse_agent_filter, agent_matches
 from agent_adapters import get_adapter, target_agent_kinds
-from agent_adapters.opencode import strip_ansi, strip_tui, decide_opencode_injection, resolve_opencode_injection
+from agent_adapters.opencode import decide_opencode_injection, resolve_opencode_injection, strip_ansi, strip_tui
+from schengen_watcher import agent_matches, parse_agent_filter
 
 
 class TestAgentFilterParsing(unittest.TestCase):
@@ -119,10 +119,7 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         # Regression: the TUI sidebar renders "$0.93 spent" (cost metadata, no whitespace
         # after '$'). Even if it appears before the dialog command, it must be skipped.
         text = (
-            "Permission required\n"
-            "$0.93 spent\n"
-            "$ echo schengen-live-probe\n"
-            "Allow once  Allow always  Reject\n"
+            "Permission required\n" "$0.93 spent\n" "$ echo schengen-live-probe\n" "Allow once  Allow always  Reject\n"
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "echo schengen-live-probe")
 
@@ -162,11 +159,7 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         # Multi-line command bodies render with literal backslash-n (see the
         # external-directory "Patterns" case). Normalize to a separator space so
         # word-boundary evaluator patterns still match the trailing dangerous token.
-        text = (
-            "Permission required\n"
-            "$ git status\\nrm -rf /tmp/foo\n"
-            "Allow once  Allow always  Reject\n"
-        )
+        text = "Permission required\n" "$ git status\\nrm -rf /tmp/foo\n" "Allow once  Allow always  Reject\n"
         self.assertEqual(
             self.adapter.parse_permission_request(text),
             "git status rm -rf /tmp/foo",
@@ -177,10 +170,10 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         # "Permission required"/"Allow once" strings. Extraction must anchor to the
         # LATEST (bottom) dialog via rfind, not the first (top) history occurrence.
         text = (
-            "Permission required\n"          # stale string in transcript history
+            "Permission required\n"  # stale string in transcript history
             "past discussion about Allow once\n"
             "more history\n"
-            "Permission required\n"          # actual dialog header (bottom)
+            "Permission required\n"  # actual dialog header (bottom)
             "  # Shell command\n"
             "$ rm -rf /some/dir\n"
             "Allow once  Allow always  Reject\n"

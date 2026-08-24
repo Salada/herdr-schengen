@@ -8,14 +8,14 @@ from pathlib import Path
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
+import unittest
+
 from security_evaluator import (
-    safe_read_file_content,
-    audit_shell_command,
     DYNAMIC_SUBSTITUTION_PATTERN,
+    audit_shell_command,
+    safe_read_file_content,
 )
 
-
-import unittest
 
 class TestDynamicSubstitution(unittest.TestCase):
     def test_guardrails(self):

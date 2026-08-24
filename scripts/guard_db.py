@@ -8,12 +8,12 @@ Stores:
 Database location: ~/.local/state/herdr-schengen/schengen_history.db (XDG compliant, no skill pollution)
 """
 
-import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Optional
 
 DB_DIR = Path.home() / ".local" / "state" / "herdr-schengen"
 DB_PATH = DB_DIR / "schengen_history.db"
@@ -137,10 +137,8 @@ def init_db():
         conn.commit()
 
 
-from collections import OrderedDict
-
 # In-memory true LRU evaluation cache: cache_key -> (is_safe, safety_reason, decision_layer, taxonomy, expiry_timestamp)
-_IN_MEMORY_EVAL_CACHE: OrderedDict[str, Tuple[bool, str, str, Dict[str, Any], float]] = OrderedDict()
+_IN_MEMORY_EVAL_CACHE: OrderedDict[str, tuple[bool, str, str, dict[str, Any], float]] = OrderedDict()
 _MAX_MEMORY_CACHE_SIZE = 1000
 
 
@@ -149,11 +147,12 @@ def clear_in_memory_cache():
     _IN_MEMORY_EVAL_CACHE.clear()
 
 
-def get_cached_evaluation(cache_key: str) -> Optional[Dict[str, Any]]:
+def get_cached_evaluation(cache_key: str) -> Optional[dict[str, Any]]:
     """Retrieve cached security evaluation result by cache_key with true LRU ordering."""
     import json
+
     now_ts = datetime.now(timezone.utc).timestamp()
-    
+
     # 1. Check in-memory cache first (<0.1ms)
     if cache_key in _IN_MEMORY_EVAL_CACHE:
         is_safe, safety_reason, decision_layer, taxonomy, exp_ts = _IN_MEMORY_EVAL_CACHE[cache_key]
@@ -175,11 +174,14 @@ def get_cached_evaluation(cache_key: str) -> Optional[Dict[str, Any]]:
         now_iso = datetime.now(timezone.utc).isoformat()
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT raw_command, is_safe, safety_reason, decision_layer, taxonomy_json, expires_at, hit_count
                 FROM evaluation_cache
                 WHERE cache_key = ? AND expires_at > ?
-            """, (cache_key, now_iso))
+            """,
+                (cache_key, now_iso),
+            )
             row = cursor.fetchone()
             if row:
                 is_safe = bool(row["is_safe"])
@@ -189,9 +191,11 @@ def get_cached_evaluation(cache_key: str) -> Optional[Dict[str, Any]]:
                     taxonomy = json.loads(row["taxonomy_json"])
                 except Exception:
                     taxonomy = {}
-                
+
                 # Update hit count
-                cursor.execute("UPDATE evaluation_cache SET hit_count = hit_count + 1 WHERE cache_key = ?", (cache_key,))
+                cursor.execute(
+                    "UPDATE evaluation_cache SET hit_count = hit_count + 1 WHERE cache_key = ?", (cache_key,)
+                )
                 conn.commit()
 
                 # Populate memory cache with true LRU eviction
@@ -225,17 +229,18 @@ def set_cached_evaluation(
     is_safe: bool,
     safety_reason: str,
     decision_layer: str,
-    taxonomy: Dict[str, Any],
+    taxonomy: dict[str, Any],
     cwd: str = "",
     scope: str = "default",
     agent_id: str = "default",
     origin: str = "A",
     ruleset_version: str = "1.0",
-    ttl_seconds: int = 3600
+    ttl_seconds: int = 3600,
 ):
     """Store security evaluation result in both in-memory LRU and SQLite persistent cache."""
     import json
     from datetime import timedelta
+
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()
     exp_dt = now_dt + timedelta(seconds=ttl_seconds)
@@ -253,17 +258,31 @@ def set_cached_evaluation(
         tax_json = json.dumps(taxonomy)
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(
+                """
                 INSERT OR REPLACE INTO evaluation_cache (
                     cache_key, raw_command, cwd, scope, agent_id, origin,
                     ruleset_version, is_safe, safety_reason, decision_layer,
                     taxonomy_json, created_at, expires_at, hit_count
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT hit_count FROM evaluation_cache WHERE cache_key = ?), 0))
-            """, (
-                cache_key, raw_command, cwd, scope, agent_id, origin,
-                ruleset_version, 1 if is_safe else 0, safety_reason,
-                decision_layer, tax_json, now_iso, exp_iso, cache_key
-            ))
+            """,
+                (
+                    cache_key,
+                    raw_command,
+                    cwd,
+                    scope,
+                    agent_id,
+                    origin,
+                    ruleset_version,
+                    1 if is_safe else 0,
+                    safety_reason,
+                    decision_layer,
+                    tax_json,
+                    now_iso,
+                    exp_iso,
+                    cache_key,
+                ),
+            )
             conn.commit()
     except Exception:
         pass
@@ -373,7 +392,7 @@ def record_audit_log(
         conn.commit()
 
 
-def get_pattern_analysis() -> List[Dict]:
+def get_pattern_analysis() -> list[dict]:
     """Retrieve frequency and recommendation stats for human review."""
     init_db()
     with get_db_connection() as conn:
@@ -386,15 +405,12 @@ def get_pattern_analysis() -> List[Dict]:
         return [dict(row) for row in cursor.fetchall()]
 
 
-def check_persisted_allowlist(cmd_str: str) -> Tuple[bool, Optional[str]]:
+def check_persisted_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
     """Check if command matches any human-persisted allowlist regex."""
     init_db()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT pattern_regex, description FROM user_allowlist WHERE"
-            " is_active = 1"
-        )
+        cursor.execute("SELECT pattern_regex, description FROM user_allowlist WHERE" " is_active = 1")
         for row in cursor.fetchall():
             pat = row["pattern_regex"]
             if re.search(pat, cmd_str):
@@ -428,7 +444,7 @@ def get_recent_audit_logs(
     decision: Optional[str] = None,
     pane_id: Optional[str] = None,
     layer: Optional[str] = None,
-) -> List[Dict]:
+) -> list[dict]:
     """Retrieve recent audit events from SQLite3 database with flexible filtering."""
     init_db()
     query = "SELECT id, timestamp, pane_id, agent_kind, raw_command, normalized_pattern, decision, safety_reason, COALESCE(decision_layer, 'FAST_TRACK_AST') as decision_layer FROM audit_logs WHERE 1=1"
@@ -453,7 +469,7 @@ def get_recent_audit_logs(
         return [dict(row) for row in cursor.fetchall()]
 
 
-def search_audit_logs(keyword: str, limit: int = 20) -> List[Dict]:
+def search_audit_logs(keyword: str, limit: int = 20) -> list[dict]:
     """Search audit logs by keyword across raw_command, pattern, reason, or layer."""
     init_db()
     query = """
@@ -469,7 +485,7 @@ def search_audit_logs(keyword: str, limit: int = 20) -> List[Dict]:
         return [dict(row) for row in cursor.fetchall()]
 
 
-def get_state_file_paths() -> Dict[str, str]:
+def get_state_file_paths() -> dict[str, str]:
     """Return dictionary of all SmartGate / Schengen state and database paths."""
     return {
         "state_dir": str(DB_DIR),
@@ -489,13 +505,15 @@ def enqueue_pending_escalation(
 ) -> int:
     """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once)."""
     import hashlib
+
     init_db()
     cmd_hash = hashlib.sha256(raw_command.encode("utf-8")).hexdigest()[:16]
     now_iso = datetime.now(timezone.utc).isoformat()
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO pending_escalations (
                 pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, last_transitioned_at
             )
@@ -506,10 +524,14 @@ def enqueue_pending_escalation(
                 safety_reason = excluded.safety_reason,
                 decision_layer = excluded.decision_layer,
                 last_transitioned_at = excluded.last_transitioned_at
-        """, (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, now_iso, now_iso))
+        """,
+            (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, now_iso, now_iso),
+        )
         last_id = cursor.lastrowid
         if not last_id:
-            cursor.execute("SELECT id FROM pending_escalations WHERE pane_id = ? AND command_hash = ?", (pane_id, cmd_hash))
+            cursor.execute(
+                "SELECT id FROM pending_escalations WHERE pane_id = ? AND command_hash = ?", (pane_id, cmd_hash)
+            )
             row = cursor.fetchone()
             last_id = row["id"] if row else 0
         conn.commit()
@@ -519,10 +541,10 @@ def enqueue_pending_escalation(
 def get_pending_escalations(
     pane_id: Optional[str] = None,
     include_delivered: bool = False,
-    active_session_map: Optional[Dict[str, Optional[str]]] = None,
-) -> List[Dict]:
+    active_session_map: Optional[dict[str, Optional[str]]] = None,
+) -> list[dict]:
     """Retrieve active pending escalations.
-    
+
     If active_session_map is provided (mapping pane_id -> current_session_uuid):
     - Verifies whether the pane is still alive. If dead, marks PANE_DEAD / CANCELLED.
     - Verifies whether the session UUID matches. If mismatched (e.g. pane recycled days later),
@@ -567,10 +589,16 @@ def get_pending_escalations(
         valid_escalations.append(r)
 
     if mismatched_ids:
-        cleanup_escalations(escalation_ids=mismatched_ids, new_status="SESSION_MISMATCH", reason="Herdr pane was recycled with a new agent session UUID")
+        cleanup_escalations(
+            escalation_ids=mismatched_ids,
+            new_status="SESSION_MISMATCH",
+            reason="Herdr pane was recycled with a new agent session UUID",
+        )
 
     if dead_pane_ids:
-        cleanup_escalations(escalation_ids=dead_pane_ids, new_status="CANCELLED", reason="Herdr pane closed or terminated")
+        cleanup_escalations(
+            escalation_ids=dead_pane_ids, new_status="CANCELLED", reason="Herdr pane closed or terminated"
+        )
 
     return valid_escalations
 
@@ -581,11 +609,14 @@ def mark_escalation_delivered(escalation_id: int):
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             UPDATE pending_escalations
             SET status = 'DELIVERED', delivered_at = ?, last_transitioned_at = ?
             WHERE id = ? AND status = 'PENDING'
-        """, (now_iso, now_iso, escalation_id))
+        """,
+            (now_iso, now_iso, escalation_id),
+        )
         conn.commit()
 
 
@@ -601,28 +632,37 @@ def resolve_escalation(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if escalation_id:
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE pending_escalations
                 SET status = ?, last_transitioned_at = ?
                 WHERE id = ?
-            """, (resolution_status, now_iso, escalation_id))
+            """,
+                (resolution_status, now_iso, escalation_id),
+            )
         elif command_hash:
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE pending_escalations
                 SET status = ?, last_transitioned_at = ?
                 WHERE pane_id = ? AND command_hash = ? AND status IN ('PENDING', 'DELIVERED')
-            """, (resolution_status, now_iso, pane_id, command_hash))
+            """,
+                (resolution_status, now_iso, pane_id, command_hash),
+            )
         else:
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE pending_escalations
                 SET status = ?, last_transitioned_at = ?
                 WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')
-            """, (resolution_status, now_iso, pane_id))
+            """,
+                (resolution_status, now_iso, pane_id),
+            )
         conn.commit()
 
 
 def cleanup_escalations(
-    escalation_ids: Optional[List[int]] = None,
+    escalation_ids: Optional[list[int]] = None,
     pane_id: Optional[str] = None,
     older_than_hours: Optional[float] = None,
     new_status: str = "STALE_EXPIRED",
@@ -639,44 +679,56 @@ def cleanup_escalations(
         if purge_deleted:
             # Purge terminal status rows older than 7 days
             cutoff_iso = (now - timedelta(days=7)).isoformat()
-            cursor.execute("""
+            cursor.execute(
+                """
                 DELETE FROM pending_escalations
                 WHERE status IN ('RESOLVED', 'STALE_EXPIRED', 'CANCELLED')
                   AND last_transitioned_at < ?
-            """, (cutoff_iso,))
+            """,
+                (cutoff_iso,),
+            )
             deleted = cursor.rowcount
             conn.commit()
             return deleted
 
         if escalation_ids:
             placeholders = ",".join("?" * len(escalation_ids))
-            cursor.execute(f"""
+            cursor.execute(
+                f"""
                 UPDATE pending_escalations
                 SET status = ?, last_transitioned_at = ?
                 WHERE id IN ({placeholders})
-            """, [new_status, now_iso] + escalation_ids)
+            """,
+                [new_status, now_iso] + escalation_ids,
+            )
             affected = cursor.rowcount
             conn.commit()
             return affected
 
         if older_than_hours is not None:
             cutoff_iso = (now - timedelta(hours=older_than_hours)).isoformat()
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE pending_escalations
                 SET status = ?, last_transitioned_at = ?
                 WHERE status IN ('PENDING', 'DELIVERED')
                   AND started_at < ?
-            """, (new_status, now_iso, cutoff_iso))
+            """,
+                (new_status, now_iso, cutoff_iso),
+            )
             affected = cursor.rowcount
             conn.commit()
             return affected
 
         if pane_id:
-            cursor.execute("""
+            cursor.execute(
+                """
                 UPDATE pending_escalations
                 SET status = ?, last_transitioned_at = ?
                 WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')
-            """, (new_status, now_iso, pane_id))
+            """,
+                (new_status, now_iso, pane_id),
+            )
             affected = cursor.rowcount
             conn.commit()
             return affected
@@ -684,15 +736,15 @@ def cleanup_escalations(
     return 0
 
 
-def tail_state_log(lines: int = 20) -> List[str]:
+def tail_state_log(lines: int = 20) -> list[str]:
     """Safely retrieve the last N lines of the schengen log file without spawning shell subshells."""
     log_file = DB_DIR / "schengen.log"
     if not log_file.exists():
         return []
     try:
-        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+        with open(log_file, encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
-            return all_lines[-max(1, lines):]
+            return all_lines[-max(1, lines) :]
     except Exception as e:
         return [f"Error reading log file: {e}\n"]
 
@@ -704,13 +756,19 @@ if __name__ == "__main__":
 
     init_db()
     parser = argparse.ArgumentParser(description="Herdr SmartGate / Schengen Audit DB CLI")
-    parser.add_argument("--recent", "-n", type=int, nargs="?", const=10, default=None, help="Display recent audit logs (default: 10)")
+    parser.add_argument(
+        "--recent", "-n", type=int, nargs="?", const=10, default=None, help="Display recent audit logs (default: 10)"
+    )
     parser.add_argument("--search", "-s", type=str, help="Search audit logs by keyword")
-    parser.add_argument("--tail", "-t", type=int, nargs="?", const=20, default=None, help="Tail schengen.log file (default: 20 lines)")
+    parser.add_argument(
+        "--tail", "-t", type=int, nargs="?", const=20, default=None, help="Tail schengen.log file (default: 20 lines)"
+    )
     parser.add_argument("--paths", "--find-state", action="store_true", help="Print SmartGate state file paths")
     parser.add_argument("--stats", action="store_true", help="Display pattern analysis stats from DB and exit")
     parser.add_argument("--layer", type=str, help="Filter by decision layer (e.g. SECRET_GUARD, SHELL_CRITICAL)")
-    parser.add_argument("--decision", type=str, help="Filter by decision (AUTO_APPROVED, MANUAL_DELEGATED, ALLOWLIST_BYPASS)")
+    parser.add_argument(
+        "--decision", type=str, help="Filter by decision (AUTO_APPROVED, MANUAL_DELEGATED, ALLOWLIST_BYPASS)"
+    )
     parser.add_argument("--json", action="store_true", help="Output results in JSON format for agent parsing")
 
     args = parser.parse_args()
@@ -762,7 +820,9 @@ if __name__ == "__main__":
             print(f"🔍 Search results for '{args.search}' ({len(results)} found):")
             for r in results:
                 symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
-                print(f"{symbol} [{r['timestamp'][:19]}] #{r['id']} {r['pane_id']} - {r['decision']} [Layer: {r['decision_layer']}] ({r['safety_reason']})")
+                print(
+                    f"{symbol} [{r['timestamp'][:19]}] #{r['id']} {r['pane_id']} - {r['decision']} [Layer: {r['decision_layer']}] ({r['safety_reason']})"
+                )
                 print(f"   Cmd: {r['raw_command']}")
         sys.exit(0)
 
@@ -779,7 +839,9 @@ if __name__ == "__main__":
             for r in logs:
                 symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
                 cmd_prev = (r["raw_command"][:70] + "...") if len(r["raw_command"]) > 70 else r["raw_command"]
-                print(f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}")
+                print(
+                    f"{symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | Layer: {r['decision_layer']:<16}"
+                )
                 print(f"   Reason: {r['safety_reason']}")
                 print(f"   Cmd   : {cmd_prev}")
                 print("-" * 90)

@@ -1,7 +1,6 @@
 """Unit tests for Herdr Schengen Decision Layer Attribution and History CLI."""
 
 import ast
-import json
 import os
 import sys
 import textwrap
@@ -13,10 +12,10 @@ SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from security_evaluator import (
-    audit_python_code,
-    _python_normalization_candidates,
-    audit_shell_command,
     DecisionLayer,
+    _python_normalization_candidates,
+    audit_python_code,
+    audit_shell_command,
 )
 
 
@@ -27,12 +26,13 @@ def _try_parse(code: str) -> bool:
     except SyntaxError:
         return False
 
+
 from guard_db import (
+    get_recent_audit_logs,
+    get_state_file_paths,
     init_db,
     record_audit_log,
-    get_recent_audit_logs,
     search_audit_logs,
-    get_state_file_paths,
     tail_state_log,
 )
 
@@ -197,7 +197,7 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.PYTHON_AST)
 
-        safe, reason, layer = audit_shell_command("python3 -c \"import socket; s = socket.socket()\"")
+        safe, reason, layer = audit_shell_command('python3 -c "import socket; s = socket.socket()"')
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.PYTHON_AST)
 
@@ -234,8 +234,8 @@ class TestDecisionLayers(unittest.TestCase):
 
     def test_python_dash_c_no_space_captured(self):
         # python3 -c"..." (no space) previously bypassed the -c capture.
-        safe, reason, layer = audit_shell_command("python3 -c\"import socket; s=socket.socket()\"")
-        self.assertFalse(safe, f"Expected -c\"...\" blocked, got safe={safe}: {reason}")
+        safe, reason, layer = audit_shell_command('python3 -c"import socket; s=socket.socket()"')
+        self.assertFalse(safe, f'Expected -c"..." blocked, got safe={safe}: {reason}')
         self.assertEqual(layer, DecisionLayer.PYTHON_AST)
 
     def test_python_dash_c_escaped_quote_not_truncated(self):
@@ -250,9 +250,9 @@ class TestDecisionLayers(unittest.TestCase):
         # must remain fail-closed (blocked), not reconstructed into a benign AST by
         # a normalization candidate (per_line_stripped regression / dedent variant).
         for cmd in (
-            "python3 <<EOF\n    __impor\nt__(\"os\").system(\"id\")\nEOF",
-            "python3 <<EOF\n    ex\nec(\"import os; os.system(\\\"id\\\")\")\nEOF",
-            "python3 <<EOF\n    __impor\n    t__(\"os\").system(\"id\")\nEOF",
+            'python3 <<EOF\n    __impor\nt__("os").system("id")\nEOF',
+            'python3 <<EOF\n    ex\nec("import os; os.system(\\"id\\")")\nEOF',
+            'python3 <<EOF\n    __impor\n    t__("os").system("id")\nEOF',
             "python3 <<EOF\n    import sock\n    et\nEOF",
         ):
             safe, reason, layer = audit_shell_command(cmd)
@@ -266,9 +266,9 @@ class TestDecisionLayers(unittest.TestCase):
         for cmd in (
             'python3 -c "print(\\"import socket\\")"',
             'python3 -c "s = \\"exec(\\""',
-            "python3 -c \"import socketio\"",
-            "python3 -c \"import urllib3\"",
-            "python3 -c \"import httpclient\"",
+            'python3 -c "import socketio"',
+            'python3 -c "import urllib3"',
+            'python3 -c "import httpclient"',
         ):
             safe, reason, layer = audit_shell_command(cmd)
             self.assertTrue(safe, f"Expected benign '{cmd}' allowed, got blocked: {reason}")
@@ -381,7 +381,9 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertTrue(safe)
         self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
 
-        safe, reason, layer = audit_shell_command("curl -X DELETE https://gitea.example.com/api/v1/repos/org/repo/issues/45")
+        safe, reason, layer = audit_shell_command(
+            "curl -X DELETE https://gitea.example.com/api/v1/repos/org/repo/issues/45"
+        )
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.MANAGED_GIT_GUARD)
 
@@ -435,6 +437,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_scoped_lock_naming_and_path(self):
         from schengen_watcher import get_lock_file_path, sanitize_target_name
+
         self.assertEqual(sanitize_target_name("wS:pF"), "wS_pF")
         self.assertEqual(sanitize_target_name("auto"), "auto")
         self.assertEqual(sanitize_target_name("tab/pane-1"), "tab_pane-1")
@@ -447,20 +450,24 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_graceful_reload_execution(self):
         from schengen_watcher import execute_graceful_reload
+
         # Calling execute_graceful_reload() should succeed without throwing exceptions
         success = execute_graceful_reload()
         self.assertTrue(success)
 
     def test_graceful_reload_aborts_on_tampered_module(self):
         """Verify that verify_module_integrity rejects tampered modules, untracked files, and corrupted syntax."""
-        from schengen_watcher import verify_module_integrity
-        import types
         import tempfile
+        import types
+
+        from schengen_watcher import verify_module_integrity
 
         # 1. Untracked / Null-stubbed module (outside SCM) -> rejected
         fake_mod = types.ModuleType("security_evaluator")
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
-            f.write("class DecisionLayer: ALLOWLIST = 'ALLOWLIST'\ndef audit_shell_command(*args, **kwargs): return True, 'approved', 'ALLOWLIST'\n")
+            f.write(
+                "class DecisionLayer: ALLOWLIST = 'ALLOWLIST'\ndef audit_shell_command(*args, **kwargs): return True, 'approved', 'ALLOWLIST'\n"
+            )
             fake_path = f.name
 
         try:
@@ -494,12 +501,13 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_escalation_queue_lifecycle_and_cleanup(self):
         from guard_db import (
+            cleanup_escalations,
             enqueue_pending_escalation,
             get_pending_escalations,
             mark_escalation_delivered,
             resolve_escalation,
-            cleanup_escalations,
         )
+
         test_pane = "wTest:p1"
         test_cmd = "rm -rf /untrusted/test/danger"
 
@@ -540,13 +548,17 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
             agent_kind="agy",
             session_id=test_session_uuid,
         )
-        delivered_list = get_pending_escalations(pane_id=test_pane, include_delivered=True, active_session_map=active_map_matching)
+        delivered_list = get_pending_escalations(
+            pane_id=test_pane, include_delivered=True, active_session_map=active_map_matching
+        )
         target_item2 = next((item for item in delivered_list if item["id"] == esc_id2), None)
         self.assertIsNotNone(target_item2)
 
         # 4. Mark delivered
         mark_escalation_delivered(target_item2["id"])
-        del_list = get_pending_escalations(pane_id=test_pane, include_delivered=True, active_session_map=active_map_matching)
+        del_list = get_pending_escalations(
+            pane_id=test_pane, include_delivered=True, active_session_map=active_map_matching
+        )
         del_item = next((item for item in del_list if item["id"] == target_item2["id"]), None)
         self.assertIsNotNone(del_item)
         self.assertEqual(del_item["status"], "DELIVERED")
@@ -564,10 +576,10 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
     def test_2d_taxonomy_emission(self):
         """Verify that audit_shell_command_with_taxonomy correctly extracts 2D taxonomy."""
         from security_evaluator import (
-            audit_shell_command_with_taxonomy,
-            Origin,
             Consequence,
             GateState,
+            Origin,
+            audit_shell_command_with_taxonomy,
         )
 
         # 1. Critical destructive command -> Consequence.DESTRUCTION
@@ -617,7 +629,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_shadow_mode_kill_switch(self):
         """Verify that SCHENGEN_SHADOW_MODE=1 allows execution while logging counterfactual block."""
-        from security_evaluator import audit_shell_command_with_taxonomy, GateState
+        from security_evaluator import GateState, audit_shell_command_with_taxonomy
 
         old_env = os.environ.get("SCHENGEN_SHADOW_MODE")
         try:
@@ -637,7 +649,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_guard_db_taxonomy_columns_and_idempotency(self):
         """Verify SQLite3 schema includes 2D taxonomy and record_audit_log stores it."""
-        from guard_db import record_audit_log, get_recent_audit_logs, get_db_connection
+        from guard_db import get_db_connection, record_audit_log
 
         test_pane = "wTest:pTax"
         test_cmd = "rm -rf /tmp/test_taxonomy_target"
@@ -657,7 +669,10 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT origin, consequence, mechanism, gate_state, shadow_mode FROM audit_logs WHERE pane_id = ? ORDER BY id DESC LIMIT 1", (test_pane,))
+            cursor.execute(
+                "SELECT origin, consequence, mechanism, gate_state, shadow_mode FROM audit_logs WHERE pane_id = ? ORDER BY id DESC LIMIT 1",
+                (test_pane,),
+            )
             row = cursor.fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row["origin"], "A")

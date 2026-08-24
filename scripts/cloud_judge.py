@@ -10,7 +10,7 @@ import json
 import os
 import re
 import urllib.request
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional
 
 DEFAULT_GUARD_LLM_MODEL = os.environ.get("GUARD_LLM_MODEL", "deepseek-chat")
 DEFAULT_GUARD_LLM_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
@@ -19,7 +19,7 @@ DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
 GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT = (
     "You are a strict but pragmatic security gatekeeper for Herdr SmartGate. "
     "Decide whether a command or permission request should be auto-approved or deferred to a human. "
-    "Respond ONLY in JSON: {\"is_safe\": true|false, \"reason\": \"<concise explanation>\"}. "
+    'Respond ONLY in JSON: {"is_safe": true|false, "reason": "<concise explanation>"}. '
     "Rules:\n"
     "- Auto-approve only obviously-safe, read-only, or routine development operations.\n"
     "- Any destructive, secret-access, system-mutation, or ambiguous action -> is_safe false.\n"
@@ -74,7 +74,7 @@ def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
     return effective_endpoint, effective_model, effective_key
 
 
-def parse_json_verdict(content_str: str, prefix: str = "[Cloud Judge]") -> Optional[Tuple[bool, str]]:
+def parse_json_verdict(content_str: str, prefix: str = "[Cloud Judge]") -> Optional[tuple[bool, str]]:
     """Parse the model's JSON verdict, tolerating ```json fences. Returns None if unparseable."""
     try:
         clean = re.sub(r"^```json\s*", "", content_str.strip(), flags=re.IGNORECASE)
@@ -89,7 +89,7 @@ def parse_json_verdict(content_str: str, prefix: str = "[Cloud Judge]") -> Optio
 
 def post_cloud_judge(messages, endpoint, model, api_key, reasoning_effort, tools=None):
     """Single HTTP round-trip to an OpenAI-compatible chat completions endpoint."""
-    req_body: Dict[str, Any] = {
+    req_body: dict[str, Any] = {
         "model": model,
         "temperature": 0.0,
         "max_tokens": 300,
@@ -99,7 +99,11 @@ def post_cloud_judge(messages, endpoint, model, api_key, reasoning_effort, tools
         req_body["tools"] = tools
         req_body["tool_choice"] = "auto"
     # Only inject reasoning_effort if explicitly configured and targeting a reasoning model
-    if reasoning_effort and reasoning_effort.lower() not in ("off", "none", "") and ("reason" in model.lower() or "gpt-oss" in model.lower()):
+    if (
+        reasoning_effort
+        and reasoning_effort.lower() not in ("off", "none", "")
+        and ("reason" in model.lower() or "gpt-oss" in model.lower())
+    ):
         req_body["reasoning_effort"] = reasoning_effort.lower()
 
     payload = json.dumps(req_body).encode("utf-8")

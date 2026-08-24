@@ -8,24 +8,28 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from redaction import redact_for_cloud
 from cloud_judge import (
-    resolve_guard_llm_config,
     DEFAULT_GUARD_LLM_ENDPOINT,
     DEFAULT_GUARD_LLM_MODEL,
+    resolve_guard_llm_config,
 )
+from redaction import redact_for_cloud
 from security_evaluator import (
-    audit_with_cloud_judge,
-    _audit_static_shell_command,
     DecisionLayer,
+    _audit_static_shell_command,
+    audit_with_cloud_judge,
 )
 
 
 def _clear_live_keys():
     """Remove any live cloud-judge credentials so unit tests never hit the network."""
     for k in (
-        "GUARD_LLM_ENDPOINT", "GUARD_LLM_API_KEY", "DEEPSEEK_API_KEY",
-        "OPENAI_API_KEY", "GUARD_LLM_BASE_URL", "GUARD_LLM_MODEL",
+        "GUARD_LLM_ENDPOINT",
+        "GUARD_LLM_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENAI_API_KEY",
+        "GUARD_LLM_BASE_URL",
+        "GUARD_LLM_MODEL",
     ):
         os.environ.pop(k, None)
 
@@ -55,7 +59,9 @@ class TestRedactForCloud(unittest.TestCase):
         self.assertNotIn("ghp_", out2)
 
     def test_masks_bearer_and_private_key(self):
-        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", redact_for_cloud("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"))
+        self.assertNotIn(
+            "eyJhbGciOiJIUzI1NiJ9", redact_for_cloud("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig")
+        )
         self.assertIn("[REDACTED:private-key]", redact_for_cloud(FAKE_PEM))
 
     def test_leaves_benign_content_untouched(self):
@@ -139,7 +145,8 @@ class TestAuditWithCloudJudge(unittest.TestCase):
 
     def test_cache_verdict_store_roundtrip(self):
         from security_evaluator import _cache_cloud_verdict
-        from session_cache import compute_cache_key, get_cached_result, clear_session_cache
+        from session_cache import clear_session_cache, compute_cache_key, get_cached_result
+
         clear_session_cache()
         key = compute_cache_key("cj:test-store", cwd="/tmp", scope="t", agent_id="a", origin="A")
         _cache_cloud_verdict(key, "cj:test-store", True, "safe", "CLOUD_JUDGE", "/tmp", "t", "a", "A")
