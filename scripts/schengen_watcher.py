@@ -460,6 +460,13 @@ def verify_host_runtime_environment():
         or bool(os.environ.get("ANTIGRAVITY_CONVERSATION_ID"))
         or os.environ.get("OPENCODE") == "1"
     )
+    # DECISION (ADR-008): HERDR_ENV=1 is REQUIRED. This daemon is a Herdr-pane
+    # watcher — it reads pane text (`herdr pane read`) and injects keystrokes
+    # (`herdr agent send-keys`), both Herdr-specific. A headless `opencode serve`
+    # has no panes, so it is intentionally OUT OF SCOPE here; guarding it would
+    # require a separate SDK-level `permission.ask` hook integration, not this
+    # pane watcher. If headless support is ever wanted, revisit this guard (and
+    # the OpenCode plugin) rather than weakening it.
     in_herdr = os.environ.get("HERDR_ENV") == "1"
     if not is_host or not in_herdr:
         sys.stderr.write(
