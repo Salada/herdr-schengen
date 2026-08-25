@@ -673,8 +673,9 @@ def audit_dynamic_substitution_with_llm(
 ) -> tuple[bool, str]:
     """Semantic inspection of dynamic parameters with 5 Anti-Loop Guardrails and scoped LLM caching.
 
-    Routes to the configured OpenAI-compatible cloud judge (deepseek-chat default). If no
-    endpoint is configured, or the judge is unreachable / uncertain, fails closed to human review.
+    Routes to the configured OpenAI-compatible cloud judge (OpenAI default; DeepSeek
+    available via OPENAI_BASE_URL). If no endpoint is configured, or the judge is
+    unreachable / uncertain, fails closed to human review.
     """
     # Check scoped LLM cache (B1: cache strictly scoped to expensive LLM tier)
     cache_key = None

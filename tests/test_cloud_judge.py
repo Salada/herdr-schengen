@@ -26,9 +26,9 @@ def _clear_live_keys():
     for k in (
         "GUARD_LLM_ENDPOINT",
         "GUARD_LLM_API_KEY",
-        "DEEPSEEK_API_KEY",
         "OPENAI_API_KEY",
         "GUARD_LLM_BASE_URL",
+        "OPENAI_BASE_URL",
         "GUARD_LLM_MODEL",
     ):
         os.environ.pop(k, None)
@@ -104,8 +104,8 @@ class TestResolveGuardLlmConfig(unittest.TestCase):
         self.assertEqual(endpoint, "")
         self.assertEqual(key, "")
 
-    def test_deepseek_default_with_key(self):
-        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-test"}):
+    def test_openai_api_key_default_with_key(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}):
             endpoint, model, key = resolve_guard_llm_config()
         self.assertEqual(endpoint, DEFAULT_GUARD_LLM_ENDPOINT)
         self.assertEqual(model, DEFAULT_GUARD_LLM_MODEL)
@@ -122,6 +122,11 @@ class TestResolveGuardLlmConfig(unittest.TestCase):
 
     def test_base_url_derives_chat_completions(self):
         with mock.patch.dict(os.environ, {"GUARD_LLM_BASE_URL": "https://api.deepseek.com/v1"}):
+            endpoint, _, _ = resolve_guard_llm_config()
+        self.assertEqual(endpoint, "https://api.deepseek.com/v1/chat/completions")
+
+    def test_openai_base_url_derives_chat_completions(self):
+        with mock.patch.dict(os.environ, {"OPENAI_BASE_URL": "https://api.deepseek.com/v1"}):
             endpoint, _, _ = resolve_guard_llm_config()
         self.assertEqual(endpoint, "https://api.deepseek.com/v1/chat/completions")
 
@@ -142,7 +147,7 @@ class TestResolveGuardLlmConfig(unittest.TestCase):
         self.assertEqual(endpoint, "https://api.openai.com/v1/chat/completions")
         self.assertEqual(key, "sk-svcacct-xyz789")
 
-    def test_plain_sk_guard_llm_api_key_keeps_deepseek_default(self):
+    def test_plain_sk_guard_llm_api_key_uses_openai_default(self):
         with mock.patch.dict(os.environ, {"GUARD_LLM_API_KEY": "sk-plain"}):
             endpoint, _, key = resolve_guard_llm_config()
         self.assertEqual(endpoint, DEFAULT_GUARD_LLM_ENDPOINT)

@@ -14,9 +14,8 @@ jobs:
     name: Run LLM Security & Substitution Tests
     runs-on: ubuntu-latest
     env:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      GUARD_LLM_ENDPOINT: "https://api.deepseek.com/v1/chat/completions"
-      GUARD_LLM_MODEL: "deepseek-chat"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GUARD_LLM_MODEL: "gpt-5.6-luna"
       GUARD_REASONING_EFFORT: "low"
     steps:
       - name: Checkout Repository
@@ -59,10 +58,10 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           python3 -m unittest discover -s tests -v
 
-      - name: Run Live LLM Integration Tests (DeepSeek)
+      - name: Run Live LLM Integration Tests (OpenAI-compatible cloud judge)
         run: |
-          if [ -n "${DEEPSEEK_API_KEY}" ]; then
+          if [ -n "${OPENAI_API_KEY}" ]; then
             python3 -m unittest tests/test_llm_evaluator_integration.py
           else
-            echo "ℹ️  DEEPSEEK_API_KEY secret not set; skipping live integration tests in CI."
+            echo "ℹ️  OPENAI_API_KEY secret not set; skipping live integration tests in CI."
           fi

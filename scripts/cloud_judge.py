@@ -2,8 +2,8 @@
 
 Encapsulates LLM configuration resolution, HTTP transport, and verdict parsing
 so `security_evaluator.py` stays focused on static/deterministic evaluation and
-the judgment orchestration. Any OpenAI-compatible endpoint (DeepSeek, vLLM,
-Ollama, LocalAI, OpenRouter) is a drop-in via the `GUARD_LLM_*` env vars.
+the judgment orchestration. Any OpenAI-compatible endpoint (OpenAI, vLLM,
+Ollama, LocalAI, OpenRouter, or DeepSeek via OPENAI_BASE_URL) is a drop-in.
 """
 
 import json
@@ -12,8 +12,8 @@ import re
 import urllib.request
 from typing import Any, Optional
 
-DEFAULT_GUARD_LLM_MODEL = os.environ.get("GUARD_LLM_MODEL", "deepseek-chat")
-DEFAULT_GUARD_LLM_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
+DEFAULT_GUARD_LLM_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-5.6-luna")
+DEFAULT_GUARD_LLM_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
 
 GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT = (
@@ -27,55 +27,32 @@ GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT = (
 )
 
 
-# OpenAI project / service-account keys use distinguishing prefixes. A bare
-# "sk-" is ambiguous (both OpenAI and DeepSeek use it), so we fall back to the
-# DeepSeek default to preserve backward-compat for plain DeepSeek keys.
-_OPENAI_KEY_PREFIXES = ("sk-proj-", "sk-svcacct-")
-
-
-def _infer_key_source(key: str) -> str:
-    """Infer the provider for an explicitly-supplied key whose env name does not
-    disambiguate it (explicit `api_key` arg / `GUARD_LLM_API_KEY`), so the default
-    endpoint matches the provider (issue #27).
-
-    Only OpenAI project/service-account keys are distinguishable by prefix;
-    anything else falls back to the DeepSeek default for backward-compat.
-    """
-    if key.startswith(_OPENAI_KEY_PREFIXES):
-        return "openai"
-    return "deepseek"
-
-
 def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
     """Resolve (endpoint, model, api_key) with documented precedence.
 
-    model    : explicit arg -> GUARD_LLM_MODEL -> DEFAULT_GUARD_LLM_MODEL (deepseek-chat)
+    model    : explicit arg -> GUARD_LLM_MODEL -> DEFAULT_GUARD_LLM_MODEL
     endpoint : explicit arg -> GUARD_LLM_ENDPOINT -> GUARD_LLM_BASE_URL + /chat/completions
-               -> provider default (DeepSeek, or OpenAI when only OPENAI_API_KEY resolves)
-    api_key  : explicit arg -> GUARD_LLM_API_KEY -> DEEPSEEK_API_KEY -> OPENAI_API_KEY
-               (explicit api_key / GUARD_LLM_API_KEY infer provider from key prefix)
+               -> OPENAI_BASE_URL + /chat/completions -> DEFAULT_GUARD_LLM_ENDPOINT
+    api_key  : explicit arg -> GUARD_LLM_API_KEY -> OPENAI_API_KEY
+
+    POLICY (issue #33): OpenAI-standard env vars only. DEEPSEEK_API_KEY and the
+    DeepSeek default endpoint are removed. To keep using DeepSeek, set
+    OPENAI_BASE_URL=https://api.deepseek.com/v1 (and OPENAI_API_KEY=<deepseek key>).
     """
     effective_model = model or os.environ.get("GUARD_LLM_MODEL") or DEFAULT_GUARD_LLM_MODEL
 
-    # Resolve the key with precedence, tracking its source so the default
-    # endpoint matches the provider the key belongs to (no key/endpoint mismatch).
     if api_key:
         effective_key = api_key
-        key_source = _infer_key_source(api_key)
     elif os.environ.get("GUARD_LLM_API_KEY"):
         effective_key = os.environ["GUARD_LLM_API_KEY"]
-        key_source = _infer_key_source(effective_key)
-    elif os.environ.get("DEEPSEEK_API_KEY"):
-        effective_key = os.environ["DEEPSEEK_API_KEY"]
-        key_source = "deepseek"
     elif os.environ.get("OPENAI_API_KEY"):
         effective_key = os.environ["OPENAI_API_KEY"]
-        key_source = "openai"
     else:
         effective_key = ""
-        key_source = "deepseek"
 
-    base_url = os.environ.get("GUARD_LLM_BASE_URL", "").strip().rstrip("/")
+    base_url = (
+        os.environ.get("GUARD_LLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or ""
+    ).strip().rstrip("/")
     env_endpoint = os.environ.get("GUARD_LLM_ENDPOINT", "").strip().rstrip("/")
 
     if endpoint:
@@ -85,10 +62,7 @@ def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
     elif base_url:
         effective_endpoint = base_url + "/chat/completions"
     elif effective_key:
-        if key_source == "openai":
-            effective_endpoint = "https://api.openai.com/v1/chat/completions"
-        else:
-            effective_endpoint = DEFAULT_GUARD_LLM_ENDPOINT
+        effective_endpoint = DEFAULT_GUARD_LLM_ENDPOINT
     else:
         effective_endpoint = ""
     return effective_endpoint, effective_model, effective_key
@@ -122,7 +96,7 @@ def post_cloud_judge(messages, endpoint, model, api_key, reasoning_effort, tools
     if (
         reasoning_effort
         and reasoning_effort.lower() not in ("off", "none", "")
-        and ("reason" in model.lower() or "gpt-oss" in model.lower())
+        and ("reason" in model.lower() or "gpt-oss" in model.lower() or "gpt-5" in model.lower())
     ):
         req_body["reasoning_effort"] = reasoning_effort.lower()
 

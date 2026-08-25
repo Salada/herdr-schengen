@@ -1,4 +1,4 @@
-"""Integration test for LLM Tool-Calling Semantic Evaluation with DeepSeek / GPT-OSS 120B."""
+"""Integration test for LLM Tool-Calling Semantic Evaluation with the OpenAI-compatible cloud judge."""
 
 import os
 import sys
@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from security_evaluator import audit_dynamic_substitution_with_llm
 
-SKIP_CI_REASON = "DeepSeek API가 쉽게 에러가 나고 대안을 찾으려고 하고 있습니다 (DeepSeek API frequently encounters connectivity/rate-limit errors in CI; alternative evaluation backends are being integrated)."
+SKIP_CI_REASON = "Live LLM integration tests require OPENAI_API_KEY / endpoint and are skipped by default in CI."
 
 
 @unittest.skipIf(
@@ -24,7 +24,7 @@ class TestLLMEvaluatorIntegration(unittest.TestCase):
     def setUp(self):
         self.endpoint = os.environ.get("GUARD_LLM_ENDPOINT")
         self.model = os.environ.get("GUARD_LLM_MODEL")
-        self.api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GUARD_LLM_API_KEY") or ""
+        self.api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("GUARD_LLM_API_KEY") or ""
 
         if not self.endpoint or not self.model or not self.api_key:
             self.skipTest("Live LLM credentials not configured in environment.")
