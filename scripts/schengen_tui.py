@@ -135,6 +135,12 @@ class AuditFullscreenModal(ModalScreen):
         table.focus()
 
 
+class FixedHeader(Header):
+    """Header that does not expand or toggle tall mode on click."""
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+
+
 class AuditDataTable(DataTable):
     """Custom DataTable that triggers fullscreen audit modal on click or selection."""
     def on_click(self, event: events.Click) -> None:
@@ -179,12 +185,17 @@ def acquire_tui_role() -> Tuple[Optional[Any], bool, Optional[int]]:
 class SchengenTUIApp(App):
     CSS = """
     Screen {
-        layout: horizontal;
+        layout: vertical;
         background: $surface-darken-2;
+    }
+    #main-body {
+        width: 100%;
+        height: 1fr;
+        layout: horizontal;
     }
     #chat-column {
         width: 1fr;
-        height: 1fr;
+        height: 100%;
         border-right: solid $surface-lighten-1;
         padding: 0 1;
         layout: vertical;
@@ -193,7 +204,7 @@ class SchengenTUIApp(App):
         width: 38;
         max-width: 42;
         min-width: 32;
-        height: 1fr;
+        height: 100%;
         padding: 0 1;
         layout: vertical;
     }
@@ -316,26 +327,27 @@ class SchengenTUIApp(App):
         self._processing_chat: bool = False
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        # Left: Chat log fills space; banner floats just above input
-        with Vertical(id="chat-column"):
-            yield Label("[bold cyan]🤖 Schengen Security Gatekeeper (DeepSeek Flash)[/]")
-            yield UnfocusableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
-            yield Static(id="active-target-banner")
-            yield Input(placeholder="Ask Gatekeeper or type command (e.g. /start, /stop, /approve 978)...", id="input-box")
+        yield FixedHeader(show_clock=True)
+        with Horizontal(id="main-body"):
+            # Left: Chat log fills space; banner floats just above input
+            with Vertical(id="chat-column"):
+                yield Label("[bold cyan]🤖 Schengen Security Gatekeeper (DeepSeek Flash)[/]")
+                yield UnfocusableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
+                yield Static(id="active-target-banner")
+                yield Input(placeholder="Ask Gatekeeper or type command (e.g. /start, /stop, /approve 978)...", id="input-box")
 
-        # Right: Compact Radar with Token Meter
-        with Vertical(id="radar-column"):
-            with Horizontal(id="status-container"):
-                yield Static(id="status-box")
-                yield Button("⚡ Toggle", id="btn-toggle-guard", variant="warning")
-            yield Static(id="role-box")
-            yield Label("⚡ Token & Cache Meter", classes="section-title")
-            yield Static(id="token-meter-box")
-            yield AuditSectionHeader("📜 Recent Audits (Click: ⛶ Fullscreen)", classes="section-title")
-            yield AuditDataTable(id="audit-table")
-            yield Label("🚨 Pending Escalations Queue", classes="section-title")
-            yield ListView(id="escalation-list")
+            # Right: Compact Radar with Token Meter
+            with Vertical(id="radar-column"):
+                with Horizontal(id="status-container"):
+                    yield Static(id="status-box")
+                    yield Button("⚡ Toggle", id="btn-toggle-guard", variant="warning")
+                yield Static(id="role-box")
+                yield Label("⚡ Token & Cache Meter", classes="section-title")
+                yield Static(id="token-meter-box")
+                yield AuditSectionHeader("📜 Recent Audits (Click: ⛶ Fullscreen)", classes="section-title")
+                yield AuditDataTable(id="audit-table")
+                yield Label("🚨 Pending Escalations Queue", classes="section-title")
+                yield ListView(id="escalation-list")
         yield Footer()
 
     def action_open_audit_modal(self) -> None:
