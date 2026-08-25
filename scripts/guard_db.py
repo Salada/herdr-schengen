@@ -752,6 +752,58 @@ def tail_state_log(lines: int = 20) -> list[str]:
         return [f"Error reading log file: {e}\n"]
 
 
+def get_session_dashboard_summary(
+    pane_id: Optional[str] = None,
+    audit_limit: int = 10,
+    escalation_limit: int = 5,
+    include_terminal_escalations: bool = True,
+) -> dict[str, Any]:
+    """Retrieve full dashboard summary for UI rendering: audit history (10) + escalations (5)."""
+    init_db()
+
+    # 1. Audit logs (most recent audit_limit items)
+    recent_audits = get_recent_audit_logs(limit=audit_limit, pane_id=pane_id)
+
+    # 2. Escalation timeline (both pending and recent resolved/cancelled, up to escalation_limit)
+    escalations = []
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if include_terminal_escalations:
+            query = """
+                SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash,
+                       safety_reason, decision_layer, status, started_at, delivered_at, last_transitioned_at
+                FROM pending_escalations
+            """
+            params = []
+            if pane_id:
+                query += " WHERE pane_id = ?"
+                params.append(pane_id)
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(escalation_limit)
+        else:
+            query = """
+                SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash,
+                       safety_reason, decision_layer, status, started_at, delivered_at, last_transitioned_at
+                FROM pending_escalations
+                WHERE status IN ('PENDING', 'DELIVERED')
+            """
+            params = []
+            if pane_id:
+                query += " AND pane_id = ?"
+                params.append(pane_id)
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(escalation_limit)
+
+        cursor.execute(query, params)
+        escalations = [dict(r) for r in cursor.fetchall()]
+
+    return {
+        "pane_id": pane_id,
+        "recent_audits": recent_audits,
+        "escalations": escalations,
+    }
+
+
 if __name__ == "__main__":
     import argparse
     import json
