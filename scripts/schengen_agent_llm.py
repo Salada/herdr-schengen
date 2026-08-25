@@ -54,16 +54,40 @@ from herdr_client import get_pane_text
 _SHARED_KEY  = os.environ.get("OPENCODE_DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
 _SHARED_URL  = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
+
+def resolve_subagent_model(default: str = "deepseek-chat") -> str:
+    """Resolve model for subagents/fast inspector from OpenCode config or ENV."""
+    env_model = os.environ.get("OPENCODE_SUBAGENT_MODEL") or os.environ.get("OPENCODE_MODEL")
+    if env_model:
+        return env_model.split("/")[-1]
+    
+    config_path = Path.home() / ".config" / "opencode" / "opencode.jsonc"
+    if config_path.exists():
+        try:
+            raw = config_path.read_text(encoding="utf-8")
+            clean_json = re.sub(r"//.*", "", raw)
+            data = json.loads(clean_json)
+            agent_schengen = data.get("agent", {}).get("schengen", {}).get("model")
+            if agent_schengen:
+                return str(agent_schengen).split("/")[-1]
+            small_model = data.get("small_model")
+            if small_model:
+                return str(small_model).split("/")[-1]
+        except Exception:
+            pass
+    return default
+
+
 # ── Phase-specific overrides ────────────────────────────────────────
 # Inspector (investigation tool-calling phase)
 INSPECTOR_API_KEY  = os.environ.get("SCHENGEN_INSPECTOR_API_KEY")  or _SHARED_KEY
 INSPECTOR_BASE_URL = os.environ.get("SCHENGEN_INSPECTOR_BASE_URL") or _SHARED_URL
-INSPECTOR_MODEL    = os.environ.get("SCHENGEN_INSPECTOR_MODEL", "deepseek-chat")
+INSPECTOR_MODEL    = os.environ.get("SCHENGEN_INSPECTOR_MODEL")    or resolve_subagent_model("deepseek-chat")
 
 # Judge (final adjudication text phase)
 JUDGE_API_KEY  = os.environ.get("SCHENGEN_JUDGE_API_KEY")  or _SHARED_KEY
 JUDGE_BASE_URL = os.environ.get("SCHENGEN_JUDGE_BASE_URL") or _SHARED_URL
-JUDGE_MODEL    = os.environ.get("SCHENGEN_JUDGE_MODEL", "deepseek-chat")
+JUDGE_MODEL    = os.environ.get("SCHENGEN_JUDGE_MODEL")    or resolve_subagent_model("deepseek-chat")
 
 SESSIONS_DIR = Path.home() / ".local" / "state" / "herdr-schengen" / "sessions"
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)

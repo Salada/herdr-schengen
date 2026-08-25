@@ -58,21 +58,37 @@ This repository serves as the single source of truth (SSOT) for the Schengen Sec
 
 ---
 
-## ⚡ 3. Everyday SOPs
+## 📦 3. Setup, Dependencies & OpenCode Integration
+
+For full setup, installation, and environment variable configuration, refer to **[docs/setup.md](./docs/setup.md)**:
+
+- **Dedicated Virtualenv**: `~/.local/share/herdr-schengen-tui-venv`
+- **Core TUI Dependencies**: `textual`, `rich`, `httpx`
+- **OpenCode Subagent Sync**: In `opencode.jsonc`, `agent.schengen.model` and `small_model` automatically synchronize to Schengen Inspector/Judge phases.
+
+---
+
+## ⚡ 4. Everyday SOPs
 
 ### SOP-01: Updating Guard Rules & Hot-Reloading
 ```bash
 # 1. Edit evaluator in source repo
 nvim ~/code/herdr-schengen/scripts/security_evaluator.py
 # 2. Run test suite
-python3 -m unittest discover -s tests
+HERDR_ENV=1 ~/.local/share/herdr-schengen-tui-venv/bin/python3 -m unittest discover -s tests
 # 3. Mirror to runtime skill
 cp -r ~/code/herdr-schengen/scripts/ ~/.agents/skills/herdr-schengen/scripts/
+cp -r ~/code/herdr-schengen/docs/ ~/.agents/skills/herdr-schengen/docs/
 # 4. Gracefully hot-reload running daemon via SIGHUP (0ms downtime)
 python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload
 ```
 
-### SOP-02: Documenting New Architectural Decisions
+### SOP-02: Launching Interactive Gatekeeper TUI
+```bash
+~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/schengen_tui.py
+```
+
+### SOP-03: Documenting New Architectural Decisions
 ```bash
 # 1. Create docs/adr-00X-<title>.md
 # 2. Link only to internal ADRs using relative paths (./adr-00X-*.md)
