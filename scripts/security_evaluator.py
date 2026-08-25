@@ -105,7 +105,9 @@ CRITICAL_SHELL_PATTERNS = [
     ),
     (r"\bgit\s+reset\s+--hard\b", "Destructive Git reset"),
     (r"\bgit\s+clean\s+-[fF]", "Destructive Git clean"),
-    (r"\bps\s+.*\b(?:auxe|eww)\b|\bps\s+e\b", "Process listing exposing environment variables (ps e) — secret leakage risk"),
+    (r"\bps\b[^\n]*(?:eww|-wwE|axeww|auxww|auxe|\se\b)", "Process environment dump (ps e/eww/-wwE/axeww) — secret exposure"),
+    (r"(?:/proc/\$?\{?[0-9*]+\}?/environ|/proc/[0-9*]+/environ)", "Process environment file read (/proc/*/environ)"),
+    (r"\blaunchctl\s+getenv\b", "launchd environment read (launchctl getenv)"),
     (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Denial of Service / Fork bomb"),
     # Disk, Volume, & Filesystem Manipulation (Linux & macOS)
     (
