@@ -45,24 +45,51 @@ const ESC_POLL_MS = parseInt(process.env.SCHENGEN_ESC_POLL_MS || "15000", 10);
 // e.g. 'w19:p1'. Override via SCHENGEN_TARGET.
 const TARGET = process.env.SCHENGEN_TARGET || "auto";
 
-// Minimal env allowlist for the watcher child process. The watcher must NOT
-// inherit the host's full environment (which includes API keys such as
-// OPENCODE_DEEPSEEK_API_KEY), otherwise `ps eww` could dump them (issue #51).
-const CHILD_ENV_ALLOW_PREFIXES = ["HERDR_", "SCHENGEN_", "GUARD_", "OPENAI_"];
-const CHILD_ENV_ALLOW_EXACT = ["OPENCODE", "PATH", "HOME", "LANG", "TMPDIR", "SHELL", "TERM", "USER", "LOGNAME"];
-const CHILD_ENV_BLOCK_SUFFIXES = ["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIAL"];
+// Minimal env allowlist for the watcher child process (ADR-008 / Issue #51).
+// The guard daemon must NOT inherit the host's full environment — OpenCode injects
+// provider keys like OPENCODE_DEEPSEEK_API_KEY into its own process, and spreading
+// `{...process.env}` forward lets `ps eww` against the watcher PID dump those secrets.
+// Pass only what the watcher actually needs:
+//   - GUARD_*/OPENAI_*  (trusted: the cloud-judge config, which legitimately carries keys)
+//   - HERDR_*/SCHENGEN_* (runtime markers + our own config, subject to a suffix blocklist)
+//   - explicit standard/LLM keys (OPENCODE, PATH, HOME, LANG, DEEPSEEK_API_KEY, ...)
+const ENV_TRUSTED_PREFIX = [/^GUARD_/, /^OPENAI_/];
+const ENV_PREFIX_ALLOWLIST = [/^HERDR_/, /^SCHENGEN_/];
+const ENV_KEY_ALLOWLIST = new Set([
+  "OPENCODE",
+  "PATH",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "TERM_PROGRAM",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "PWD",
+  "COLORTERM",
+  "DEEPSEEK_API_KEY",
+  "AI_AGENT",
+  "ANTIGRAVITY_AGENT",
+  "ANTIGRAVITY_CONVERSATION_ID",
+]);
+// Defense-in-depth: HERDR_*/SCHENGEN_* must never carry secrets, so drop any that
+// happen to match a secret-bearing suffix (e.g. a stray SCHENGEN_*_TOKEN).
+const ENV_SECRET_SUFFIX = /(_API_KEY|_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL|_PRIVATE_KEY)$/i;
 
-function buildChildEnv() {
+function buildChildEnv(extra) {
   const env = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v == null || v === "") continue;
-    if (CHILD_ENV_BLOCK_SUFFIXES.some((s) => k.endsWith(s))) continue;
-    if (CHILD_ENV_ALLOW_EXACT.includes(k) || CHILD_ENV_ALLOW_PREFIXES.some((p) => k.startsWith(p))) {
-      env[k] = v;
-    }
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value == null || value === "") continue;
+    const trusted = ENV_TRUSTED_PREFIX.some((re) => re.test(key));
+    const byPrefix = ENV_PREFIX_ALLOWLIST.some((re) => re.test(key));
+    const byKey = ENV_KEY_ALLOWLIST.has(key);
+    if (!trusted && !byPrefix && !byKey) continue;
+    if (byPrefix && ENV_SECRET_SUFFIX.test(key)) continue;
+    env[key] = value;
   }
-  env.SCHENGEN_STRICT_PARENT = "1";
-  return env;
+  return { ...env, ...extra };
 }
 
 let child = null; // the spawned process (may be exited), or null
@@ -86,7 +113,7 @@ function start() {
   const proc = spawn("python3", [WATCHER_PATH, "--target", TARGET], {
     detached: false,
     stdio: ["ignore", logFd, logFd],
-    env: buildChildEnv(),
+    env: buildChildEnv({ SCHENGEN_STRICT_PARENT: "1" }),
   });
   fs.closeSync(logFd);
 

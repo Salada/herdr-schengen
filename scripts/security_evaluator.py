@@ -105,9 +105,6 @@ CRITICAL_SHELL_PATTERNS = [
     ),
     (r"\bgit\s+reset\s+--hard\b", "Destructive Git reset"),
     (r"\bgit\s+clean\s+-[fF]", "Destructive Git clean"),
-    (r"\bps\b[^\n]*(?:eww|-wwE|axeww|auxww|auxe|\se\b)", "Process environment dump (ps e/eww/-wwE/axeww) — secret exposure"),
-    (r"(?:/proc/\$?\{?[0-9*]+\}?/environ|/proc/[0-9*]+/environ)", "Process environment file read (/proc/*/environ)"),
-    (r"\blaunchctl\s+getenv\b", "launchd environment read (launchctl getenv)"),
     (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Denial of Service / Fork bomb"),
     # Disk, Volume, & Filesystem Manipulation (Linux & macOS)
     (
@@ -152,6 +149,52 @@ CRITICAL_SHELL_PATTERNS = [
         "Bitwarden irreversible vault item deletion (bw delete item) - Non-VCS T4 irreversible mutation (Rule 9)",
     ),
 ]
+
+# 4b. Process-environment-dump denylist (separate from CRITICAL_SHELL_PATTERNS because it
+#     needs command-boundary anchoring AND quote-stripping that the generic loop must not
+#     apply globally — globally stripping quotes would fail-open on e.g. `bash -c "rm -rf /"`).
+#
+#     The macOS/GNU/Linux `ps` env-dump vector is: `ps e` / `ps eww` / `ps axeww` /
+#     `ps auxe` (BSD bare lowercase `e` flag), `ps -wwE` (macOS uppercase `E`), plus
+#     `launchctl getenv` and `/proc/*/environ`. A bare lowercase `e` flag is the BSD env
+#     marker; `ps -e` (GNU "select all processes") has a dash prefix and is NOT env-dump,
+#     so it is deliberately excluded.
+_CMD_BOUNDARY = r"(?:^|[\n;&|()]\s*|&&\s*|\|\|\s*)"
+
+
+def _strip_quoted(text: str) -> str:
+    """Remove single/double-quoted contents so literal text (grep patterns, commit
+    messages, heredoc-less echo bodies) that merely MENTIONS a dangerous term is not
+    matched by the process-env-dump denylist. Quoted shell strings are literal
+    arguments, never an executed `ps` invocation."""
+    return re.sub(r"'[^']*'", "''", re.sub(r'"[^"]*"', '""', text))
+
+
+def check_process_env_dump(cmd_str: str):
+    """Return (is_dangerous, reason) for process-environment-dump commands.
+
+    Matched against a quote-stripped command and anchored to a shell command boundary,
+    so `ps eww` / `ps -wwE` / `launchctl getenv` / `/proc/*/environ` are flagged ONLY
+    when they are an actual command invocation — not when the substring appears inside a
+    heredoc body, a grep pattern, or a commit-message literal.
+    """
+    # /proc/<pid>/environ is a direct file read; match against the raw command (not the
+    # quote-stripped one) since the path is not a quoted string. Covers numeric pids
+    # (123, ${123}, $123, * wildcard) and named shell vars ($PPID, $PID).
+    if re.search(r"/proc/(?:\$[A-Za-z_][A-Za-z0-9_]*|\$?\{?[0-9*]+\}?|[0-9*]+)/environ\b", cmd_str):
+        return True, "Process environment file read (/proc/*/environ) — secret exposure"
+    scan = _strip_quoted(cmd_str)
+    if re.search(_CMD_BOUNDARY + r"launchctl\s+getenv\b", scan):
+        return True, "launchd environment read (launchctl getenv) — secret exposure"
+    # BSD env flag: a bare (no dash) alphabetic token containing lowercase `e`
+    # (e, eww, axeww, auxe). `ps -e` (dash prefix) is GNU "all processes" -> allowed.
+    if re.search(_CMD_BOUNDARY + r"ps\s+(?:-\S+\s+|\d+\s+)*[a-z]*e[a-z]*(?=\s|$|[;&|])", scan):
+        return True, "Process listing exposing environment variables (ps e/eww/axeww) — secret leakage risk"
+    # macOS env flag: `-wwE` (uppercase E distinguishes it from GNU `ps -e`).
+    if re.search(_CMD_BOUNDARY + r"ps\s+(?:-\S+\s+|\d+\s+)*-[a-zA-Z]*E(?=\s|$|[;&|])", scan):
+        return True, "Process listing exposing environment variables (ps -wwE) — secret leakage risk"
+    return False, None
+
 
 # 5. Commands that READ or EXFILTRATE files
 READ_COMMANDS = {
@@ -1005,6 +1048,13 @@ def _audit_static_shell_command(
         if re.search(pat, cmd_str, re.IGNORECASE):
             return False, f"Critical risk detected: {desc}", DecisionLayer.SHELL_CRITICAL
 
+    # 2b. Check process-environment-dump commands (ps e/eww/-wwE, launchctl getenv,
+    #     /proc/*/environ). Anchored to a command boundary + quote-stripped so literal
+    #     mentions in heredocs/grep-patterns/commit-messages are not flagged.
+    env_dump, env_dump_reason = check_process_env_dump(cmd_str)
+    if env_dump:
+        return False, f"Critical risk detected: {env_dump_reason}", DecisionLayer.SHELL_CRITICAL
+
     # Check system directory access (exclude PATH=... variable assignments)
     cleaned_cmd = re.sub(r'PATH=["\']?[^"\';\s]+["\']?', "", cmd_str)
     if re.search(
@@ -1233,6 +1283,9 @@ def derive_taxonomy(
         elif re.search(r"\b(pfctl|networksetup)\b", cmd_str, re.IGNORECASE):
             consequence = Consequence.AVAILABILITY
             mechanism = "network-disruption"
+        elif re.search(r"\b(ps|launchctl)\b", cmd_str, re.IGNORECASE) or "/proc/" in cmd_str:
+            consequence = Consequence.EXFILTRATION
+            mechanism = "process-env-dump"
         elif re.search(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", cmd_str) or re.search(
             r"\b(killall|pkill)\s+-9\s+(launchd|init|systemd|Dock|Finder)", cmd_str
         ):

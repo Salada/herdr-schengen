@@ -60,12 +60,12 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
         # Process listing that exposes environment variables (secret leakage)
-        for ps_cmd in ("ps e", "ps auxe", "ps eww", "ps -wwE", "ps axeww", "ps auxww"):
+        for ps_cmd in ("ps e", "ps auxe", "ps eww", "ps -wwE", "ps axeww"):
             safe, reason, layer = audit_shell_command(ps_cmd)
             self.assertFalse(safe, f"Expected '{ps_cmd}' to be blocked (env var leakage)")
             self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
         # Safe process listing (no env flag)
-        for ps_cmd in ("ps -e", "ps aux"):
+        for ps_cmd in ("ps -e", "ps aux", "ps auxww"):
             safe, reason, layer = audit_shell_command(ps_cmd)
             self.assertTrue(safe, f"Expected '{ps_cmd}' to be allowed")
         # Process environment file reads (Linux) and launchd env read
@@ -73,6 +73,43 @@ class TestDecisionLayers(unittest.TestCase):
             safe, reason, layer = audit_shell_command(env_cmd)
             self.assertFalse(safe, f"Expected '{env_cmd}' to be blocked (env var read)")
             self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+
+    def test_process_env_dump_denylist(self):
+        # Genuine env-dump variants (Issue #51 gap) — must be blocked.
+        blocked = [
+            "ps e",
+            "ps eww",
+            "ps auxe",
+            "ps axeww",
+            "ps -wwE",
+            "ps -wwE 1234",
+            "ps -p 1234 eww",
+            "launchctl getenv PATH",
+            "launchctl getenv",
+            "cat /proc/1234/environ",
+            "strings /proc/*/environ",
+            "cat /proc/$PPID/environ",
+        ]
+        for cmd in blocked:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' to be blocked (env dump), got safe=True")
+            self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL, f"Expected SHELL_CRITICAL for '{cmd}'")
+
+    def test_process_env_dump_no_false_positive(self):
+        # Literal mentions of `ps eww` in non-command contexts must NOT be flagged.
+        allowed = [
+            "ps -e",
+            "ps aux",
+            "ps auxww",
+            "ps -ef",
+            "grep -rn 'auxe|eww|wwE|axeww|launchctl|/proc/|getenv|ps e' tests/",
+            "git commit -m 'fix ps eww false positive in heredoc'",
+            'echo "use ps eww to dump env vars"',
+            "cat > /tmp/handoff.txt <<'EOF'\n## Issue #51 — ps eww 프로세스 env 키 노출 수정\nEOF",
+        ]
+        for cmd in allowed:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' to be allowed (false positive), got: {reason}")
 
     def test_gpt_model_name_not_disk_command(self):
         # Regression: "gpt-4o-mini" (OpenAI model name) must not match the `gpt`
