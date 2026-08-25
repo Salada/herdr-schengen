@@ -23,7 +23,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import httpx
+try:
+    import httpx
+    _HTTP_EXCEPTIONS = (httpx.HTTPError, httpx.TimeoutException)
+except ImportError:
+    httpx = None  # type: ignore
+    _HTTP_EXCEPTIONS = (Exception,)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -490,7 +495,7 @@ class SchengenAgentChat:
                         json=payload,
                         headers=inspector_headers,
                     )
-                except (httpx.HTTPError, httpx.TimeoutException) as exc:
+                except _HTTP_EXCEPTIONS as exc:
                     return f"⚠️ Inspector Network/API Error: {exc}"
 
                 if resp.status_code != 200:
@@ -533,7 +538,7 @@ class SchengenAgentChat:
                                 json=judge_payload,
                                 headers=judge_headers,
                             )
-                        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+                        except _HTTP_EXCEPTIONS as exc:
                             return f"⚠️ Judge Network/API Error: {exc}"
 
                         if judge_resp.status_code != 200:

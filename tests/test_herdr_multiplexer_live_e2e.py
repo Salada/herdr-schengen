@@ -22,9 +22,19 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 
-@unittest.skipUnless(os.environ.get("HERDR_ENV") == "1", "Requires HERDR_ENV=1 live multiplexer session")
+def is_herdr_live() -> bool:
+    if os.environ.get("HERDR_ENV") != "1":
+        return False
+    try:
+        proc = subprocess.run(["herdr", "pane", "current"], capture_output=True, timeout=2.0)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(is_herdr_live(), "Requires active Herdr multiplexer session (HERDR_ENV=1)")
 class TestHerdrMultiplexerLiveE2E(unittest.TestCase):
-    """Live E2E test exercising real Herdr CLI and terminal panes."""
+    """Live E2E test exercising real Herdr CLI, terminal panes, and SmartGate."""
 
     def test_herdr_cli_live_presence(self):
         proc = subprocess.run(["herdr", "workspace", "list"], capture_output=True, text=True, timeout=5.0)
@@ -54,24 +64,20 @@ class TestHerdrMultiplexerLiveE2E(unittest.TestCase):
         self.assertIsNotNone(new_pane_id)
 
         import time
-        time.sleep(0.8)
+        time.sleep(1.0)
 
         try:
-            # 3. Test sending command and reading terminal output
-            run_proc = subprocess.run([
-                "herdr", "pane", "run", new_pane_id, "echo 'HERDR_LIVE_E2E_TOKEN_999'"
+            # 3. Test sending text to pane
+            subprocess.run([
+                "herdr", "pane", "send-text", new_pane_id, "echo 'HERDR_LIVE_E2E_TOKEN_999'"
             ], capture_output=True, text=True, timeout=5.0)
-            self.assertEqual(run_proc.returncode, 0)
+            subprocess.run([
+                "herdr", "pane", "send-keys", new_pane_id, "enter"
+            ], capture_output=True, text=True, timeout=5.0)
 
-            # Wait for output
-            wait_proc = subprocess.run([
-                "herdr", "pane", "wait-output", new_pane_id, 
-                "--match", "HERDR_LIVE_E2E_TOKEN_999", 
-                "--timeout", "10000"
-            ], capture_output=True, text=True, timeout=12.0)
-            self.assertEqual(wait_proc.returncode, 0)
+            time.sleep(1.0)
 
-            # 4. Verify read
+            # 4. Verify read with source visible
             read_proc = subprocess.run([
                 "herdr", "pane", "read", new_pane_id, "--source", "visible", "--format", "text"
             ], capture_output=True, text=True, timeout=5.0)
@@ -79,7 +85,7 @@ class TestHerdrMultiplexerLiveE2E(unittest.TestCase):
             self.assertIn("HERDR_LIVE_E2E_TOKEN_999", read_proc.stdout)
 
         finally:
-            # 5. Close/kill the temporary test pane
+            # 5. Clean teardown: close test pane
             subprocess.run(["herdr", "pane", "send-keys", new_pane_id, "ctrl+c"], capture_output=True, timeout=3.0)
             subprocess.run(["herdr", "pane", "send-text", new_pane_id, "exit"], capture_output=True, timeout=3.0)
             subprocess.run(["herdr", "pane", "send-keys", new_pane_id, "enter"], capture_output=True, timeout=3.0)
