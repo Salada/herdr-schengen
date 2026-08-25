@@ -57,6 +57,7 @@ function start() {
     return `already running (pid ${child.pid})`;
   }
 
+  fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
   const logFd = fs.openSync(LOG_PATH, "a");
   const proc = spawn("python3", [WATCHER_PATH, "--target", "auto"], {
     detached: false,
@@ -64,6 +65,12 @@ function start() {
     env: { ...process.env, SCHENGEN_STRICT_PARENT: "1" },
   });
   fs.closeSync(logFd);
+
+  proc.on("error", (err) => {
+    console.error(`[schengen-host] failed to spawn daemon: ${err.message}`);
+    child = null;
+    desired = false;
+  });
 
   child = proc;
   desired = true;
@@ -79,8 +86,11 @@ function start() {
     }
     // Unexpected death (crash) -> watcher-of-the-watcher re-spawn.
     rearm = setTimeout(() => {
+      rearm = null;
       if (desired) start();
     }, POLL_MS);
+    // Do not let the re-arm timer hold the event loop open on shutdown.
+    if (typeof rearm.unref === "function") rearm.unref();
   });
 
   return `started schengen guard (pid ${proc.pid}); this session is now the host`;

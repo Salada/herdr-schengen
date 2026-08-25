@@ -37,7 +37,10 @@ panes. Other OpenCode sessions do nothing unless the user starts it there too
 ## Lifecycle
 
 - **die-with-parent**: the daemon is spawned as a child of the OpenCode process
-  and is killed via `tui.lifecycle.onDispose` when this session closes.
+  and is killed via the plugin `dispose` hook when this session closes.
+  `SCHENGEN_STRICT_PARENT=1` additionally makes the daemon exit when the OpenCode
+  **process** dies (even on crash) — this fires on process death, not on session
+  close while the process stays alive.
 - **watcher-of-the-watcher**: while `desired`, a poll re-spawns the daemon if it
   crashes (equivalent to the AGY `schedule()` auto-recovery role).
 
