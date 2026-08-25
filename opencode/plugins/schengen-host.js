@@ -136,20 +136,20 @@ export default async ({ client }) => {
   }
 
   function formatEscalation(esc) {
-    const snapshot = esc.dialog_snapshot
-      ? `\n\n--- Dialog snapshot (last 20 lines) ---\n${esc.dialog_snapshot.split("\n").slice(-20).join("\n")}`
-      : "";
     return (
       `🚨 [SmartGate] Escalation #${esc.id} requires review\n` +
-      `Pane: ${esc.pane_id} (${esc.agent_kind || "unknown"}) | Session: ${esc.session_id || "unknown"}\n` +
+      `Pane: ${esc.pane_id} (${esc.agent_kind || "unknown"})\n` +
       `Layer: ${esc.decision_layer}\n` +
       `Reason: ${esc.safety_reason}\n` +
-      `Command: ${esc.raw_command}${snapshot}\n\n` +
-      `Resolve with the schengen guard tools (or \`schengen_pending\` to re-list).`
+      `Command: ${esc.raw_command}`
     );
   }
 
   async function surfaceEscalations() {
+    // Only the HOST session (where schengen_start was called) surfaces
+    // escalations. Every opencode pane loads this plugin, but a non-host pane
+    // must not inject escalation prompts into its own session.
+    if (!desired) return;
     if (!sessionID) return;
     try {
       const raw = await runHistoryPending();
