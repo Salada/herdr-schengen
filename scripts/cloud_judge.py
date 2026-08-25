@@ -37,7 +37,7 @@ def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
 
     POLICY (issue #33): OpenAI-standard env vars only. DEEPSEEK_API_KEY and the
     DeepSeek default endpoint are removed. To keep using DeepSeek, set
-    OPENAI_BASE_URL=https://api.deepseek.com (and OPENAI_API_KEY=<deepseek key>).
+    OPENAI_BASE_URL=https://api.deepseek.com/v1 (and OPENAI_API_KEY=<deepseek key>).
     """
     effective_model = model or os.environ.get("GUARD_LLM_MODEL") or DEFAULT_GUARD_LLM_MODEL
 
