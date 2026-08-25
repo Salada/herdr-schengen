@@ -60,7 +60,7 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
         # Process listing that exposes environment variables (secret leakage)
-        for ps_cmd in ("ps e", "ps auxe", "ps eww"):
+        for ps_cmd in ("ps e", "ps auxe", "ps eww", "ps -wwE", "ps axeww", "ps auxww"):
             safe, reason, layer = audit_shell_command(ps_cmd)
             self.assertFalse(safe, f"Expected '{ps_cmd}' to be blocked (env var leakage)")
             self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
@@ -68,6 +68,11 @@ class TestDecisionLayers(unittest.TestCase):
         for ps_cmd in ("ps -e", "ps aux"):
             safe, reason, layer = audit_shell_command(ps_cmd)
             self.assertTrue(safe, f"Expected '{ps_cmd}' to be allowed")
+        # Process environment file reads (Linux) and launchd env read
+        for env_cmd in ("cat /proc/1234/environ", "strings /proc/*/environ", "launchctl getenv"):
+            safe, reason, layer = audit_shell_command(env_cmd)
+            self.assertFalse(safe, f"Expected '{env_cmd}' to be blocked (env var read)")
+            self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
     def test_gpt_model_name_not_disk_command(self):
         # Regression: "gpt-4o-mini" (OpenAI model name) must not match the `gpt`

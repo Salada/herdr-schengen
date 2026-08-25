@@ -41,6 +41,30 @@ const POLL_MS = parseInt(process.env.SCHENGEN_HOST_POLL_MS || "15000", 10);
 // surface new escalations into this OpenCode session via noReply prompt.
 const ESC_POLL_MS = parseInt(process.env.SCHENGEN_ESC_POLL_MS || "15000", 10);
 
+// Guard target pane ID: 'auto' (all active & future panes) or a specific pane
+// e.g. 'w19:p1'. Override via SCHENGEN_TARGET.
+const TARGET = process.env.SCHENGEN_TARGET || "auto";
+
+// Minimal env allowlist for the watcher child process. The watcher must NOT
+// inherit the host's full environment (which includes API keys such as
+// OPENCODE_DEEPSEEK_API_KEY), otherwise `ps eww` could dump them (issue #51).
+const CHILD_ENV_ALLOW_PREFIXES = ["HERDR_", "SCHENGEN_", "GUARD_", "OPENAI_"];
+const CHILD_ENV_ALLOW_EXACT = ["OPENCODE", "PATH", "HOME", "LANG", "TMPDIR", "SHELL", "TERM", "USER", "LOGNAME"];
+const CHILD_ENV_BLOCK_SUFFIXES = ["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_CREDENTIAL"];
+
+function buildChildEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v == null || v === "") continue;
+    if (CHILD_ENV_BLOCK_SUFFIXES.some((s) => k.endsWith(s))) continue;
+    if (CHILD_ENV_ALLOW_EXACT.includes(k) || CHILD_ENV_ALLOW_PREFIXES.some((p) => k.startsWith(p))) {
+      env[k] = v;
+    }
+  }
+  env.SCHENGEN_STRICT_PARENT = "1";
+  return env;
+}
+
 let child = null; // the spawned process (may be exited), or null
 let desired = false; // user asked for the guard to run
 let rearm = null; // setTimeout handle for crash re-spawn
@@ -59,10 +83,10 @@ function start() {
 
   fs.mkdirSync(path.dirname(LOG_PATH), { recursive: true });
   const logFd = fs.openSync(LOG_PATH, "a");
-  const proc = spawn("python3", [WATCHER_PATH, "--target", "auto"], {
+  const proc = spawn("python3", [WATCHER_PATH, "--target", TARGET], {
     detached: false,
     stdio: ["ignore", logFd, logFd],
-    env: { ...process.env, SCHENGEN_STRICT_PARENT: "1" },
+    env: buildChildEnv(),
   });
   fs.closeSync(logFd);
 
