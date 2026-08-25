@@ -8,7 +8,7 @@ SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from agent_adapters import get_adapter, target_agent_kinds
-from agent_adapters.opencode import decide_opencode_injection, resolve_opencode_injection, strip_ansi, strip_tui
+from agent_adapters.opencode import decide_opencode_injection, resolve_opencode_injection, strip_ansi, strip_leaked_text, strip_tui
 from schengen_watcher import agent_matches
 
 
@@ -337,6 +337,28 @@ class TestAgentDispatch(unittest.TestCase):
     def test_opencode_adapter_parses_opencode_dialog(self):
         oc_text = "Permission required\n\n$ ls -la\n\nAllow once"
         self.assertEqual(get_adapter("opencode").parse_permission_request(oc_text), "ls -la")
+
+    def test_strip_leaked_text_removes_tui_fragments(self):
+        garbled = (
+            "cd ~/x && git commit -m \"msg\" 133,841 tokens 13% used "
+            "MCP • salada-nas Connected LSP LSPs will activate as files are read "
+            "• pyright ~/code/herdr-schengen:main QUEUED Build · DeepSeek V4 Pro "
+            "esc interrupt ctrl+p commands OpenCode 1.18.21"
+        )
+        cleaned = strip_leaked_text(garbled)
+        self.assertIn("git commit", cleaned)
+        for frag in ("133,841", "13% used", "salada-nas", "LSP", "pyright", "~/code", "QUEUED", "DeepSeek"):
+            self.assertNotIn(frag, cleaned)
+
+    def test_question_dialog_detected(self):
+        adapter = get_adapter("opencode")
+        q_text = "PR merge order?\n1. option A\n2. option B\n↑↓ select  enter submit  esc dismiss"
+        self.assertEqual(adapter.parse_permission_request(q_text), "question")
+
+    def test_permission_dialog_not_question(self):
+        adapter = get_adapter("opencode")
+        oc_text = "Permission required\n\n$ ls -la\n\nAllow once  Allow always  Reject  ⇆ select  enter confirm"
+        self.assertEqual(adapter.parse_permission_request(oc_text), "ls -la")
 
 
 if __name__ == "__main__":
