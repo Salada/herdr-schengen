@@ -12,7 +12,7 @@ import re
 import urllib.request
 from typing import Any, Optional
 
-DEFAULT_GUARD_LLM_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-4o-mini")
+DEFAULT_GUARD_LLM_MODEL = os.environ.get("GUARD_LLM_MODEL", "gpt-5.6-luna")
 DEFAULT_GUARD_LLM_ENDPOINT = "https://api.openai.com/v1/chat/completions"
 DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
 
@@ -96,7 +96,7 @@ def post_cloud_judge(messages, endpoint, model, api_key, reasoning_effort, tools
     if (
         reasoning_effort
         and reasoning_effort.lower() not in ("off", "none", "")
-        and ("reason" in model.lower() or "gpt-oss" in model.lower())
+        and ("reason" in model.lower() or "gpt-oss" in model.lower() or "gpt-5" in model.lower())
     ):
         req_body["reasoning_effort"] = reasoning_effort.lower()
 

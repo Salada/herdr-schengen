@@ -141,7 +141,7 @@ python3 -m unittest discover -s tests -v
 
 # Run live LLM integration tests (optional)
 OPENAI_BASE_URL="https://api.openai.com/v1" \
-GUARD_LLM_MODEL="gpt-4o-mini" \
+GUARD_LLM_MODEL="gpt-5.6-luna" \
 OPENAI_API_KEY="sk-..." \
 python3 -m unittest tests/test_llm_evaluator_integration.py
 ```
