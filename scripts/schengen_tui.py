@@ -16,7 +16,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -26,6 +26,7 @@ from rich.markup import escape as rich_escape
 from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
@@ -66,6 +67,33 @@ def format_local_time(iso_ts: str) -> str:
 class UnfocusableRichLog(RichLog):
     """RichLog subclass that cannot be focused."""
     can_focus = False
+
+
+TUI_LOCK_FILE = Path.home() / ".local" / "state" / "herdr-schengen" / "schengen_tui.lock"
+
+
+def acquire_tui_role() -> Tuple[Optional[Any], bool, Optional[int]]:
+    """Acquire exclusive singleton lock for TUI Controller (Leader-Observer pattern)."""
+    import fcntl
+    TUI_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = open(TUI_LOCK_FILE, "a+")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd.seek(0)
+        fd.truncate()
+        fd.write(f"{os.getpid()}\n")
+        fd.flush()
+        return fd, True, None
+    except (OSError, BlockingIOError):
+        leader_pid = None
+        try:
+            with open(TUI_LOCK_FILE) as f:
+                content = f.read().strip()
+                if content.isdigit():
+                    leader_pid = int(content)
+        except Exception:
+            pass
+        return None, False, leader_pid
 
 
 class SchengenTUIApp(App):
@@ -128,6 +156,15 @@ class SchengenTUIApp(App):
         margin-top: 1;
         margin-bottom: 1;
     }
+    #role-box {
+        width: 14;
+        height: 100%;
+        background: $surface-darken-1;
+        border: solid $surface-lighten-1;
+        padding: 0;
+        content-align: center middle;
+        margin-right: 1;
+    }
     #status-box {
         width: 1fr;
         height: 100%;
@@ -137,65 +174,56 @@ class SchengenTUIApp(App):
         content-align: center middle;
     }
     #btn-toggle-guard {
-        width: 12;
+        width: 11;
         height: 100%;
         margin-left: 1;
-        min-width: 10;
-        padding: 0;
     }
-    /* Token meter: no fill, subtle neutral border */
     #token-meter-box {
-        height: 8;
+        height: 7;
         background: $surface-darken-1;
         border: solid $surface-lighten-1;
         padding: 0 1;
-        margin-top: 0;
+        margin-bottom: 1;
+        content-align: left middle;
+    }
+    DataTable {
+        height: 11;
+        background: $surface-darken-1;
+        border: solid $surface-lighten-1;
         margin-bottom: 1;
     }
-    .section-title {
+    ListView {
+        height: 7;
         background: $surface-darken-1;
+        border: solid $surface-lighten-1;
+    }
+    ListItem {
+        padding: 0 1;
+    }
+    .section-title {
         color: $text-muted;
         text-style: bold;
-        padding: 0 1;
         margin-top: 0;
         margin-bottom: 0;
     }
-    #audit-table {
-        height: 13;
-        border: solid $surface-lighten-1;
-    }
-    #escalation-list {
-        height: 1fr;
-        border: solid $surface-lighten-1;
-        background: $surface;
-    }
-    /* CommandPalette: narrow width, centered, capped height */
+    /* CommandPalette width constraint (ADR-009) */
     CommandPalette > Vertical {
         width: 72;
         max-width: 80%;
         max-height: 60%;
-        margin-top: 4;
-        border: solid $surface-lighten-2;
-        background: $surface;
-    }
-    CommandPalette #--input {
-        border: solid $surface-lighten-2;
-    }
-    CommandPalette #--results {
-        max-height: 20;
+        align: center middle;
     }
     """
 
     BINDINGS = [
-        ("ctrl+c", "quit", "Quit"),
-        ("ctrl+l", "clear_chat", "Clear Chat"),
-        ("ctrl+t", "toggle_daemon", "Toggle Guard"),
-        ("ctrl+y", "copy_chat", "Copy Chat"),
-        ("tab", "focus_next", "Next Focus"),
+        Binding("ctrl+l", "clear_chat", "Clear Chat", show=True),
+        Binding("ctrl+t", "toggle_daemon", "Toggle Guard", show=True),
+        Binding("ctrl+y", "copy_chat", "Copy Chat", show=True),
     ]
 
     def __init__(self):
         super().__init__()
+        self.tui_lock_fd, self.is_controller, self.leader_pid = acquire_tui_role()
         self.agent = SchengenAgentChat()
         self._columns_initialized = False
         self._last_audit_hash = ""
@@ -217,6 +245,7 @@ class SchengenTUIApp(App):
         # Right: Compact Radar with Token Meter
         with Vertical(id="radar-column"):
             with Horizontal(id="status-container"):
+                yield Static(id="role-box")
                 yield Static(id="status-box")
                 yield Button("⚡ Toggle", id="btn-toggle-guard", variant="warning")
             yield Label("⚡ Token & Cache Meter", classes="section-title")
@@ -247,10 +276,23 @@ class SchengenTUIApp(App):
 
         self.set_interval(0.5, self.update_radar_data)
 
-        self._write("[bold green]🛡️ Schengen Security Gatekeeper TUI is online.[/]")
-        self._write("[dim]• [bold yellow]⚡ Toggle Guard[/]: Button or [bold cyan]Ctrl+T[/] (or /start, /stop)\n• Protocol: AGY Tab Amend + DeepSeek Prefix Cache Enabled\n• Mode: Strict Sequential Single-Pending FIFO[/]\n")
+        if self.is_controller:
+            self._write("[bold green]🛡️ Schengen Security Gatekeeper TUI is online (Controller Mode).[/]")
+            self._write("[dim]• [bold yellow]⚡ Toggle Guard[/]: Button or [bold cyan]Ctrl+T[/] (or /start, /stop)\n• Role: [green]Controller (Active Authority)[/]\n• Mode: Strict Sequential Single-Pending FIFO[/]\n")
+        else:
+            self._write(f"[bold yellow]👁️ Schengen TUI is running in OBSERVER MODE (Leader PID: {self.leader_pid}).[/]")
+            self._write("[dim]• Read-only dashboard active. Auto-awaken and key injection are disabled on this instance.[/]\n")
+
+    def on_unmount(self) -> None:
+        if self.tui_lock_fd:
+            try:
+                self.tui_lock_fd.close()
+            except Exception:
+                pass
 
     def toggle_guard_daemon(self) -> str:
+        if not self.is_controller:
+            return "⛔ 관찰자 모드입니다. 컨트롤러 인스턴스에서 조작하십시오."
         locks = list_active_guard_locks()
         watcher_script = SCRIPT_DIR / "schengen_watcher.py"
         python_bin = sys.executable
@@ -287,6 +329,13 @@ class SchengenTUIApp(App):
     def update_radar_data(self, force: bool = False) -> None:
         if not self._columns_initialized:
             return
+
+        # 0. Update Role header box
+        role_box = self.query_one("#role-box", Static)
+        if self.is_controller:
+            role_box.update(f"[bold green]👑 CTRL[/]\n[dim]PID {os.getpid()}[/]")
+        else:
+            role_box.update(f"[bold yellow]👁 OBS[/]\n[dim]Ldr {self.leader_pid or 'active'}[/]")
 
         # 1. Update status header box (muted tones — accent only on state)
         locks = list_active_guard_locks()
@@ -325,8 +374,8 @@ class SchengenTUIApp(App):
                 f"[dim]⚠ {rich_escape(reason_short)}[/]"
             )
 
-            # STRICT SEQUENTIAL FIFO: Only awaken/deliver chat for the SINGLE CURRENT ACTIVE escalation
-            if active_id not in self._notified_escalation_ids and not self._processing_chat:
+            # STRICT SEQUENTIAL FIFO: Only CONTROLLER awakens/delivers chat for active escalation
+            if self.is_controller and active_id not in self._notified_escalation_ids and not self._processing_chat:
                 self._notified_escalation_ids.add(active_id)
                 self._last_active_id = active_id
 
@@ -417,6 +466,10 @@ class SchengenTUIApp(App):
     async def process_user_chat(self, user_msg: str) -> None:
         if self._processing_chat:
             self._write("[dim]⏳ Another investigation/chat is currently in-flight. Please wait...[/]")
+            return
+
+        if not self.is_controller and (user_msg.startswith("/approve") or user_msg.startswith("/reject") or user_msg.startswith("/start") or user_msg.startswith("/stop")):
+            self._write(f"[bold yellow]⚠️ [Observer Mode]:[/] Read-only instance. Leader PID {self.leader_pid} controls execution.")
             return
 
         self._processing_chat = True

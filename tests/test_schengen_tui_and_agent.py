@@ -115,6 +115,8 @@ class TestSchengenTUIApp(unittest.TestCase):
         self.assertEqual(app._chat_plain, [])
         self.assertEqual(app._notified_escalation_ids, set())
         self.assertFalse(app._processing_chat)
+        if app.tui_lock_fd:
+            app.tui_lock_fd.close()
 
     def test_css_command_palette_width_constraint(self):
         assert SchengenTUIApp is not None
@@ -145,6 +147,14 @@ class TestSchengenTUIApp(unittest.TestCase):
         app._chat_plain.clear()
         self.assertEqual(len(app._chat_plain), 0)
 
+    def test_role_panel_widgets(self):
+        assert SchengenTUIApp is not None
+        app = SchengenTUIApp()
+        self.assertTrue(hasattr(app, "is_controller"))
+        self.assertTrue(hasattr(app, "leader_pid"))
+        if app.tui_lock_fd:
+            app.tui_lock_fd.close()
+
     def test_chat_plain_buffer_recording_and_clear(self):
         assert SchengenTUIApp is not None
         app = SchengenTUIApp()
@@ -158,6 +168,8 @@ class TestSchengenTUIApp(unittest.TestCase):
         # Test clear
         app.action_clear_chat()
         self.assertEqual(app._chat_plain, [])
+        if app.tui_lock_fd:
+            app.tui_lock_fd.close()
 
 
 class TestSequentialFifoQueue(unittest.TestCase):
