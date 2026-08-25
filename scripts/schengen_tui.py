@@ -135,6 +135,20 @@ class AuditFullscreenModal(ModalScreen):
         table.focus()
 
 
+class AuditDataTable(DataTable):
+    """Custom DataTable that triggers fullscreen audit modal on click or selection."""
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.app.push_screen(AuditFullscreenModal())
+
+
+class AuditSectionHeader(Label):
+    """Clickable header for Recent Audits section."""
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.app.push_screen(AuditFullscreenModal())
+
+
 TUI_LOCK_FILE = Path.home() / ".local" / "state" / "herdr-schengen" / "schengen_tui.lock"
 
 
@@ -286,6 +300,7 @@ class SchengenTUIApp(App):
         Binding("ctrl+l", "clear_chat", "Clear Chat", show=True),
         Binding("ctrl+t", "toggle_daemon", "Toggle Guard", show=True),
         Binding("ctrl+y", "copy_chat", "Copy Chat", show=True),
+        Binding("ctrl+a", "open_audit_modal", "Audit Ledger", show=True),
     ]
 
     def __init__(self):
@@ -317,11 +332,14 @@ class SchengenTUIApp(App):
             yield Static(id="role-box")
             yield Label("⚡ Token & Cache Meter", classes="section-title")
             yield Static(id="token-meter-box")
-            yield Label("📜 Recent Audits (Click/Enter: ⛶ Fullscreen)", classes="section-title")
-            yield DataTable(id="audit-table")
+            yield AuditSectionHeader("📜 Recent Audits (Click: ⛶ Fullscreen)", classes="section-title")
+            yield AuditDataTable(id="audit-table")
             yield Label("🚨 Pending Escalations Queue", classes="section-title")
             yield ListView(id="escalation-list")
         yield Footer()
+
+    def action_open_audit_modal(self) -> None:
+        self.push_screen(AuditFullscreenModal())
 
     def on_mount(self) -> None:
         self.title = "Herdr Schengen Security Gatekeeper"
