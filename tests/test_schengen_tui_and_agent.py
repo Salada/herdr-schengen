@@ -160,7 +160,14 @@ class TestSchengenTUIApp(unittest.TestCase):
         assert SchengenTUIApp is not None
         css = SchengenTUIApp.CSS
         self.assertIn("#active-target-banner", css)
-        self.assertIn("height: 6;", css)
+        self.assertIn("min-height: 5;", css)
+        self.assertIn("max-height: 11;", css)
+
+    def test_command_text_area_instantiation(self):
+        from schengen_tui import CommandTextArea
+        cta = CommandTextArea()
+        self.assertIsNotNone(cta)
+        self.assertFalse(cta.show_line_numbers)
 
     def test_audit_fullscreen_modal_instantiation(self):
         assert AuditFullscreenModal is not None

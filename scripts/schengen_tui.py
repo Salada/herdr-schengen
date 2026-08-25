@@ -40,6 +40,7 @@ from textual.widgets import (
     ListView,
     RichLog,
     Static,
+    TextArea,
 )
 
 from guard_db import (
@@ -155,6 +156,44 @@ class AuditSectionHeader(Label):
         self.app.push_screen(AuditFullscreenModal())
 
 
+class CommandTextArea(TextArea):
+    """Multi-line expanding command input supporting Shift+Enter for newline and Enter to submit."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(
+            show_line_numbers=False,
+            soft_wrap=True,
+            highlight_cursor_line=False,
+            **kwargs,
+        )
+
+    def on_key(self, event: events.Key) -> None:
+        is_shift_enter = (
+            event.key in ("shift+enter", "ctrl+j", "alt+enter")
+            or event.name in ("shift+enter", "ctrl+j", "alt+enter")
+        )
+        if event.key == "enter" and not is_shift_enter:
+            event.prevent_default()
+            event.stop()
+            text = self.text.strip()
+            if text:
+                self.text = ""
+                self.styles.height = 3
+                app = getattr(self, "app", None)
+                if app and hasattr(app, "process_user_chat"):
+                    app.process_user_chat(text)
+        elif is_shift_enter:
+            event.prevent_default()
+            event.stop()
+            self.insert("\n")
+            line_count = self.text.count("\n") + 1
+            self.styles.height = min(7, max(3, line_count + 2))
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        line_count = self.text.count("\n") + 1
+        self.styles.height = min(7, max(3, line_count + 2))
+
+
 TUI_LOCK_FILE = Path.home() / ".local" / "state" / "herdr-schengen" / "schengen_tui.lock"
 
 
@@ -208,9 +247,11 @@ class SchengenTUIApp(App):
         padding: 0 1;
         layout: vertical;
     }
-    /* Active escalation: left accent line only, no solid fill */
+    /* Active escalation / Clean state banner (dynamic height for up to 5 cmd lines) */
     #active-target-banner {
-        height: 6;
+        min-height: 5;
+        max-height: 11;
+        height: auto;
         background: $surface-darken-1;
         border-left: heavy $warning;
         border-top: solid $surface-lighten-1;
@@ -228,12 +269,16 @@ class SchengenTUIApp(App):
         overflow-y: scroll;
         overflow-x: hidden;
     }
-    /* Input: clean gray border, single accent line on focus */
+    /* Command input: expanding textarea, clean gray border, single accent line on focus */
     #input-box {
         dock: bottom;
+        height: 3;
+        min-height: 3;
+        max-height: 7;
         margin-top: 1;
         margin-bottom: 0;
         border: tall $surface-lighten-2;
+        background: $surface-darken-1;
     }
     #input-box:focus {
         border-bottom: tall $accent;
@@ -334,7 +379,7 @@ class SchengenTUIApp(App):
                 yield Label("[bold cyan]🤖 Schengen Security Gatekeeper (DeepSeek Flash)[/]")
                 yield UnfocusableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
                 yield Static(id="active-target-banner")
-                yield Input(placeholder="Ask Gatekeeper or type command (e.g. /start, /stop, /approve 978)...", id="input-box")
+                yield CommandTextArea(placeholder="Ask Gatekeeper or type command (Enter to submit, Shift+Enter for newline)...", id="input-box")
 
             # Right: Compact Radar with Token Meter
             with Vertical(id="radar-column"):
@@ -368,7 +413,7 @@ class SchengenTUIApp(App):
             if e["status"] != "PENDING":
                 self._notified_escalation_ids.add(e["id"])
 
-        input_widget = self.query_one(Input)
+        input_widget = self.query_one("#input-box", CommandTextArea)
         input_widget.focus()
 
         self.set_interval(0.5, self.update_radar_data)
@@ -461,13 +506,17 @@ class SchengenTUIApp(App):
 
         if active_esc:
             active_id = active_esc["id"]
-            cmd_short = active_esc['raw_command'].replace("\n", " ").strip()
-            if len(cmd_short) > 72:
-                cmd_short = cmd_short[:72] + "…"
-            reason_short = active_esc['safety_reason'][:56]
+            raw_cmd = active_esc['raw_command'].strip()
+            cmd_lines = raw_cmd.splitlines()
+            if len(cmd_lines) > 5:
+                cmd_display = "\n".join(cmd_lines[:5]) + f"\n[dim]… (+{len(cmd_lines) - 5} lines truncated)[/]"
+            else:
+                cmd_display = "\n".join(cmd_lines)
+            
+            reason_short = active_esc['safety_reason'][:72]
             banner.update(
                 f"[bold yellow]▶ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
-                f"[bold white]$ {rich_escape(cmd_short)}[/]\n"
+                f"[bold white]{rich_escape(cmd_display)}[/]\n"
                 f"[dim]⚠ {rich_escape(reason_short)}[/]\n"
                 f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
             )
