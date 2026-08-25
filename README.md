@@ -93,7 +93,7 @@ flowchart TD
    - **Fail-Safe to Human**: Graceful bail-out to manual approval on network timeout or ambiguity.
 4. **Self-Exclusion & Agent Isolation**:
    - The caller pane running the watcher is automatically excluded (`HERDR_PANE_ID`) to prevent self-recursive auto-approval.
-   - Strictly targets designated coding agents (`agent: "agy"` and `agent: "opencode"`) while ignoring non-target agents (Hermes, bare shells).
+   - Auto-targets all registered coding agents (`agy` and `opencode`) while ignoring non-target agents (Hermes, bare shells).
 5. **Auditing & History CLI (`schengen_history.py`)**:
    - Every approval and manual delegation is permanently logged to SQLite with timestamps, safety rationales, and exact decision layer attribution.
 
@@ -109,10 +109,7 @@ npx skills add ssh://git@salada-git:2222/InhouseOriented/herdr-schengen.git -g -
 
 ### Quick Commands & History CLI
 ```bash
-# 1. Start SmartGate daemon monitoring all active & future AGY panes
-python3 scripts/schengen_watcher.py --target auto
-
-# 1b. Auto-approve AGY + OpenCode panes (all registered target agents)
+# 1. Start SmartGate daemon monitoring all active & future AGY + OpenCode panes
 python3 scripts/schengen_watcher.py --target auto
 
 # 2. Check live status and active Herdr panes
@@ -132,20 +129,14 @@ python3 scripts/schengen_history.py --list-decisions
 python3 scripts/schengen_watcher.py --stop
 ```
 
-### Shell Aliases (`alias.zsh`)
-- `smartgate`: Start background SmartGate daemon.
-- `smartgate-status`: Show daemon PID, monitored panes, and recent SQLite audit events.
-- `smartgate-history`: Query recent approval and rejection audit events.
-- `smartgate-stop`: Terminate running SmartGate daemon.
-
 ---
 
 ## 🧪 Testing & CI Pipeline
 
-Comprehensive unit tests run with zero external dependencies in 0.02s:
+Comprehensive unit tests run with zero external dependencies in under a second:
 
 ```bash
-# Run full unit test suite (39 test cases)
+# Run full unit test suite
 python3 -m unittest discover -s tests -v
 
 # Run live LLM integration tests (optional)
