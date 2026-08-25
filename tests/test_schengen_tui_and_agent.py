@@ -27,10 +27,11 @@ from schengen_agent_llm import (
     get_current_active_escalation,
 )
 try:
-    from schengen_tui import SchengenTUIApp
+    from schengen_tui import SchengenTUIApp, AuditFullscreenModal
     HAS_TEXTUAL = True
 except ImportError:
     SchengenTUIApp = None  # type: ignore
+    AuditFullscreenModal = None  # type: ignore
     HAS_TEXTUAL = False
 
 
@@ -154,6 +155,19 @@ class TestSchengenTUIApp(unittest.TestCase):
         self.assertTrue(hasattr(app, "leader_pid"))
         if app.tui_lock_fd:
             app.tui_lock_fd.close()
+
+    def test_active_target_banner_height_increased(self):
+        assert SchengenTUIApp is not None
+        css = SchengenTUIApp.CSS
+        self.assertIn("#active-target-banner", css)
+        self.assertIn("height: 6;", css)
+
+    def test_audit_fullscreen_modal_instantiation(self):
+        assert AuditFullscreenModal is not None
+        modal = AuditFullscreenModal()
+        self.assertIsNotNone(modal)
+        self.assertIn("AuditFullscreenModal", modal.CSS)
+        self.assertIn("98%", modal.CSS)
 
     def test_chat_plain_buffer_recording_and_clear(self):
         assert SchengenTUIApp is not None

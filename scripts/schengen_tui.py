@@ -28,6 +28,7 @@ from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
     DataTable,
@@ -67,6 +68,71 @@ def format_local_time(iso_ts: str) -> str:
 class UnfocusableRichLog(RichLog):
     """RichLog subclass that cannot be focused."""
     can_focus = False
+
+
+class AuditFullscreenModal(ModalScreen):
+    """Fullscreen expanded view for Recent Audit Ledger with full single-line command display."""
+    CSS = """
+    AuditFullscreenModal {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.85);
+    }
+    #audit-modal-dialog {
+        width: 98%;
+        height: 94%;
+        background: $surface-darken-1;
+        border: tall $accent;
+        padding: 1;
+        layout: vertical;
+    }
+    #audit-modal-table {
+        width: 100%;
+        height: 1fr;
+        background: $surface;
+        border: solid $surface-lighten-1;
+        margin-top: 1;
+        margin-bottom: 1;
+    }
+    #audit-modal-help {
+        dock: bottom;
+        color: $text-muted;
+        text-align: center;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "app.pop_screen", "Back (ESC)", show=True),
+        Binding("q", "app.pop_screen", "Close (q)", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="audit-modal-dialog"):
+            yield Label("[bold cyan]📜 Schengen Security Audit Ledger (Fullscreen Maximize)[/]")
+            yield DataTable(id="audit-modal-table")
+            yield Label("[dim]Press [bold yellow]ESC[/] to return · ↑/↓ navigate rows · ←/→ horizontal scroll for full single-line command[/]", id="audit-modal-help")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#audit-modal-table", DataTable)
+        table.clear(columns=True)
+        table.add_columns("ID", "Time", "Pane", "Agent", "Verdict", "Layer", "Reason", "Full Command Line")
+        table.cursor_type = "row"
+        logs = get_recent_audit_logs(limit=100)
+        for log in logs:
+            dec = log['decision']
+            badge = f"[green]APPROVED[/]" if "APPROVE" in dec else f"[red]ESCALATED[/]"
+            full_cmd = log['raw_command'].replace("\n", " ").strip()
+            time_str = format_local_time(log['timestamp'])
+            table.add_row(
+                f"#{log['id']}",
+                time_str,
+                log['pane_id'],
+                log.get('agent_kind', 'agy'),
+                badge,
+                log.get('decision_layer', 'SHELL_AST'),
+                log.get('safety_reason', '')[:45],
+                rich_escape(full_cmd)
+            )
+        table.focus()
 
 
 TUI_LOCK_FILE = Path.home() / ".local" / "state" / "herdr-schengen" / "schengen_tui.lock"
@@ -119,7 +185,7 @@ class SchengenTUIApp(App):
     }
     /* Active escalation: left accent line only, no solid fill */
     #active-target-banner {
-        height: 4;
+        height: 6;
         background: $surface-darken-1;
         border-left: heavy $warning;
         border-top: solid $surface-lighten-1;
@@ -251,7 +317,7 @@ class SchengenTUIApp(App):
             yield Static(id="role-box")
             yield Label("⚡ Token & Cache Meter", classes="section-title")
             yield Static(id="token-meter-box")
-            yield Label("📜 Recent Audits (Last 10)", classes="section-title")
+            yield Label("📜 Recent Audits (Click/Enter: ⛶ Fullscreen)", classes="section-title")
             yield DataTable(id="audit-table")
             yield Label("🚨 Pending Escalations Queue", classes="section-title")
             yield ListView(id="escalation-list")
@@ -370,9 +436,10 @@ class SchengenTUIApp(App):
                 cmd_short = cmd_short[:72] + "…"
             reason_short = active_esc['safety_reason'][:56]
             banner.update(
-                f"[yellow]▶ #{active_id}[/]  [white]{active_esc['pane_id']}[/]  [dim]{active_esc.get('agent_kind','agent')}[/]\n"
-                f"[white]$ {rich_escape(cmd_short)}[/]\n"
-                f"[dim]⚠ {rich_escape(reason_short)}[/]"
+                f"[bold yellow]▶ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                f"[bold white]$ {rich_escape(cmd_short)}[/]\n"
+                f"[dim]⚠ {rich_escape(reason_short)}[/]\n"
+                f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
             )
 
             # STRICT SEQUENTIAL FIFO: Only CONTROLLER awakens/delivers chat for active escalation
@@ -403,7 +470,11 @@ class SchengenTUIApp(App):
                 self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
 
         else:
-            banner.update("[dim]✔ No active escalations  —  queue clear[/]")
+            banner.update(
+                "\n[bold green]✔ No active escalations  —  Queue clear[/]\n"
+                "[dim]🛡️  Autonomous border control active across all Herdr workspaces[/]\n"
+                "[dim]   Listening for Gray-Zone mutations and critical AST denylists[/]"
+            )
             if self._last_active_id is not None:
                 self._write(f"\n[dim]{'─'*20} ✔ Escalation #{self._last_active_id} resolved {'─'*20}[/]\n")
                 self._last_active_id = None
@@ -459,6 +530,14 @@ class SchengenTUIApp(App):
                         )
                     )
                 )
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "audit-table":
+            self.push_screen(AuditFullscreenModal())
+
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        if event.data_table.id == "audit-table":
+            self.push_screen(AuditFullscreenModal())
 
     def on_resize(self, event: events.Resize) -> None:
         self.update_radar_data(force=True)
