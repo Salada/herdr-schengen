@@ -156,15 +156,6 @@ class SchengenTUIApp(App):
         margin-top: 1;
         margin-bottom: 1;
     }
-    #role-box {
-        width: 14;
-        height: 100%;
-        background: $surface-darken-1;
-        border: solid $surface-lighten-1;
-        padding: 0;
-        content-align: center middle;
-        margin-right: 1;
-    }
     #status-box {
         width: 1fr;
         height: 100%;
@@ -174,9 +165,19 @@ class SchengenTUIApp(App):
         content-align: center middle;
     }
     #btn-toggle-guard {
-        width: 11;
+        width: 12;
         height: 100%;
         margin-left: 1;
+        min-width: 10;
+        padding: 0;
+    }
+    #role-box {
+        height: 4;
+        background: $surface-darken-1;
+        border: solid $surface-lighten-1;
+        padding: 0 1;
+        margin-bottom: 1;
+        content-align: left middle;
     }
     #token-meter-box {
         height: 7;
@@ -245,9 +246,9 @@ class SchengenTUIApp(App):
         # Right: Compact Radar with Token Meter
         with Vertical(id="radar-column"):
             with Horizontal(id="status-container"):
-                yield Static(id="role-box")
                 yield Static(id="status-box")
                 yield Button("⚡ Toggle", id="btn-toggle-guard", variant="warning")
+            yield Static(id="role-box")
             yield Label("⚡ Token & Cache Meter", classes="section-title")
             yield Static(id="token-meter-box")
             yield Label("📜 Recent Audits (Last 10)", classes="section-title")
@@ -330,12 +331,12 @@ class SchengenTUIApp(App):
         if not self._columns_initialized:
             return
 
-        # 0. Update Role header box
+        # 0. Update Role header box (full width, dedicated panel)
         role_box = self.query_one("#role-box", Static)
         if self.is_controller:
-            role_box.update(f"[bold green]👑 CTRL[/]\n[dim]PID {os.getpid()}[/]")
+            role_box.update(f"[bold green]👑 CONTROLLER MODE[/]  [dim]PID {os.getpid()}[/]\n[dim]Autonomous LLM & Key Injection active[/]")
         else:
-            role_box.update(f"[bold yellow]👁 OBS[/]\n[dim]Ldr {self.leader_pid or 'active'}[/]")
+            role_box.update(f"[bold yellow]👁 OBSERVER MODE[/]  [dim]Leader PID {self.leader_pid or 'active'}[/]\n[dim]Read-only monitoring (Actions disabled)[/]")
 
         # 1. Update status header box (muted tones — accent only on state)
         locks = list_active_guard_locks()
