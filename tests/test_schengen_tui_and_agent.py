@@ -109,6 +109,7 @@ class TestSchengenTUIApp(unittest.TestCase):
     """Test TUI components, CSS constraints, and clipboard interactions."""
 
     def test_tui_app_instantiation(self):
+        assert SchengenTUIApp is not None
         app = SchengenTUIApp()
         self.assertIsNotNone(app)
         self.assertEqual(app._chat_plain, [])
@@ -116,6 +117,7 @@ class TestSchengenTUIApp(unittest.TestCase):
         self.assertFalse(app._processing_chat)
 
     def test_css_command_palette_width_constraint(self):
+        assert SchengenTUIApp is not None
         css = SchengenTUIApp.CSS
         self.assertIn("CommandPalette", css)
         self.assertIn("width: 72;", css)
@@ -123,12 +125,14 @@ class TestSchengenTUIApp(unittest.TestCase):
         self.assertIn("max-height: 60%;", css)
 
     def test_css_muted_palette_colors(self):
+        assert SchengenTUIApp is not None
         css = SchengenTUIApp.CSS
         # Muted design: avoid solid orange background, use warning border-left
         self.assertIn("border-left: heavy $warning;", css)
         self.assertIn("background: $surface-darken-1;", css)
 
     def test_clear_chat_action(self):
+        assert SchengenTUIApp is not None
         app = SchengenTUIApp()
         app._chat_plain = ["message 1", "message 2"]
         # Clear buffer
@@ -136,11 +140,13 @@ class TestSchengenTUIApp(unittest.TestCase):
         self.assertEqual(len(app._chat_plain), 0)
 
     def test_copy_chat_empty(self):
+        assert SchengenTUIApp is not None
         app = SchengenTUIApp()
         app._chat_plain.clear()
         self.assertEqual(len(app._chat_plain), 0)
 
     def test_chat_plain_buffer_recording_and_clear(self):
+        assert SchengenTUIApp is not None
         app = SchengenTUIApp()
         app.query_one = MagicMock()
         app._write("[bold green]🛡️ System online[/]")

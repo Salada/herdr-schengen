@@ -464,6 +464,9 @@ class SchengenAgentChat:
         messages.append({"role": "user", "content": user_text})
 
         # Phase-aware clients: Inspector uses tool-calling model, Judge uses adjudication model
+        if httpx is None:
+            return "Error: 'httpx' library is required for LLM agent API calls."
+
         inspector_client = httpx.AsyncClient(timeout=45.0)
         judge_client = (
             httpx.AsyncClient(timeout=45.0)
