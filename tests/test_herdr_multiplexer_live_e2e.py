@@ -85,10 +85,8 @@ class TestHerdrMultiplexerLiveE2E(unittest.TestCase):
             self.assertIn("HERDR_LIVE_E2E_TOKEN_999", read_proc.stdout)
 
         finally:
-            # 5. Clean teardown: close test pane
-            subprocess.run(["herdr", "pane", "send-keys", new_pane_id, "ctrl+c"], capture_output=True, timeout=3.0)
-            subprocess.run(["herdr", "pane", "send-text", new_pane_id, "exit"], capture_output=True, timeout=3.0)
-            subprocess.run(["herdr", "pane", "send-keys", new_pane_id, "enter"], capture_output=True, timeout=3.0)
+            # 5. Clean teardown: close test pane via Herdr socket API
+            subprocess.run(["herdr", "pane", "close", new_pane_id], capture_output=True, timeout=5.0)
 
 
 if __name__ == "__main__":
