@@ -115,6 +115,11 @@ def main():
         help="Display active pending escalations requiring human/agent review",
     )
     parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Output full dashboard summary (recent 10 audits + 5 escalations) as JSON or text",
+    )
+    parser.add_argument(
         "--cleanup-pending",
         action="store_true",
         help="Clean up stale pending escalations (marks expired/stale entries)",
@@ -203,6 +208,34 @@ def main():
                     for line in snapshot.splitlines()[-20:]:
                         print(f"           {line}")
                 print("-" * 90)
+        return
+
+    if args.summary:
+        from guard_db import get_session_dashboard_summary
+
+        summary_data = get_session_dashboard_summary(
+            pane_id=args.pane,
+            audit_limit=args.limit if args.limit else 10,
+            escalation_limit=5,
+            include_terminal_escalations=True,
+        )
+        if args.json:
+            print(json.dumps(summary_data, indent=2))
+        else:
+            print(f"📊 SmartGate Session Dashboard Summary [Pane: {args.pane or 'all'}]:")
+            print("=" * 90)
+            print(f"📜 Recent Audits ({len(summary_data['recent_audits'])}):")
+            for r in summary_data["recent_audits"]:
+                symbol = "✅" if r["decision"] in ("AUTO_APPROVED", "ALLOWLIST_BYPASS") else "🚨"
+                cmd_prev = (r["raw_command"][:60] + "...") if len(r["raw_command"]) > 60 else r["raw_command"]
+                print(f"  {symbol} [{r['timestamp'][:19]}] #{r['id']:<3} {r['pane_id']:<6} | {r['decision']:<16} | {cmd_prev}")
+            print("-" * 90)
+            print(f"🚨 Escalations Timeline ({len(summary_data['escalations'])}):")
+            for esc in summary_data["escalations"]:
+                st = esc.get("status", "UNKNOWN")
+                status_icon = "⏳" if st == "PENDING" else ("✅" if st == "RESOLVED" else "🛑")
+                cmd_prev = (esc["raw_command"][:60] + "...") if len(esc["raw_command"]) > 60 else esc["raw_command"]
+                print(f"  {status_icon} #{esc['id']:<3} [{st:<12}] Pane: {esc['pane_id']} | {esc['decision_layer']} | {cmd_prev}")
         return
 
     # 1. State File Paths
