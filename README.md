@@ -15,7 +15,7 @@
 > This repository (`InhouseOriented/herdr-schengen`) is an **actively maintained, tier-1 core developer asset**. It is **NOT** a one-off experimental script.
 >
 > 1. **Continuous Rule & Heuristic Refinement**: Security patterns, AST evaluators, and denylist boundaries are continually updated to adapt to evolving multi-agent behaviors and shell patterns.
-> 2. **Automated Weekly Quality Assurance**: Weekly scheduled CI runs ([`.forgejo/workflows/llm_security_eval.yml`](.forgejo/workflows/llm_security_eval.yml)) execute full unit and live integration tests against DeepSeek / GPT-OSS 120B to prevent regression.
+> 2. **Automated Weekly Quality Assurance**: Weekly scheduled CI runs ([`.forgejo/workflows/llm_security_eval.yml`](.forgejo/workflows/llm_security_eval.yml)) execute full unit and live integration tests against the OpenAI-compatible cloud judge to prevent regression.
 > 3. **Active Issue-First Governance**: Bug reports, edge-case vulnerability disclosures, and feature proposals are actively triaged via the [Forgejo Issue Tracker](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/issues).
 > 4. **Long-Term Dotfiles Integration**: This repository serves as the definitive upstream source for all agent skill syncs (`npx skills`, Chezmoi dotfiles). It will remain maintained and backward-compatible.
 
@@ -140,9 +140,9 @@ Comprehensive unit tests run with zero external dependencies in under a second:
 python3 -m unittest discover -s tests -v
 
 # Run live LLM integration tests (optional)
-GUARD_LLM_ENDPOINT="https://api.deepseek.com/v1/chat/completions" \
-GUARD_LLM_MODEL="deepseek-chat" \
-DEEPSEEK_API_KEY="sk-..." \
+OPENAI_BASE_URL="https://api.openai.com/v1" \
+GUARD_LLM_MODEL="gpt-4o-mini" \
+OPENAI_API_KEY="sk-..." \
 python3 -m unittest tests/test_llm_evaluator_integration.py
 ```
 

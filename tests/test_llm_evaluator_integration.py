@@ -24,7 +24,7 @@ class TestLLMEvaluatorIntegration(unittest.TestCase):
     def setUp(self):
         self.endpoint = os.environ.get("GUARD_LLM_ENDPOINT")
         self.model = os.environ.get("GUARD_LLM_MODEL")
-        self.api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("GUARD_LLM_API_KEY") or ""
+        self.api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("GUARD_LLM_API_KEY") or ""
 
         if not self.endpoint or not self.model or not self.api_key:
             self.skipTest("Live LLM credentials not configured in environment.")
