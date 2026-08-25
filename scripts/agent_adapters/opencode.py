@@ -44,6 +44,42 @@ def strip_tui(text: str) -> str:
 _COST_METADATA_RE = re.compile(r"^\d+(?:\.\d+)?\s*(?:spent|tokens|k|m)?$", re.IGNORECASE)
 
 
+# OpenCode TUI auxiliary text (right sidebar + bottom status bar) that leaks into
+# the captured pane text and corrupts command extraction. These fragments are not
+# part of the agent's command and MUST be stripped so parsing is stable across
+# polls (otherwise the TOCTOU re-parse differs from the original req_cmd and
+# falsely aborts injection, or a garbled command is evaluated).
+_LEAKED_TEXT_RE = re.compile(
+    r"(?:"
+    r"~[^\s]*:[^\s]+"                                    # status bar "~/code/herdr-schengen:main"
+    r"|\d[\d,]*\s+tokens?"                               # "106,830 tokens" (token counter)
+    r"|\d+(?:\.\d+)?% used"                              # "13% used"
+    r"|\d+(?:\.\d+)?[KM]\s*\(\d+%\)\s*·\s*\$[\d.]+"      # "106.8K (11%) · $0.05"
+    r"|\$\d+\.\d+\s+spent"                               # "$0.07 spent"
+    r"|\d+(?:\.\d+)?% used"                              # "13% used"
+    r"|LSPs? will activate as files are read"            # LSP hint
+    r"|\bsalada-nas Connected\b"                         # MCP status
+    r"|• pyright"                                        # LSP server name
+    r"|OpenCode \d+\.\d+\.\d+"                           # version
+    r"|Build · DeepSeek[^\s]*"                           # model name
+    r"|esc interrupt"                                    # keybinding
+    r"|ctrl\+[a-z]+ [a-z]+"                              # "ctrl+f fullscreen" / "ctrl+p commands"
+    r"|\bQUEUED\b"                                       # session status
+    r"|\bThinking\b|\bReading file[^\s]*\b|\bWriting command[^\s]*\b"  # progress indicators
+    r"|\bLSP\b|\bMCP\b"                                  # standalone sidebar labels
+    r")"
+)
+
+
+def strip_leaked_text(text: str) -> str:
+    """Strip OpenCode TUI sidebar/status-bar fragments that leak into pane text.
+
+    Preserves newlines (the region/command extraction relies on line structure);
+    the extracted command itself is whitespace-collapsed by the callers.
+    """
+    return _LEAKED_TEXT_RE.sub(" ", text)
+
+
 def _looks_like_cost_metadata(cmd: str) -> bool:
     """True if the extracted string is a cost/token metadata value (e.g. '0.93 spent')."""
     return bool(_COST_METADATA_RE.match(cmd.strip()))
@@ -110,7 +146,7 @@ class OpenCodeAdapter(AgentAdapter):
         (e.g. a code diff printing "Always allow") and misclassify the live
         permission dialog as a confirm stage -> hang.
         """
-        text = strip_tui(visible_text)
+        text = strip_leaked_text(strip_tui(visible_text))
         header_idx = text.rfind("Permission required")
         tail = text[header_idx:] if header_idx != -1 else text
         if any(m in tail for m in ALWAYS_CONFIRM_MARKERS):
@@ -139,7 +175,15 @@ class OpenCodeAdapter(AgentAdapter):
         instead of the current request, causing a fail-open where a dangerous command is
         auto-approved as if it were benign.
         """
-        text = strip_tui(visible_text)
+        text = strip_leaked_text(strip_tui(visible_text))
+
+        # 0. Human question dialog ("↑↓ select  enter submit  esc dismiss"): the
+        #    agent is asking the user a question. Never auto-approve; return a
+        #    sentinel so the watcher escalates it to the human instead of silently
+        #    skipping it.
+        if re.search(r"enter\s+submit|esc\s+dismiss", text):
+            return "question"
+
         if self.classify_dialog_stage(text) != "permission":
             return None
 

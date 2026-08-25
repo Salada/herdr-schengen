@@ -105,11 +105,12 @@ CRITICAL_SHELL_PATTERNS = [
     ),
     (r"\bgit\s+reset\s+--hard\b", "Destructive Git reset"),
     (r"\bgit\s+clean\s+-[fF]", "Destructive Git clean"),
+    (r"\bps\s+.*\b(?:auxe|eww)\b|\bps\s+e\b", "Process listing exposing environment variables (ps e) — secret leakage risk"),
     (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Denial of Service / Fork bomb"),
     # Disk, Volume, & Filesystem Manipulation (Linux & macOS)
     (
         r"\bdiskutil\s+(eraseVolume|eraseDisk|partitionDisk|reformat|zeroDisk|randomDisk|secureErase|splitPartition|mergePartitions|apfs\s+(deleteVolume|deleteContainer|deleteSnapshot|eraseVolume)|cs\s+delete|appleRAID\s+delete)\b|"
-        r"\b(mkfs|newfs_[a-z0-9_]+|dd|fdisk|pdisk|parted|gpt)\b|"
+        r"\b(mkfs|newfs_[a-z0-9_]+|dd|fdisk|pdisk|parted|gpt\s+[a-z]+)\b|"
         r"\basr\s+restore\b.*(--erase|-erase)|"
         r"\btmutil\s+(delete|deletelocalsnapshots|deleteappliancesnapshot)\b",
         "Destructive disk / volume formatting and partitioning",
@@ -918,6 +919,10 @@ def _audit_static_shell_command(
     if cmd_str == "doom_loop":
         return False, "Doom loop detected; requires human review", DecisionLayer.SHELL_CRITICAL
 
+    # 0a-4b. opencode human question dialogs must NEVER be auto-approved.
+    if cmd_str == "question":
+        return False, "Agent asked the user a question; requires human input", DecisionLayer.SHELL_CRITICAL
+
     # 0a-5. Unhandled opencode dialogs: route to the second-tier cloud judge (fail-closed to human).
     if cmd_str.startswith("unhandled_dialog "):
         cloud_safe, cloud_reason = audit_with_cloud_judge(
@@ -1130,9 +1135,9 @@ def derive_taxonomy(
             mechanism = "cloud-judge-verified"
         else:
             mechanism = "fast-track-verified"
-    elif cmd_str == "doom_loop" or cmd_str.startswith("unhandled_dialog "):
+    elif cmd_str == "doom_loop" or cmd_str == "question" or cmd_str.startswith("unhandled_dialog "):
         consequence = Consequence.INTEGRITY
-        mechanism = "doom-loop" if cmd_str == "doom_loop" else "unhandled-dialog"
+        mechanism = "doom-loop" if cmd_str == "doom_loop" else ("question" if cmd_str == "question" else "unhandled-dialog")
     elif layer == DecisionLayer.SECRET_GUARD:
         consequence = Consequence.EXFILTRATION
         mechanism = "secret-path"

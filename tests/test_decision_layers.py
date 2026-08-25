@@ -59,6 +59,25 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
+        # Process listing that exposes environment variables (secret leakage)
+        for ps_cmd in ("ps e", "ps auxe", "ps eww"):
+            safe, reason, layer = audit_shell_command(ps_cmd)
+            self.assertFalse(safe, f"Expected '{ps_cmd}' to be blocked (env var leakage)")
+            self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+        # Safe process listing (no env flag)
+        for ps_cmd in ("ps -e", "ps aux"):
+            safe, reason, layer = audit_shell_command(ps_cmd)
+            self.assertTrue(safe, f"Expected '{ps_cmd}' to be allowed")
+
+    def test_gpt_model_name_not_disk_command(self):
+        # Regression: "gpt-4o-mini" (OpenAI model name) must not match the `gpt`
+        # disk-partitioning tool. `gpt destroy`/`gpt create` must still be blocked.
+        safe, reason, layer = audit_shell_command('git commit -m "use gpt-4o-mini model"')
+        self.assertTrue(safe, f"Expected model-name commit to be allowed: {reason}")
+        safe, reason, layer = audit_shell_command("gpt destroy /dev/disk0")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+
         # macOS Disk & Partition destruction
         critical_macos_cmds = [
             "diskutil eraseVolume APFS Untitled disk3s1",
