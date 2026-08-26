@@ -63,6 +63,7 @@ This repository serves as the single source of truth (SSOT) for the Schengen Sec
 | **[ADR-007](./docs/adr-007-graceful-dynamic-reload-and-target-scoped-lockfiles.md)** | Graceful Dynamic Reload (SIGHUP) & Target-Scoped Lockfile Architecture |
 | **[ADR-008](./docs/adr-008-opencode-alternative-host-runtime.md)** | OpenCode as Alternative Host Runtime (Agent-Agnostic Session-Bound Governance) |
 | **[ADR-009](./docs/adr-009-smartgate-tui-dual-model-and-fifo-governance.md)** | SmartGate TUI, Dual-Model Phase Routing, and Strict Sequential FIFO Escalation Governance |
+| **[ADR-010](./docs/adr-010-modular-architecture-core-tools-cmd-adapters.md)** | Modular Architecture: Core, Tools, Cmd, and Adapters Separation |
 
 ---
 
