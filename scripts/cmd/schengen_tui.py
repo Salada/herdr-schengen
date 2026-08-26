@@ -74,6 +74,7 @@ from core.guard_db import (
     get_adjudications_for_audit,
     get_answer_language,
     get_audit_log_by_id,
+    get_escalation_resolution,
     get_instruction_delivery_config,
     get_pending_escalations,
     get_recent_audit_logs,
@@ -97,6 +98,17 @@ def format_local_time(iso_ts: str) -> str:
         return local_dt.strftime("%H:%M")
     except Exception:
         return iso_ts.split("T")[-1][:5] if "T" in iso_ts else iso_ts[:5]
+
+
+def format_resolution_badge(resolution: Optional[str], short: bool = False) -> str:
+    """Render the post-escalation processing status (APPROVED/REJECTED/UNANSWERED)."""
+    if resolution == "APPROVED":
+        return "[green]AP[/]" if short else "[green]APPROVED[/]"
+    if resolution == "REJECTED":
+        return "[red]RJ[/]" if short else "[red]REJECTED[/]"
+    if resolution == "UNANSWERED":
+        return "[yellow]UA[/]" if short else "[yellow]UNANSWERED[/]"
+    return "[dim]—[/]"
 
 
 # --- Mouse-event diagnostic logging (gated by SCHENGEN_MOUSE_DEBUG) ---------
@@ -274,7 +286,7 @@ class AuditFullscreenModal(ModalScreen):
     def on_mount(self) -> None:
         table = self.query_one("#audit-modal-table", DataTable)
         table.clear(columns=True)
-        table.add_columns("ID", "Time", "Pane", "Agent", "Verdict", "Layer", "Reason", "Full Command Line")
+        table.add_columns("ID", "Time", "Pane", "Agent", "Verdict", "Res", "Layer", "Reason", "Full Command Line")
         table.cursor_type = "row"
         self._logs = get_recent_audit_logs(limit=100)
         for log in self._logs:
@@ -288,6 +300,7 @@ class AuditFullscreenModal(ModalScreen):
                 log['pane_id'],
                 log.get('agent_kind', 'agy'),
                 badge,
+                format_resolution_badge(log.get('resolution'), short=True),
                 log.get('decision_layer', 'SHELL_AST'),
                 log.get('safety_reason', '')[:45],
                 rich_escape(full_cmd)
@@ -400,10 +413,12 @@ class AuditDetailModal(ModalScreen):
 
         dec = log.get("decision", "")
         badge = "[green]APPROVED[/]" if "APPROVE" in str(dec) else "[red]ESCALATED[/]"
+        resolution = get_escalation_resolution(log.get("pane_id", ""), log.get("raw_command", ""))
         fields = (
             f"[bold]ID[/]: #{log['id']}    [bold]Time[/]: {format_local_time(log.get('timestamp', ''))}\n"
             f"[bold]Pane[/]: {log.get('pane_id', '')}    [bold]Agent[/]: {log.get('agent_kind', 'unknown')}\n"
-            f"[bold]Verdict[/]: {badge}    [bold]Layer[/]: {log.get('decision_layer', 'FAST_TRACK_AST')}\n"
+            f"[bold]Verdict[/]: {badge}    [bold]Resolution[/]: {format_resolution_badge(resolution)}\n"
+            f"[bold]Layer[/]: {log.get('decision_layer', 'FAST_TRACK_AST')}\n"
             f"[bold]Reason[/]: {rich_escape(str(log.get('safety_reason', '')))}\n"
             f"[bold]Origin[/]: {log.get('origin', 'A')}    [bold]Consequence[/]: {log.get('consequence', 'NONE')}    [bold]Mechanism[/]: {log.get('mechanism', 'none')}\n"
             f"[bold]Gate[/]: {log.get('gate_state', 'ENFORCE')}    [bold]Shadow[/]: {'ON' if log.get('shadow_mode') else 'OFF'}"
@@ -1148,7 +1163,7 @@ class SchengenTUIApp(App):
         # 4. Update 10 Audit Table
         audit_table = self.query_one("#audit-table", DataTable)
         recent_audits = get_recent_audit_logs(limit=10)
-        current_audit_hash = str([(a["id"], a["decision"]) for a in recent_audits])
+        current_audit_hash = str([(a["id"], a["decision"], a.get("resolution")) for a in recent_audits])
         
         if current_audit_hash != self._last_audit_hash:
             self._last_audit_hash = current_audit_hash
@@ -1160,7 +1175,17 @@ class SchengenTUIApp(App):
                 time_str = log['timestamp'][11:19] if len(log['timestamp']) >= 19 else log['timestamp']
                 
                 dec = log['decision']
-                badge = f"[green]OK[/]" if "APPROVE" in dec else f"[red]ES[/]"
+                resolution = log.get('resolution')
+                if "APPROVE" in dec:
+                    badge = "[green]OK[/]"
+                elif resolution == "APPROVED":
+                    badge = "[green]AP[/]"
+                elif resolution == "REJECTED":
+                    badge = "[red]RJ[/]"
+                elif resolution == "UNANSWERED":
+                    badge = "[yellow]UA[/]"
+                else:
+                    badge = "[red]ES[/]"
                 audit_table.add_row(time_str, log['pane_id'], badge, short_cmd)
 
         # 5. Update Recent Escalations List
