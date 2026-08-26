@@ -28,6 +28,11 @@ from schengen_agent_llm import (
     get_current_active_escalation,
 )
 try:
+    import asyncio
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     from schengen_tui import SchengenTUIApp, AuditFullscreenModal
     HAS_TEXTUAL = True
 except ImportError:
@@ -315,6 +320,13 @@ trash /tmp/scratch
 class TestTUIInputUX(unittest.TestCase):
     """Test TUI input textarea UX improvements (word-wrap, dynamic height, no palette)."""
 
+    def setUp(self):
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
     def test_command_palette_disabled(self):
         assert SchengenTUIApp is not None
         self.assertFalse(SchengenTUIApp.ENABLE_COMMAND_PALETTE)
@@ -389,6 +401,85 @@ class TestSequentialFifoQueue(unittest.TestCase):
         mock_pending.return_value = []
         active = get_current_active_escalation()
         self.assertIsNone(active)
+
+
+class TestTUIControllerObserverMode(unittest.TestCase):
+    """Test Controller and Observer role acquisition and permission segregation."""
+
+    def test_controller_role_acquisition_and_toggle_permission(self):
+        from schengen_tui import acquire_tui_role, SchengenTUIApp
+        fd, is_controller, leader_pid = acquire_tui_role()
+        try:
+            if is_controller and fd:
+                self.assertTrue(is_controller)
+                self.assertIsNone(leader_pid)
+                # Second attempt while lock is held must yield Observer role
+                fd2, is_controller2, leader_pid2 = acquire_tui_role()
+                try:
+                    self.assertFalse(is_controller2)
+                    self.assertEqual(leader_pid2, os.getpid())
+                finally:
+                    if fd2:
+                        fd2.close()
+        finally:
+            if fd:
+                fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_observer_toggle_daemon_rejected(self):
+        from schengen_tui import SchengenTUIApp
+        app = SchengenTUIApp()
+        app.is_controller = False  # Force Observer
+        msg = app.toggle_guard_daemon()
+        self.assertIn("관찰자 모드", msg)
+        if app.tui_lock_fd:
+            app.tui_lock_fd.close()
+
+
+class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
+    """Test /feature command execution and mouse text selection in TUI."""
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_feature_command_and_list_execution(self):
+        from schengen_tui import SchengenTUIApp
+        app = SchengenTUIApp()
+        async with app.run_test() as pilot:
+            w1 = app.process_user_chat("/feature TUI 알림 사운드 커스텀 --desc 볼륨 조절 지원 --priority HIGH")
+            await w1.wait()
+            await pilot.pause()
+            
+            w2 = app.process_user_chat("/features")
+            await w2.wait()
+            await pilot.pause()
+            
+            # Verify feature command response in chat plain buffer
+            plain_text = "\n".join(app._chat_plain)
+            self.assertIn("TUI 알림 사운드 커스텀", plain_text)
+            self.assertIn("/features", plain_text)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_chat_view_mouse_drag_selection(self):
+        from schengen_tui import SchengenTUIApp, FocusableRichLog
+        app = SchengenTUIApp()
+        async with app.run_test() as pilot:
+            chat = app.query_one("#chat-log", FocusableRichLog)
+            chat.write("Selectable Schengen Audit Message Line 1\nLine 2")
+            await pilot.pause()
+            
+            # Simulate mouse drag selection
+            await pilot.mouse_down(chat, offset=(0, 0))
+            await pilot.hover(chat, offset=(10, 0))
+            await pilot.mouse_up(chat, offset=(10, 0))
+            await pilot.pause()
+            
+            sel = app.screen.get_selected_text()
+            self.assertIsNotNone(sel)
+            self.assertTrue(len(sel) > 0)
+            self.assertEqual(app.clipboard, sel)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
 
 
 if __name__ == "__main__":

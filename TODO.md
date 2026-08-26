@@ -24,9 +24,9 @@ Design
 
 
 QA
-[] Controller/Observer mode 잘 동작하는지 확인해야함. 
-[] /feature 잘되는지 확인필요..
-[] chat view mouse selection 안되기때문에 적용후 사람에게 확인받고 qa반복하기 기존 PR이 머지되는거랑 상관없음.
+[x] Controller/Observer mode 잘 동작하는지 확인해야함. (PR #73) 
+[x] /feature 잘되는지 확인필요.. (PR #74)
+[x] chat view mouse selection 안되기때문에 적용후 사람에게 확인받고 qa반복하기 기존 PR이 머지되는거랑 상관없음. (PR #74)
 
 
 
@@ -35,3 +35,5 @@ Idea
 [] recent audits 의 scroll 비활성화 시킬것 ( fullscreen의 경우에는 chat view처럼 시인성있는 scrollview로 교체할것
 [] chat view에서 기존 llm call중단 시킬떄 esc를 특정 간격으로 두번누르면 중단되게 ( 단 recent audits fullscreen을 끌떄 esc는 이벤트에 쌓이면 안됨 )
 [] command 창이 new line이 넓어지면 자동으로 up방향으로 panel크기를 증가시켜서 최대한 전체 prompt가 보이게 할것. ( max-height는 맡기지만 기존 chat view에 overlap되어도됨 ) 
+[] observer mode일 경우에는 Ask gatekeeper... UI element 를 아예 비활성화 상태로 만들어버리기
+[] dotfile에 있는 redact관련 executable을 file read시에 읽게하여 비의도적 PII/Secret 누출 방지를 위해 최선을 다할것. 다만 redact는 dotfiles의 것을 사용하는게 아니라 가능하면 해당 레포에 가져와서 래핑하고 embeddable가능한 구조로 관리할것 

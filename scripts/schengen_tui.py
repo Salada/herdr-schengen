@@ -28,17 +28,23 @@ if hasattr(signal, "SIGHUP"):
         pass
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPTS_ROOT = SCRIPT_DIR.parent if SCRIPT_DIR.name in ("cmd", "core", "tools", "adapters") else SCRIPT_DIR
+for _p in (SCRIPTS_ROOT, SCRIPTS_ROOT / "core", SCRIPTS_ROOT / "tools", SCRIPTS_ROOT / "cmd", SCRIPTS_ROOT / "adapters"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
+from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.selection import Selection
+from textual.strip import Strip
 from textual.widgets import (
     Button,
     DataTable,
@@ -83,8 +89,66 @@ def format_local_time(iso_ts: str) -> str:
 
 
 class FocusableRichLog(RichLog):
-    """RichLog supporting keyboard focus, mouse scroll, selection, and page navigation."""
+    """RichLog supporting keyboard focus, mouse scroll, visual selection, and page navigation."""
     can_focus = True
+
+    def get_selection(self, selection: Selection) -> Optional[Tuple[str, str]]:
+        """Extract text under the user's mouse selection."""
+        text = "\n".join("".join(s.text for s in strip._segments) for strip in self.lines)
+        return selection.extract(text), "\n"
+
+    def selection_updated(self, selection: Optional[Selection]) -> None:
+        """Invalidate render cache on selection update."""
+        self._line_cache.clear()
+        self.refresh()
+
+    def _render_line(self, y: int, scroll_x: int, width: int) -> Strip:
+        """Render line with offset metadata and active text selection styling."""
+        if y >= len(self.lines):
+            return Strip.blank(width, self.rich_style)
+
+        key = (y + self._start_line, scroll_x, width, self._widest_line_width, self.text_selection)
+        if key in self._line_cache:
+            return self._line_cache[key]
+
+        line = self.lines[y].crop_extend(scroll_x, scroll_x + width, self.rich_style)
+
+        selection = self.text_selection
+        if selection is not None:
+            span = selection.get_span(y)
+            if span is not None:
+                start, end = span
+                selection_style = self.screen.get_component_rich_style("screen--selection")
+                new_segments = []
+                curr_x = 0
+                for seg in line._segments:
+                    seg_len = len(seg.text)
+                    seg_start = curr_x
+                    seg_end = curr_x + seg_len
+                    curr_x = seg_end
+                    if end != -1 and seg_start >= end:
+                        new_segments.append(seg)
+                    elif seg_end <= start:
+                        new_segments.append(seg)
+                    else:
+                        s = max(0, start - seg_start)
+                        e = seg_len if end == -1 else min(seg_len, end - seg_start)
+                        part1 = seg.text[:s]
+                        part2 = seg.text[s:e]
+                        part3 = seg.text[e:]
+                        base_style = seg.style or Style()
+                        sel_style = base_style + selection_style
+                        if part1:
+                            new_segments.append(Segment(part1, seg.style))
+                        if part2:
+                            new_segments.append(Segment(part2, sel_style))
+                        if part3:
+                            new_segments.append(Segment(part3, seg.style))
+                line = Strip(new_segments, line.cell_length)
+
+        line = line.apply_offsets(scroll_x, y)
+        self._line_cache[key] = line
+        return line
 
     def on_key(self, event: events.Key) -> None:
         if event.key == "pageup":
@@ -848,6 +912,16 @@ class SchengenTUIApp(App):
             self._write(f"[dim]  ✔ {n} lines copied to clipboard[/]")
         except Exception as e:
             self._write(f"[dim]  ✘ clipboard copy failed: {e}[/]")
+
+    def on_text_selected(self, event: events.TextSelected) -> None:
+        """Automatically copy mouse-dragged text selection to macOS and Textual clipboard."""
+        sel_text = self.screen.get_selected_text()
+        if sel_text:
+            self.copy_to_clipboard(sel_text)
+            try:
+                subprocess.run(["pbcopy"], input=sel_text.encode("utf-8"), capture_output=True, timeout=2.0)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
