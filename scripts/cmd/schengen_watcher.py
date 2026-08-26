@@ -854,6 +854,17 @@ def main():
                         last_processed_prompt.pop(pane_id, None)
                     continue
 
+                if req_cmd == "question":
+                    # Human question dialog (subjective). Never send a keystroke,
+                    # never approve/reject, and never escalate — leave it for the
+                    # user to answer manually in the pane. Skipping avoids polluting
+                    # the escalation queue with an un-answerable prompt.
+                    print(
+                        f"❓ [QUESTION] Pane {pane_id} ({agent_kind}) asked the user a question; leaving it for manual response.",
+                        flush=True,
+                    )
+                    continue
+
                 cached = last_processed_prompt.get(pane_id)
                 now = time.time()
 

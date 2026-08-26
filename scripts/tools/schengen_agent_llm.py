@@ -52,8 +52,10 @@ from core.feature_db import (
 )
 from core.guard_db import (
     get_db_connection,
+    get_instruction_delivery_config,
     get_pending_escalations,
     get_recent_audit_logs,
+    record_adjudication,
     resolve_escalation,
 )
 from adapters.herdr_client import get_pane_text
@@ -368,17 +370,21 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             agent_kind = esc_row.get("agent_kind", "agy") if esc_row else "agy"
             
             resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
+            record_adjudication(esc_id, target_pane, agent_kind, "APPROVE", feedback)
+
+            cfg = get_instruction_delivery_config()
+            send_instruction = bool(cfg.get("send_approve_instruction", False))
 
             if target_pane:
-                if agent_kind == "agy" and feedback:
+                if agent_kind == "agy" and send_instruction and feedback:
                     # AGY Tab Amend Flow: Tab -> send feedback note -> Enter
                     subprocess.run(["herdr", "agent", "send-keys", target_pane, "tab"], capture_output=True, timeout=5.0)
                     subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
                     subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
                 else:
-                    # Standard Enter Flow
+                    # Standard Enter Flow (approval keystroke only; instruction is gated)
                     subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
-                    if feedback:
+                    if send_instruction and feedback:
                         subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
                         subprocess.run(["herdr", "pane", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
 
@@ -411,10 +417,14 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             target_pane = esc_row.get("pane_id") if esc_row else ""
 
             resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="CANCELLED")
+            record_adjudication(esc_id, target_pane, "", "REJECT", feedback)
+
+            cfg = get_instruction_delivery_config()
+            send_instruction = bool(cfg.get("send_reject_instruction", True))
 
             if target_pane:
                 subprocess.run(["herdr", "agent", "send-keys", target_pane, "escape"], capture_output=True, timeout=5.0)
-                if feedback:
+                if send_instruction and feedback:
                     subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
                     subprocess.run(["herdr", "pane", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
 

@@ -42,6 +42,7 @@ from rich.text import Text
 from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.drivers.linux_driver import LinuxDriver
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.selection import Selection
@@ -68,9 +69,11 @@ from core.feature_db import (
 )
 from core.guard_db import (
     LOG_DIR,
+    get_instruction_delivery_config,
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
+    set_instruction_delivery_config,
 )
 from tools.schengen_agent_llm import SchengenAgentChat, get_current_active_escalation
 from cmd.schengen_watcher import list_active_guard_locks
@@ -458,6 +461,24 @@ def acquire_tui_role() -> Tuple[Optional[Any], bool, Optional[int]]:
         return None, False, leader_pid
 
 
+class NoPixelMouseDriver(LinuxDriver):
+    """LinuxDriver that never enables SGR pixel mouse (1016) or in-band resize (2048).
+
+    The Herdr terminal emulator reports in-band window resize (2048) as supported
+    but does NOT implement SGR pixel mouse (1016). Textual responds by sending
+    2048h + 1016h; the terminal then sends a resize report with pixel dimensions,
+    which makes Textual's parser set mouse_pixels=True and divide the (cell)
+    SGR coordinates as pixels — collapsing every click to the top-left. Disabling
+    both requests keeps the parser in cell mode.
+    """
+
+    def _enable_mouse_pixels(self) -> None:
+        pass
+
+    def _enable_in_band_window_resize(self) -> None:
+        pass
+
+
 class SchengenTUIApp(App):
     CSS = """
     Screen {
@@ -615,7 +636,7 @@ class SchengenTUIApp(App):
     ]
 
     def __init__(self):
-        super().__init__()
+        super().__init__(driver_class=NoPixelMouseDriver)
         self.tui_lock_fd, self.is_controller, self.leader_pid = acquire_tui_role()
         self.agent = SchengenAgentChat()
         self._columns_initialized = False
@@ -667,6 +688,9 @@ class SchengenTUIApp(App):
                 with Horizontal(id="status-container"):
                     yield Static(id="status-box")
                     yield Button("⚡ Toggle", id="btn-toggle-guard", variant="warning")
+                with Horizontal(id="instruction-control"):
+                    yield Button("📤 Approve Instr: OFF", id="btn-toggle-approve-instr")
+                    yield Button("📤 Reject Instr: ON", id="btn-toggle-reject-instr")
                 yield Static(id="role-box")
                 yield Label("⚡ Token & Cache Meter", classes="section-title")
                 yield Static(id="token-meter-box")
@@ -718,6 +742,8 @@ class SchengenTUIApp(App):
         table.add_columns("Time", "P", "V", "Cmd")
         table.cursor_type = "row"
         self._columns_initialized = True
+
+        self._refresh_instruction_buttons()
 
         existing = get_pending_escalations(include_delivered=True)
         for e in existing:
@@ -777,6 +803,36 @@ class SchengenTUIApp(App):
             msg = self.toggle_guard_daemon()
             self._write(f"[bold yellow]⚙️ [Daemon Control]:[/] {msg}")
             self.update_radar_data(force=True)
+        elif event.button.id == "btn-toggle-approve-instr":
+            cfg = get_instruction_delivery_config()
+            new_val = not cfg.get("send_approve_instruction", False)
+            set_instruction_delivery_config(send_approve_instruction=new_val)
+            self._write(
+                f"[bold yellow]📤 [Instruction Delivery]:[/] Approve instruction {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
+            )
+            self._refresh_instruction_buttons()
+        elif event.button.id == "btn-toggle-reject-instr":
+            cfg = get_instruction_delivery_config()
+            new_val = not cfg.get("send_reject_instruction", True)
+            set_instruction_delivery_config(send_reject_instruction=new_val)
+            self._write(
+                f"[bold yellow]📤 [Instruction Delivery]:[/] Reject instruction {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
+            )
+            self._refresh_instruction_buttons()
+
+    def _refresh_instruction_buttons(self) -> None:
+        """Sync the instruction-delivery toggle button labels to the current config."""
+        cfg = get_instruction_delivery_config()
+        try:
+            approve_btn = self.query_one("#btn-toggle-approve-instr", Button)
+            approve_btn.label = "📤 Approve Instr: ON" if cfg.get("send_approve_instruction") else "📤 Approve Instr: OFF"
+        except Exception:
+            pass
+        try:
+            reject_btn = self.query_one("#btn-toggle-reject-instr", Button)
+            reject_btn.label = "📤 Reject Instr: ON" if cfg.get("send_reject_instruction") else "📤 Reject Instr: OFF"
+        except Exception:
+            pass
 
     def action_toggle_daemon(self) -> None:
         msg = self.toggle_guard_daemon()
@@ -1138,5 +1194,41 @@ class SchengenTUIApp(App):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Herdr Schengen Security Gatekeeper TUI")
+    parser.add_argument(
+        "--send-approve-instruction",
+        dest="send_approve_instruction",
+        action="store_true",
+        default=None,
+        help="Send the gatekeeper approval instruction/feedback to the target pane (default: off).",
+    )
+    parser.add_argument(
+        "--no-send-approve-instruction",
+        dest="send_approve_instruction",
+        action="store_false",
+        help="Do NOT send the approval instruction (default).",
+    )
+    parser.add_argument(
+        "--send-reject-instruction",
+        dest="send_reject_instruction",
+        action="store_true",
+        default=None,
+        help="Send the reject instruction/feedback to the target pane (default: on).",
+    )
+    parser.add_argument(
+        "--no-send-reject-instruction",
+        dest="send_reject_instruction",
+        action="store_false",
+        help="Do NOT send the reject instruction.",
+    )
+    args = parser.parse_args()
+
+    set_instruction_delivery_config(
+        send_approve_instruction=args.send_approve_instruction,
+        send_reject_instruction=args.send_reject_instruction,
+    )
+
     app = SchengenTUIApp()
     app.run()
