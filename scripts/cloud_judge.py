@@ -6,9 +6,14 @@ the judgment orchestration. Any OpenAI-compatible endpoint (OpenAI, vLLM,
 Ollama, LocalAI, OpenRouter, or DeepSeek via OPENAI_BASE_URL) is a drop-in.
 """
 
+import http.client
 import json
 import os
+import random
 import re
+import socket
+import time
+import urllib.error
 import urllib.request
 from typing import Any, Optional
 
@@ -82,8 +87,22 @@ def parse_json_verdict(content_str: str, prefix: str = "[Cloud Judge]") -> Optio
         return None
 
 
-def post_cloud_judge(messages, endpoint, model, api_key, reasoning_effort, tools=None):
-    """Single HTTP round-trip to an OpenAI-compatible chat completions endpoint."""
+MAX_ADAPTIVE_RETRIES = 10
+DEFAULT_SOCKET_TIMEOUT = 10.0
+RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+
+
+def post_cloud_judge(
+    messages,
+    endpoint,
+    model,
+    api_key,
+    reasoning_effort,
+    tools=None,
+    max_retries: int = MAX_ADAPTIVE_RETRIES,
+    timeout: float = DEFAULT_SOCKET_TIMEOUT,
+):
+    """HTTP client with adaptive exponential retry (up to 10 attempts) for network/API errors."""
     req_body: dict[str, Any] = {
         "model": model,
         "temperature": 0.0,
@@ -93,7 +112,6 @@ def post_cloud_judge(messages, endpoint, model, api_key, reasoning_effort, tools
     if tools:
         req_body["tools"] = tools
         req_body["tool_choice"] = "auto"
-    # Only inject reasoning_effort if explicitly configured and targeting a reasoning model
     if (
         reasoning_effort
         and reasoning_effort.lower() not in ("off", "none", "")
@@ -106,6 +124,39 @@ def post_cloud_judge(messages, endpoint, model, api_key, reasoning_effort, tools
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    req = urllib.request.Request(endpoint, data=payload, headers=headers)
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        return json.load(resp)
+    last_err: Optional[Exception] = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(endpoint, data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if e.code in RETRYABLE_HTTP_STATUSES and attempt < max_retries:
+                # Respect Retry-After header if provided
+                retry_after_header = e.headers.get("Retry-After") if e.headers else None
+                if retry_after_header and retry_after_header.isdigit():
+                    sleep_sec = min(10.0, float(retry_after_header))
+                else:
+                    sleep_sec = min(5.0, 0.1 * (1.5 ** (attempt - 1))) + random.uniform(0, 0.05)
+                time.sleep(sleep_sec)
+                continue
+            raise
+        except (
+            urllib.error.URLError,
+            socket.timeout,
+            TimeoutError,
+            http.client.RemoteDisconnected,
+            ConnectionResetError,
+            ConnectionRefusedError,
+        ) as e:
+            last_err = e
+            if attempt < max_retries:
+                sleep_sec = min(5.0, 0.1 * (1.5 ** (attempt - 1))) + random.uniform(0, 0.05)
+                time.sleep(sleep_sec)
+                continue
+            raise
+
+    if last_err:
+        raise last_err
+    raise RuntimeError("Max retries exceeded without result")

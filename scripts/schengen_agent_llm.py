@@ -590,12 +590,40 @@ class SchengenAgentChat:
         if httpx is None:
             return "Error: 'httpx' library is required for LLM agent API calls."
 
-        inspector_client = httpx.AsyncClient(timeout=45.0)
+        transport_timeout = httpx.Timeout(connect=5.0, read=25.0, write=10.0, pool=5.0)
+        inspector_client = httpx.AsyncClient(timeout=transport_timeout)
         judge_client = (
-            httpx.AsyncClient(timeout=45.0)
+            httpx.AsyncClient(timeout=transport_timeout)
             if (self.judge_api_key != self.inspector_api_key or self.judge_base_url != self.inspector_base_url)
             else inspector_client
         )
+
+        async def _post_with_adaptive_retry(
+            client: Any, url: str, headers: Dict[str, str], payload: Dict[str, Any], phase_name: str
+        ) -> Tuple[Optional[Any], Optional[str]]:
+            """Execute POST with adaptive exponential retry (up to 10 attempts) for network/API errors."""
+            max_retries = 10
+            retryable_statuses = {429, 500, 502, 503, 504}
+            last_err_msg = ""
+            for attempt in range(1, max_retries + 1):
+                try:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    if resp.status_code == 200:
+                        return resp, None
+                    if resp.status_code in retryable_statuses and attempt < max_retries:
+                        retry_after = resp.headers.get("Retry-After")
+                        delay = min(10.0, float(retry_after)) if retry_after and retry_after.isdigit() else min(5.0, 0.1 * (1.5 ** (attempt - 1))) + random.uniform(0, 0.05)
+                        await asyncio.sleep(delay)
+                        continue
+                    return None, f"⚠️ {phase_name} API Error ({resp.status_code}): {resp.text}"
+                except _HTTP_EXCEPTIONS as exc:
+                    last_err_msg = str(exc)
+                    if attempt < max_retries:
+                        delay = min(5.0, 0.1 * (1.5 ** (attempt - 1))) + random.uniform(0, 0.05)
+                        await asyncio.sleep(delay)
+                        continue
+                    return None, f"⚠️ {phase_name} Network/API Error after {max_retries} retries: {last_err_msg}"
+            return None, f"⚠️ {phase_name} Error: Max retries exceeded ({last_err_msg})"
 
         try:
             for loop_turn in range(4):
@@ -615,17 +643,15 @@ class SchengenAgentChat:
                     "temperature": 0.0,
                     "stream": False,
                 }
-                try:
-                    resp = await inspector_client.post(
-                        f"{self.inspector_base_url}/chat/completions",
-                        json=payload,
-                        headers=inspector_headers,
-                    )
-                except _HTTP_EXCEPTIONS as exc:
-                    return f"⚠️ Inspector Network/API Error: {exc}"
-
-                if resp.status_code != 200:
-                    return f"⚠️ Inspector API Error ({resp.status_code}): {resp.text}"
+                resp, err = await _post_with_adaptive_retry(
+                    inspector_client,
+                    f"{self.inspector_base_url}/chat/completions",
+                    inspector_headers,
+                    payload,
+                    "Inspector",
+                )
+                if err or resp is None:
+                    return err or "⚠️ Unknown Inspector Error"
 
                 data = resp.json()
                 self.total_api_calls += 1
@@ -658,17 +684,15 @@ class SchengenAgentChat:
                             "temperature": 0.0,
                             "stream": False,
                         }
-                        try:
-                            judge_resp = await judge_client.post(
-                                f"{self.judge_base_url}/chat/completions",
-                                json=judge_payload,
-                                headers=judge_headers,
-                            )
-                        except _HTTP_EXCEPTIONS as exc:
-                            return f"⚠️ Judge Network/API Error: {exc}"
-
-                        if judge_resp.status_code != 200:
-                            return f"⚠️ Judge API Error ({judge_resp.status_code}): {judge_resp.text}"
+                        judge_resp, judge_err = await _post_with_adaptive_retry(
+                            judge_client,
+                            f"{self.judge_base_url}/chat/completions",
+                            judge_headers,
+                            judge_payload,
+                            "Judge",
+                        )
+                        if judge_err or judge_resp is None:
+                            return judge_err or "⚠️ Unknown Judge Error"
 
                         judge_data = judge_resp.json()
                         self.total_api_calls += 1
