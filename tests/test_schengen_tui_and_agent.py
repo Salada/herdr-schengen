@@ -568,6 +568,33 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
                 app.tui_lock_fd.close()
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_audit_table_real_mouse_press_opens_modal(self):
+        from schengen_tui import SchengenTUIApp, AuditDataTable, AuditSectionHeader, AuditFullscreenModal
+        app = SchengenTUIApp()
+        async with app.run_test(size=(140, 50)) as pilot:
+            app.update_radar_data(force=True)
+            await pilot.pause()
+            table = app.query_one("#audit-table", AuditDataTable)
+
+            # A real mouse press (MouseDown) must open the modal even though
+            # show_cursor=False prevents DataTable from emitting RowSelected/Click.
+            await pilot.mouse_down(table, offset=(4, 4))
+            await pilot.pause()
+            self.assertIsInstance(app.screen, AuditFullscreenModal)
+            self.assertGreater(len(app.screen_stack), 1)
+            app.pop_screen()
+            await pilot.pause()
+
+            # The section header label must also open the modal on press.
+            header = app.query_one(AuditSectionHeader)
+            await pilot.mouse_down(header, offset=(2, 0))
+            await pilot.pause()
+            self.assertIsInstance(app.screen, AuditFullscreenModal)
+
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_fullscreen_modal_css_scroll_styling(self):
         from schengen_tui import AuditFullscreenModal
         css = AuditFullscreenModal.CSS

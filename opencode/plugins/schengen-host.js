@@ -27,9 +27,27 @@ const WATCHER_PATH =
   process.env.SCHENGEN_WATCHER_PATH ||
   path.join(os.homedir(), ".agents", "skills", "herdr-schengen", "scripts", "schengen_watcher.py");
 
-const LOG_PATH =
-  process.env.SCHENGEN_LOG_PATH ||
-  path.join(os.homedir(), ".local", "state", "herdr-schengen", "schengen-host.log");
+const LOG_PATH = (() => {
+  const override = process.env.SCHENGEN_LOG_PATH;
+  if (override) return override;
+  // Unix convention: log under /var/log; fall back to the XDG state dir when
+  // /var/log is not writable (e.g. macOS non-root).
+  const candidates = [
+    "/var/log/herdr-schengen/schengen-host.log",
+    path.join(os.homedir(), ".local", "state", "herdr-schengen", "schengen-host.log"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs.mkdirSync(path.dirname(candidate), { recursive: true });
+      const fd = fs.openSync(candidate, "a");
+      fs.closeSync(fd);
+      return candidate;
+    } catch (_) {
+      // not writable; try the next candidate
+    }
+  }
+  return candidates[candidates.length - 1];
+})();
 
 const HISTORY_PATH =
   process.env.SCHENGEN_HISTORY_PATH ||

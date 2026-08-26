@@ -41,6 +41,7 @@ from agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
 from cloud_judge import DEFAULT_REASONING_EFFORT
 from guard_db import (
     DB_DIR,
+    LOG_DIR,
     check_persisted_allowlist,
     enqueue_pending_escalation,
     get_pattern_analysis,
@@ -67,7 +68,7 @@ from security_evaluator import (
 )
 
 LOCK_FILE = DB_DIR / "schengen.lock"
-LOG_FILE = DB_DIR / "schengen.log"
+LOG_FILE = LOG_DIR / "schengen.log"
 
 # Global reload trigger flag
 _RELOAD_REQUESTED = False

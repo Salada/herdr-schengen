@@ -8,6 +8,7 @@ Stores:
 Database location: ~/.local/state/herdr-schengen/schengen_history.db (XDG compliant, no skill pollution)
 """
 
+import os
 import re
 import sqlite3
 from collections import OrderedDict
@@ -17,6 +18,29 @@ from typing import Any, Optional
 
 DB_DIR = Path.home() / ".local" / "state" / "herdr-schengen"
 DB_PATH = DB_DIR / "schengen_history.db"
+
+
+def _resolve_log_dir() -> Path:
+    """Resolve the operational log directory.
+
+    Follows the Unix convention of logging under /var/log/<name>, but falls back
+    to the XDG state dir when /var/log is not writable (e.g. macOS non-root) so
+    the daemon never crashes on startup. Honors SCHENGEN_LOG_DIR for
+    containerized/test environments.
+    """
+    candidate = Path(os.environ.get("SCHENGEN_LOG_DIR", "/var/log/herdr-schengen"))
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        probe = candidate / ".writable"
+        probe.touch()
+        probe.unlink()
+        return candidate
+    except OSError:
+        return DB_DIR
+
+
+LOG_DIR = _resolve_log_dir()
+LOG_FILE = LOG_DIR / "schengen.log"
 
 
 def get_db_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -493,7 +517,8 @@ def get_state_file_paths() -> dict[str, str]:
         "state_dir": str(DB_DIR),
         "db_path": str(DB_PATH),
         "lock_file": str(DB_DIR / "schengen.lock"),
-        "log_file": str(DB_DIR / "schengen.log"),
+        "log_file": str(LOG_FILE),
+        "log_dir": str(LOG_DIR),
     }
 
 
@@ -763,7 +788,7 @@ def cleanup_escalations(
 
 def tail_state_log(lines: int = 20) -> list[str]:
     """Safely retrieve the last N lines of the schengen log file without spawning shell subshells."""
-    log_file = DB_DIR / "schengen.log"
+    log_file = LOG_FILE
     if not log_file.exists():
         return []
     try:

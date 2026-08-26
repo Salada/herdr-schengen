@@ -37,3 +37,19 @@ Idea
 [x] command 창이 new line이 넓어지면 자동으로 up방향으로 panel크기를 증가시켜서 최대한 전체 prompt가 보이게 할것. ( max-height는 맡기지만 기존 chat view에 overlap되어도됨 ) (PR #77)
 [x] observer mode일 경우에는 Ask gatekeeper... UI element 를 아예 비활성화 상태로 만들어버리기 (PR #77)
 [x] dotfile에 있는 redact관련 executable을 file read시에 읽게하여 비의도적 PII/Secret 누출 방지를 위해 최선을 다할것. 다만 redact는 dotfiles의 것을 사용하는게 아니라 가능하면 해당 레포에 가져와서 래핑하고 embeddable가능한 구조로 관리할것 (PR #78)
+
+
+
+Round 2 - Opencode 
+
+[x] (PR #80) access_directory TOCTOU → stale OPENCODE_FAILSAFE escalation으로 FIFO deadlock. inject_approval이 dialog command 변경 시 skip(INJECT_SKIP_CHANGED)하도록 수정. (원인: [지침] 3단계 선택지 에러가 계속 opencode에 전달되는 버그)
+[x] (PR #80) CI 실패 원인: Alpine host runner에 textual/rich/httpx 미설치 → ModuleNotFoundError('rich'). workflow에 venv+pip install 단계 추가.
+[x] (PR #80, PR #73 close) PR #73(AGY QA test)는 이미 PR #74로 main 병합된 중복 → close 처리.
+[] recent audits 마우스 클릭 → fullscreen 전환 (미해결, root cause 확정)
+   - 증상: 헤더/셀 클릭 모두 좌상단 타이틀(x=12,y=1)에 착지 → focus가 chat으로 감.
+   - ROOT CAUSE: Textual이 in-band window resize(2048) 지원 감지 후 SGR pixel mouse(1016h) 활성화. Herdr 터미널은 1016 무시하고 CELL 좌표 보고 → Textual이 PIXEL로 해석해 나눠 좌표 축소.
+   - 증거: raw SGR `\x1b[<0;115;30M`(cell x=115,y=30) → parsed MouseDown(x=11,y=1).
+   - FIX 방향: LinuxDriver subclass로 _enable_mouse_pixels() no-op(1016h 미전송) + App.driver_class 주입.
+   - 미커밋: schengen_tui.py(+cmd) on_mouse_down 픽스 + ALLOW_SELECT 격리 + SCHENGEN_MOUSE_DEBUG 영구 로깅(1MB×3 rotate), test mouse test. keys.log(Textual debug 잔여) 정리 필요.
+[] Question 다이얼로그: 어떤 command도 보내지 않고 approve/reject 없이 미대응 종료해야함(유저가 pane에서 주관식 대응).
+[] 지침전달을 (agy의 경우에는 tab을 사용한것, opencode의 경우는 추가 comment를 보내는것) 을 선택적으로 할수있는 toggle 버튼을 tui에 만들어줘
