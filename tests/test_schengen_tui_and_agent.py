@@ -482,5 +482,53 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
                 app.tui_lock_fd.close()
 
 
+class TestTUIInterruptAndDoubleESC(unittest.IsolatedAsyncioTestCase):
+    """Test /interrupt command and double-ESC abort functionality."""
+
+    def test_agent_cancel_flags(self):
+        chat = SchengenAgentChat()
+        self.assertFalse(chat._cancel_requested)
+        chat.cancel()
+        self.assertTrue(chat._cancel_requested)
+        chat.reset_cancel()
+        self.assertFalse(chat._cancel_requested)
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_interrupt_command_aborts_inflight(self):
+        from schengen_tui import SchengenTUIApp
+        app = SchengenTUIApp()
+        async with app.run_test() as pilot:
+            app._processing_chat = True
+            w = app.process_user_chat("/interrupt /features")
+            await w.wait()
+            await pilot.pause()
+            self.assertFalse(app._processing_chat)
+            plain_text = "\n".join(app._chat_plain)
+            self.assertIn("In-flight LLM call interrupted", plain_text)
+            self.assertIn("/features", plain_text)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_double_esc_aborts_inflight(self):
+        from schengen_tui import SchengenTUIApp
+        app = SchengenTUIApp()
+        async with app.run_test() as pilot:
+            app._processing_chat = True
+            # First ESC: records timestamp
+            first_esc_aborted = app.handle_esc_press()
+            self.assertFalse(first_esc_aborted)
+            self.assertTrue(app._processing_chat)
+            
+            # Second immediate ESC within 0.4s: triggers abort
+            second_esc_aborted = app.handle_esc_press()
+            self.assertTrue(second_esc_aborted)
+            self.assertFalse(app._processing_chat)
+            plain_text = "\n".join(app._chat_plain)
+            self.assertIn("Double-ESC pressed", plain_text)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+
 if __name__ == "__main__":
     unittest.main()
