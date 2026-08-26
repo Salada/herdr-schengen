@@ -49,9 +49,10 @@ def get_pane_info(pane_id):
     return None
 
 
-def get_pane_text(pane_id, lines=80):
-    """Read visible terminal buffer from pane."""
-    out = run_cmd(["herdr", "pane", "read", pane_id, "--source", "visible", "--lines", str(lines)])
+def get_pane_text(pane_id, lines=80, full_dump=False):
+    """Read terminal buffer from pane (visible or scrollback full dump)."""
+    source = "scrollback" if (full_dump or lines > 100) else "visible"
+    out = run_cmd(["herdr", "pane", "read", pane_id, "--source", source, "--lines", str(lines)])
     return out or ""
 
 

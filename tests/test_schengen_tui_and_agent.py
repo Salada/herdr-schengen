@@ -103,6 +103,24 @@ class TestSchengenAgentChatDualRouting(unittest.TestCase):
         self.assertIn("read_file_snippet", prompt)
         self.assertIn("approve_escalation", prompt)
         self.assertIn("NO Autonomous Reject", prompt)
+        self.assertIn("AGY Worker Context", prompt)
+
+    @patch("schengen_agent_llm.get_pane_text")
+    def test_investigate_pane_history_full_dump(self, mock_get_pane):
+        from schengen_agent_llm import execute_tool_call
+        mock_get_pane.return_value = "multiline script line 1\nmultiline script line 2\n"
+        
+        result_json = execute_tool_call("investigate_pane_history", {
+            "pane_id": "w1D:p1",
+            "lines": 150,
+            "full_dump": True,
+        })
+        parsed = json.loads(result_json)
+        self.assertEqual(parsed["pane_id"], "w1D:p1")
+        self.assertEqual(parsed["lines_read"], 150)
+        self.assertTrue(parsed["full_dump"])
+        self.assertIn("multiline script line 1", parsed["pane_text_snippet"])
+        mock_get_pane.assert_called_once_with("w1D:p1", lines=150, full_dump=True)
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual is required for TUI UI tests")

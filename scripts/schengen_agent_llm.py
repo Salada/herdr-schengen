@@ -105,7 +105,7 @@ GUARD_TOOLS = [
         "type": "function",
         "function": {
             "name": "investigate_pane_history",
-            "description": "Inspect recent terminal text of the target worker pane to verify developer intent and context before making a decision.",
+            "description": "Inspect terminal text or full script dump of the target worker pane (especially for AGY multi-line scripts) to verify developer intent before adjudication.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -115,8 +115,13 @@ GUARD_TOOLS = [
                     },
                     "lines": {
                         "type": "integer",
-                        "description": "Number of recent lines to read (default: 30).",
-                        "default": 30,
+                        "description": "Number of recent lines to read (default: 100).",
+                        "default": 100,
+                    },
+                    "full_dump": {
+                        "type": "boolean",
+                        "description": "If true, read complete scrollback script buffer (ctrl+g dump) for AGY panes.",
+                        "default": False,
                     },
                 },
                 "required": ["pane_id"],
@@ -283,12 +288,15 @@ def _get_escalation_row(esc_id: int) -> Optional[Dict[str, Any]]:
 def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
     if name == "investigate_pane_history":
         pane_id = args.get("pane_id", "")
-        lines = args.get("lines", 30)
+        lines = args.get("lines", 100)
+        full_dump = bool(args.get("full_dump", False))
         try:
-            raw = get_pane_text(pane_id, lines=lines)
+            raw = get_pane_text(pane_id, lines=lines, full_dump=full_dump)
             return json.dumps({
                 "pane_id": pane_id,
-                "pane_text_snippet": raw[-2000:] if raw else "",
+                "lines_read": lines,
+                "full_dump": full_dump,
+                "pane_text_snippet": raw[-12000:] if raw else "",
             }, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -500,7 +508,8 @@ All previous tasks are finished. If the user asks questions, inform them that no
    - **Session Pattern Memory**: If the command is a repetition or slight variation of a previously approved benign operation in this session (e.g. search keyword query, repetitive git query, pytest runner, or temporary file redirection), recognize this pattern and proceed directly to approval without redundant tool loops.
    - You have full discretion to call investigation tools when necessary:
      - Call `investigate_path_details(target_path='{target_candidate}')` if the target filesystem status is unverified.
-     - Call `investigate_pane_history(pane_id='{active_esc['pane_id']}')` to inspect worker intent from recent terminal buffer.
+     - Call `investigate_pane_history(pane_id='{active_esc['pane_id']}', lines=100)` to inspect worker intent from recent terminal buffer.
+     - **AGY Worker Context**: For AGY panes (`{active_esc.get('agent_kind', 'agent')}`), since input tokens are extremely cost-effective, feel free to inspect full multi-line scripts using `investigate_pane_history(pane_id='{active_esc['pane_id']}', lines=100, full_dump=True)` to verify developer intent with 100% precision.
      - Call `read_file_snippet(target_path=...)` if a script/payload needs inspection.
      - If the command is an obvious safe operation, you may skip tools.
 
