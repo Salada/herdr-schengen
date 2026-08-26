@@ -587,8 +587,8 @@ class SchengenTUIApp(App):
     }
     #instruction-control Button {
         width: 100%;
-        height: 1;
-        min-height: 1;
+        height: 3;
+        padding: 0 1;
         margin-bottom: 0;
     }
     #role-box {
