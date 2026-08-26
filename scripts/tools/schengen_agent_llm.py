@@ -51,6 +51,7 @@ from core.feature_db import (
     search_similar_feature_requests,
 )
 from core.guard_db import (
+    get_answer_language,
     get_db_connection,
     get_instruction_delivery_config,
     get_pending_escalations,
@@ -549,18 +550,32 @@ def format_tool_call_beautified(fn_name: str, fn_args: Dict[str, Any]) -> str:
     return f"⚙️ **[Inspector]**: `{fn_name}` `{raw}`"
 
 
-def build_system_prompt() -> str:
+_ANSWER_LANGUAGE_MAP = {
+    "english": "concise professional English",
+    "korean": "간결하고 건조한 한국어 (dry Korean)",
+    "japanese": "簡潔で淡々とした日本語 (dry Japanese)",
+}
+
+
+def build_system_prompt(language: Optional[str] = None) -> str:
+    lang = language or get_answer_language()
+    lang_instruction = _ANSWER_LANGUAGE_MAP.get(lang, _ANSWER_LANGUAGE_MAP["korean"])
+
     active_esc = get_current_active_escalation()
 
     if not active_esc:
-        return """You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
+        return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
 There are currently NO active pending escalations.
-All previous tasks are finished. If the user asks questions, inform them that no pending escalations are currently queued."""
+All previous tasks are finished. If the user asks questions, answer them in {lang_instruction}."""
 
     op_type, detected_target = classify_operation(active_esc['raw_command'])
     target_candidate = detected_target or "unknown"
 
     return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
+
+[🗣️ ANSWER LANGUAGE]:
+- Render your FINAL verdict, risk report, and any explanation to the human user in {lang_instruction}.
+- The `english_feedback` argument for `approve_escalation` / `reject_escalation` MUST ALWAYS be concise professional English (it is injected into the worker agent via Herdr to conserve tokens), regardless of the answer language.
 
 [🎯 CURRENT ACTIVE ESCALATION TARGET]:
 - Escalation ID: #{active_esc['id']}
@@ -582,7 +597,7 @@ All previous tasks are finished. If the user asks questions, inform them that no
 
 2. **Adjudication Rules**:
    - **Autonomous Approval**: If investigation confirms zero data loss risk (e.g. target path does not exist, or clean VCS commit verified), you MAY autonomously call `approve_escalation` with a concise English security note.
-   - **NO Autonomous Reject**: Do NOT call `reject_escalation` autonomously. If dangerous data loss or critical system risk is detected, report the factual risks clearly to the human user in dry Korean and wait for explicit human instructions (e.g. '거절', '차단', 'reject').
+   - **NO Autonomous Reject**: Do NOT call `reject_escalation` autonomously. If dangerous data loss or critical system risk is detected, report the factual risks clearly to the human user in {lang_instruction} and wait for explicit human instructions (e.g. '거절', '차단', 'reject').
 
 3. **Feedback Format**:
    - `english_feedback` MUST be in professional English: `Approved. <Direct Verified Fact>. <Actionable Note/Warning>.`

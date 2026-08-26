@@ -56,6 +56,8 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
+    RadioButton,
+    RadioSet,
     RichLog,
     Static,
     TextArea,
@@ -69,10 +71,12 @@ from core.feature_db import (
 )
 from core.guard_db import (
     LOG_DIR,
+    get_answer_language,
     get_instruction_delivery_config,
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
+    set_answer_language,
     set_instruction_delivery_config,
 )
 from tools.schengen_agent_llm import SchengenAgentChat, get_current_active_escalation
@@ -479,6 +483,19 @@ class NoPixelMouseDriver(LinuxDriver):
         pass
 
 
+_LANG_BY_BUTTON_ID = {
+    "lang-english": "english",
+    "lang-korean": "korean",
+    "lang-japanese": "japanese",
+}
+_BUTTON_ID_BY_LANG = {v: k for k, v in _LANG_BY_BUTTON_ID.items()}
+_LANG_LABELS = {
+    "english": "English",
+    "korean": "한국어",
+    "japanese": "日本語",
+}
+
+
 class SchengenTUIApp(App):
     CSS = """
     Screen {
@@ -597,6 +614,15 @@ class SchengenTUIApp(App):
         padding: 0 1;
         margin-bottom: 0;
     }
+    #answer-language-set {
+        layout: horizontal;
+        height: auto;
+        margin-bottom: 1;
+    }
+    #answer-language-set RadioButton {
+        width: auto;
+        margin-right: 1;
+    }
     #role-box {
         height: 4;
         background: $surface-darken-1;
@@ -709,6 +735,11 @@ class SchengenTUIApp(App):
                 with Vertical(id="instruction-control"):
                     yield Button("📤 Approve Instr: OFF", id="btn-toggle-approve-instr")
                     yield Button("📤 Reject Instr: ON", id="btn-toggle-reject-instr")
+                yield Label("🗣️ Answer Language", classes="section-title")
+                with RadioSet(id="answer-language-set"):
+                    yield RadioButton("English", id="lang-english")
+                    yield RadioButton("한국어", id="lang-korean", value=True)
+                    yield RadioButton("日本語", id="lang-japanese")
                 yield Label("⚡ Token & Cache Meter", classes="section-title")
                 yield Static(id="token-meter-box")
                 yield AuditSectionHeader("📜 Recent Audits (Click: ⛶ Fullscreen)", classes="section-title")
@@ -761,6 +792,7 @@ class SchengenTUIApp(App):
         self._columns_initialized = True
 
         self._refresh_instruction_buttons()
+        self._sync_language_selection()
 
         existing = get_pending_escalations(include_delivered=True)
         for e in existing:
@@ -848,6 +880,25 @@ class SchengenTUIApp(App):
         try:
             reject_btn = self.query_one("#btn-toggle-reject-instr", Button)
             reject_btn.label = "📤 Reject Instr: ON" if cfg.get("send_reject_instruction") else "📤 Reject Instr: OFF"
+        except Exception:
+            pass
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        lang = _LANG_BY_BUTTON_ID.get(event.pressed.id or "")
+        if not lang:
+            return
+        set_answer_language(lang)
+        self._write(f"[bold yellow]🗣️ [Answer Language]:[/] {_LANG_LABELS.get(lang, lang)}")
+
+    def _sync_language_selection(self) -> None:
+        lang = get_answer_language()
+        button_id = _BUTTON_ID_BY_LANG.get(lang)
+        if not button_id:
+            return
+        try:
+            btn = self.query_one(f"#{button_id}", RadioButton)
+            # Setting only the target to True lets RadioSet deselect the others.
+            btn.value = True
         except Exception:
             pass
 

@@ -592,6 +592,41 @@ def set_instruction_delivery_config(
     return get_instruction_delivery_config()
 
 
+_ANSWER_LANGUAGE_DEFAULT = "korean"
+_ANSWER_LANGUAGE_OPTIONS = ("english", "korean", "japanese")
+
+
+def get_answer_language() -> str:
+    """Return the configured answer language for the TUI chat (english/korean/japanese)."""
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM guard_config WHERE key = 'answer_language'"
+        ).fetchone()
+    if row and str(row["value"]).strip().lower() in _ANSWER_LANGUAGE_OPTIONS:
+        return str(row["value"]).strip().lower()
+    return _ANSWER_LANGUAGE_DEFAULT
+
+
+def set_answer_language(language: str) -> str:
+    """Persist the answer language (english/korean/japanese). Returns the normalized value."""
+    init_db()
+    lang = str(language).strip().lower()
+    if lang not in _ANSWER_LANGUAGE_OPTIONS:
+        lang = _ANSWER_LANGUAGE_DEFAULT
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            ("answer_language", lang, now_iso),
+        )
+        conn.commit()
+    return lang
+
+
 def record_adjudication(
     escalation_id: int,
     pane_id: str,
