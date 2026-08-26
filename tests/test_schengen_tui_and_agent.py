@@ -279,6 +279,33 @@ class TestTUIInputUX(unittest.TestCase):
         assert text_area.styles.height is not None
         self.assertEqual(text_area.styles.height.value, 10)
 
+    def test_chat_log_focusable(self):
+        from schengen_tui import FocusableRichLog
+        log_widget = FocusableRichLog()
+        self.assertTrue(log_widget.can_focus)
+
+    def test_slim_scrollbar_css(self):
+        assert SchengenTUIApp is not None
+        css = SchengenTUIApp.CSS
+        self.assertIn("scrollbar-size-vertical: 1;", css)
+
+    def test_inflight_input_retention_on_enter(self):
+        from schengen_tui import CommandTextArea
+        text_area = CommandTextArea()
+        mock_app = MagicMock()
+        mock_app._processing_chat = True
+        text_area._app = mock_app
+
+        text_area.text = "inflight command to retain"
+        event = MagicMock()
+        event.key = "enter"
+        event.name = "enter"
+        text_area.on_key(event)
+
+        # Inflight: text must NOT be erased
+        self.assertEqual(text_area.text, "inflight command to retain")
+        mock_app.notify.assert_called_once()
+
 
 class TestSequentialFifoQueue(unittest.TestCase):
     """Test that get_current_active_escalation returns oldest PENDING item."""

@@ -82,9 +82,29 @@ def format_local_time(iso_ts: str) -> str:
         return iso_ts.split("T")[-1][:5] if "T" in iso_ts else iso_ts[:5]
 
 
-class UnfocusableRichLog(RichLog):
-    """RichLog subclass that cannot be focused."""
-    can_focus = False
+class FocusableRichLog(RichLog):
+    """RichLog supporting keyboard focus, mouse scroll, selection, and page navigation."""
+    can_focus = True
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key == "pageup":
+            event.stop()
+            self.scroll_page_up()
+        elif event.key == "pagedown":
+            event.stop()
+            self.scroll_page_down()
+        elif event.key == "home":
+            event.stop()
+            self.scroll_home()
+        elif event.key == "end":
+            event.stop()
+            self.scroll_end()
+        elif event.key == "up":
+            event.stop()
+            self.scroll_up()
+        elif event.key == "down":
+            event.stop()
+            self.scroll_down()
 
 
 class AuditFullscreenModal(ModalScreen):
@@ -199,9 +219,13 @@ class CommandTextArea(TextArea):
             event.stop()
             text = self.text.strip()
             if text:
+                app = getattr(self, "app", None)
+                if app and getattr(app, "_processing_chat", False):
+                    if hasattr(app, "notify"):
+                        app.notify("⏳ Another investigation is in-flight. Input retained.", severity="warning")
+                    return
                 self.text = ""
                 self.styles.height = 3
-                app = getattr(self, "app", None)
                 if app and hasattr(app, "process_user_chat"):
                     app.process_user_chat(text)
         elif is_shift_enter:
@@ -284,6 +308,14 @@ class SchengenTUIApp(App):
         padding: 1;
         overflow-y: scroll;
         overflow-x: hidden;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $surface-lighten-2;
+        scrollbar-color-hover: $accent;
+        scrollbar-color-active: $accent-lighten-1;
+        scrollbar-background: transparent;
+    }
+    #chat-log:focus {
+        border: solid $accent;
     }
     /* Command input: expanding textarea with word-wrap and dynamic multiline height */
     #input-box {
@@ -389,7 +421,7 @@ class SchengenTUIApp(App):
             # Left: Chat log fills space; banner floats just above input
             with Vertical(id="chat-column"):
                 yield Label("[bold cyan]🤖 Schengen Security Gatekeeper (DeepSeek Flash)[/]")
-                yield UnfocusableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
+                yield FocusableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
                 yield Static(id="active-target-banner")
                 yield CommandTextArea(placeholder="Ask Gatekeeper or type command (Enter to submit, Shift+Enter for newline)...", id="input-box")
 
@@ -748,6 +780,13 @@ class SchengenTUIApp(App):
             self._write_markdown(resp)
             self._write(f"[dim]{'─'*70}[/]")
             self.update_radar_data(force=True)
+        except Exception as exc:
+            self._write(f"[bold red]❌ [Investigation Error]:[/] {exc}")
+            try:
+                input_box = self.query_one("#input-box", CommandTextArea)
+                input_box.text = user_msg
+            except Exception:
+                pass
         finally:
             self._processing_chat = False
 
