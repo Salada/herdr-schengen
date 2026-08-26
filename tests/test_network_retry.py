@@ -5,6 +5,7 @@ import json
 import socket
 import unittest
 import urllib.error
+from email.message import Message
 from unittest.mock import MagicMock, patch
 
 from cloud_judge import (
@@ -22,7 +23,7 @@ class TestCloudJudgeAdaptiveRetry(unittest.TestCase):
         """Test HTTP 429 rate limit triggers adaptive retry and succeeds on 3rd attempt."""
         # 1st: 429, 2nd: 429, 3rd: 200 OK
         resp_429 = urllib.error.HTTPError(
-            url="http://dummy", code=429, msg="Too Many Requests", hdrs={}, fp=io.BytesIO(b"{}")
+            url="http://dummy", code=429, msg="Too Many Requests", hdrs=Message(), fp=io.BytesIO(b"{}")
         )
         mock_success = MagicMock()
         mock_success.__enter__.return_value = io.BytesIO(b'{"is_safe": true, "reason": "OK"}')
@@ -47,10 +48,10 @@ class TestCloudJudgeAdaptiveRetry(unittest.TestCase):
     def test_post_cloud_judge_retry_on_502_503(self, mock_urlopen, mock_sleep):
         """Test HTTP 502/503 bad gateway errors trigger retry and succeed."""
         resp_502 = urllib.error.HTTPError(
-            url="http://dummy", code=502, msg="Bad Gateway", hdrs={}, fp=io.BytesIO(b"{}")
+            url="http://dummy", code=502, msg="Bad Gateway", hdrs=Message(), fp=io.BytesIO(b"{}")
         )
         resp_503 = urllib.error.HTTPError(
-            url="http://dummy", code=503, msg="Service Unavailable", hdrs={}, fp=io.BytesIO(b"{}")
+            url="http://dummy", code=503, msg="Service Unavailable", hdrs=Message(), fp=io.BytesIO(b"{}")
         )
         mock_success = MagicMock()
         mock_success.__enter__.return_value = io.BytesIO(b'{"is_safe": true, "reason": "Gateway recovered"}')
@@ -97,7 +98,7 @@ class TestCloudJudgeAdaptiveRetry(unittest.TestCase):
     def test_post_cloud_judge_max_10_retries_exhausted(self, mock_urlopen, mock_sleep):
         """Test exhausting all 10 retry attempts raises exception."""
         resp_500 = urllib.error.HTTPError(
-            url="http://dummy", code=500, msg="Internal Server Error", hdrs={}, fp=io.BytesIO(b"{}")
+            url="http://dummy", code=500, msg="Internal Server Error", hdrs=Message(), fp=io.BytesIO(b"{}")
         )
         mock_urlopen.side_effect = [resp_500] * 10
 
@@ -119,7 +120,7 @@ class TestCloudJudgeAdaptiveRetry(unittest.TestCase):
     def test_non_retryable_error_fails_immediately(self, mock_urlopen, mock_sleep):
         """Test non-retryable errors (e.g. 400 Bad Request) fail immediately without retry."""
         resp_400 = urllib.error.HTTPError(
-            url="http://dummy", code=400, msg="Bad Request", hdrs={}, fp=io.BytesIO(b"{}")
+            url="http://dummy", code=400, msg="Bad Request", hdrs=Message(), fp=io.BytesIO(b"{}")
         )
         mock_urlopen.side_effect = resp_400
 

@@ -12,8 +12,10 @@ Core Capabilities:
 3. Strict Single-Task FIFO: one pending escalation resolved at a time.
 """
 
+import asyncio
 import json
 import os
+import random
 import re
 import stat
 import subprocess
