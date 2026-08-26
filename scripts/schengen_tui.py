@@ -55,6 +55,7 @@ from textual.widgets import (
 
 from feature_db import (
     add_feature_request,
+    create_feature_request_with_similars,
     list_feature_requests,
     search_similar_feature_requests,
 )
@@ -686,15 +687,16 @@ class SchengenTUIApp(App):
             else:
                 title = content.strip()
 
-            req_id = add_feature_request(
+            created = create_feature_request_with_similars(
                 title=title,
                 description=desc,
                 requester="user",
                 priority=priority,
                 source="tui_command",
+                similars_limit=3,
             )
-            similars = search_similar_feature_requests(title, limit=3)
-            similars = [s for s in similars if s["id"] != req_id]
+            req_id = created["id"]
+            similars = created["similar_items"]
 
             self._write(f"💡 [bold green][Feature Request Queued]:[/] #{req_id} [bold white]{rich_escape(title)}[/] [dim](Priority: {priority})[/]")
             if similars:
