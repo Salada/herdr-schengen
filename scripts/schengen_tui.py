@@ -219,7 +219,12 @@ class CommandTextArea(TextArea):
             event.stop()
             text = self.text.strip()
             if text:
-                app = getattr(self, "app", None)
+                app = None
+                try:
+                    app = self.app
+                except Exception:
+                    app = getattr(self, "_app", None)
+
                 if app and getattr(app, "_processing_chat", False):
                     if hasattr(app, "notify"):
                         app.notify("⏳ Another investigation is in-flight. Input retained.", severity="warning")
