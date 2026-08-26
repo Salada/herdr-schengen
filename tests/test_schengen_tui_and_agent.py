@@ -21,7 +21,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from schengen_agent_llm import (
+from tools.schengen_agent_llm import (
     SchengenAgentChat,
     clean_llm_response,
     build_system_prompt,
@@ -33,7 +33,7 @@ try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
-    from schengen_tui import SchengenTUIApp, AuditFullscreenModal
+    from cmd.schengen_tui import SchengenTUIApp, AuditFullscreenModal
     HAS_TEXTUAL = True
 except ImportError:
     SchengenTUIApp = None  # type: ignore
@@ -94,7 +94,7 @@ class TestSchengenAgentChatDualRouting(unittest.TestCase):
         self.assertEqual(clean_llm_response(raw_plain), "Approved. Target does not exist.")
 
         # Broken DeepSeek DSML / XML tag leak regression test
-        raw_dsml_leak = """~/code/herdr-schengen/scripts/schengen_agent_llm.py</｜｜DSML｜｜parameter>
+        raw_dsml_leak = """~/code/herdr-schengen/scripts/tools/schengen_agent_llm.py</｜｜DSML｜｜parameter>
 </｜｜DSML｜｜invoke>
 
 ~/code/herdr-schengen/scripts/herdr_client.py</｜｜DSML｜｜parameter>
@@ -111,7 +111,7 @@ Approved. All files verified safely."""
         self.assertIn("Approved. All files verified safely.", cleaned_dsml)
 
     def test_format_tool_call_beautified(self):
-        from schengen_agent_llm import format_tool_call_beautified
+        from tools.schengen_agent_llm import format_tool_call_beautified
         # 1. Path check
         s1 = format_tool_call_beautified("investigate_path_details", {"target_path": "~/code/file.py"})
         self.assertIn("🔍 **[Path Check]**", s1)
@@ -135,7 +135,7 @@ Approved. All files verified safely."""
         s5 = format_tool_call_beautified("reject_escalation", {"escalation_id": 42, "english_feedback": "Critical risk."})
         self.assertIn("🛑 **[Action Reject]**", s5)
 
-    @patch("schengen_agent_llm.get_current_active_escalation")
+    @patch("tools.schengen_agent_llm.get_current_active_escalation")
     def test_build_system_prompt_structure(self, mock_get_active):
         mock_get_active.return_value = {
             "id": 123,
@@ -153,9 +153,9 @@ Approved. All files verified safely."""
         self.assertIn("NO Autonomous Reject", prompt)
         self.assertIn("AGY Worker Context", prompt)
 
-    @patch("schengen_agent_llm.get_pane_text")
+    @patch("tools.schengen_agent_llm.get_pane_text")
     def test_investigate_pane_history_full_dump(self, mock_get_pane):
-        from schengen_agent_llm import execute_tool_call
+        from tools.schengen_agent_llm import execute_tool_call
         mock_get_pane.return_value = "multiline script line 1\nmultiline script line 2\n"
         
         result_json = execute_tool_call("investigate_pane_history", {
@@ -239,7 +239,7 @@ class TestSchengenTUIApp(unittest.TestCase):
         self.assertIn("max-height: 11;", css)
 
     def test_command_text_area_instantiation(self):
-        from schengen_tui import CommandTextArea
+        from cmd.schengen_tui import CommandTextArea
         cta = CommandTextArea()
         self.assertIsNotNone(cta)
         self.assertFalse(cta.show_line_numbers)
@@ -332,7 +332,7 @@ class TestTUIInputUX(unittest.TestCase):
         self.assertFalse(SchengenTUIApp.ENABLE_COMMAND_PALETTE)
 
     def test_command_text_area_word_wrap_and_dynamic_expansion(self):
-        from schengen_tui import CommandTextArea
+        from cmd.schengen_tui import CommandTextArea
         text_area = CommandTextArea()
         self.assertTrue(text_area.soft_wrap)
         self.assertFalse(text_area.show_line_numbers)
@@ -354,7 +354,7 @@ class TestTUIInputUX(unittest.TestCase):
         self.assertEqual(text_area.styles.height.value, 10)
 
     def test_chat_log_focusable(self):
-        from schengen_tui import FocusableRichLog
+        from cmd.schengen_tui import FocusableRichLog
         log_widget = FocusableRichLog()
         self.assertTrue(log_widget.can_focus)
 
@@ -364,7 +364,7 @@ class TestTUIInputUX(unittest.TestCase):
         self.assertIn("scrollbar-size-vertical: 1;", css)
 
     def test_inflight_input_retention_on_enter(self):
-        from schengen_tui import CommandTextArea
+        from cmd.schengen_tui import CommandTextArea
         text_area = CommandTextArea()
         mock_app = MagicMock()
         mock_app._processing_chat = True
@@ -384,7 +384,7 @@ class TestTUIInputUX(unittest.TestCase):
 class TestSequentialFifoQueue(unittest.TestCase):
     """Test that get_current_active_escalation returns oldest PENDING item."""
 
-    @patch("schengen_agent_llm.get_pending_escalations")
+    @patch("tools.schengen_agent_llm.get_pending_escalations")
     def test_get_current_active_escalation_fifo(self, mock_pending):
         mock_pending.return_value = [
             {"id": 101, "status": "PENDING", "raw_command": "cmd1"},
@@ -396,7 +396,7 @@ class TestSequentialFifoQueue(unittest.TestCase):
         assert active is not None
         self.assertEqual(active["id"], 101)  # oldest item
 
-    @patch("schengen_agent_llm.get_pending_escalations")
+    @patch("tools.schengen_agent_llm.get_pending_escalations")
     def test_get_current_active_escalation_empty(self, mock_pending):
         mock_pending.return_value = []
         active = get_current_active_escalation()
@@ -407,7 +407,7 @@ class TestTUIControllerObserverMode(unittest.TestCase):
     """Test Controller and Observer role acquisition and permission segregation."""
 
     def test_controller_role_acquisition_and_toggle_permission(self):
-        from schengen_tui import acquire_tui_role, SchengenTUIApp
+        from cmd.schengen_tui import acquire_tui_role, SchengenTUIApp
         fd, is_controller, leader_pid = acquire_tui_role()
         try:
             if is_controller and fd:
@@ -427,7 +427,7 @@ class TestTUIControllerObserverMode(unittest.TestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     def test_observer_toggle_daemon_rejected(self):
-        from schengen_tui import SchengenTUIApp
+        from cmd.schengen_tui import SchengenTUIApp
         app = SchengenTUIApp()
         app.is_controller = False  # Force Observer
         msg = app.toggle_guard_daemon()
@@ -441,7 +441,7 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_feature_command_and_list_execution(self):
-        from schengen_tui import SchengenTUIApp
+        from cmd.schengen_tui import SchengenTUIApp
         app = SchengenTUIApp()
         async with app.run_test() as pilot:
             w1 = app.process_user_chat("/feature TUI 알림 사운드 커스텀 --desc 볼륨 조절 지원 --priority HIGH")
@@ -461,7 +461,7 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_chat_view_mouse_drag_selection(self):
-        from schengen_tui import SchengenTUIApp, FocusableRichLog
+        from cmd.schengen_tui import SchengenTUIApp, FocusableRichLog
         app = SchengenTUIApp()
         async with app.run_test() as pilot:
             chat = app.query_one("#chat-log", FocusableRichLog)
@@ -495,7 +495,7 @@ class TestTUIInterruptAndDoubleESC(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_interrupt_command_aborts_inflight(self):
-        from schengen_tui import SchengenTUIApp
+        from cmd.schengen_tui import SchengenTUIApp
         app = SchengenTUIApp()
         async with app.run_test() as pilot:
             app._processing_chat = True
@@ -511,7 +511,7 @@ class TestTUIInterruptAndDoubleESC(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_double_esc_aborts_inflight(self):
-        from schengen_tui import SchengenTUIApp
+        from cmd.schengen_tui import SchengenTUIApp
         app = SchengenTUIApp()
         async with app.run_test() as pilot:
             app._processing_chat = True
@@ -535,7 +535,7 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_audit_table_scroll_disabled(self):
-        from schengen_tui import SchengenTUIApp, AuditDataTable
+        from cmd.schengen_tui import SchengenTUIApp, AuditDataTable
         app = SchengenTUIApp()
         async with app.run_test() as pilot:
             table = app.query_one("#audit-table", AuditDataTable)
@@ -547,7 +547,7 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_audit_table_selection_triggers_modal(self):
-        from schengen_tui import SchengenTUIApp, AuditDataTable, AuditFullscreenModal
+        from cmd.schengen_tui import SchengenTUIApp, AuditDataTable, AuditFullscreenModal
         app = SchengenTUIApp()
         async with app.run_test(size=(120, 40)) as pilot:
             app.update_radar_data(force=True)
@@ -569,7 +569,7 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_audit_table_real_mouse_press_opens_modal(self):
-        from schengen_tui import SchengenTUIApp, AuditDataTable, AuditSectionHeader, AuditFullscreenModal
+        from cmd.schengen_tui import SchengenTUIApp, AuditDataTable, AuditSectionHeader, AuditFullscreenModal
         app = SchengenTUIApp()
         async with app.run_test(size=(140, 50)) as pilot:
             app.update_radar_data(force=True)
@@ -596,7 +596,7 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_fullscreen_modal_css_scroll_styling(self):
-        from schengen_tui import AuditFullscreenModal
+        from cmd.schengen_tui import AuditFullscreenModal
         css = AuditFullscreenModal.CSS
         self.assertIn("scrollbar-size-vertical: 1;", css)
         self.assertIn("scrollbar-size-horizontal: 1;", css)
@@ -609,7 +609,7 @@ class TestTUIInputExpansionAndObserverDisabled(unittest.IsolatedAsyncioTestCase)
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_input_text_area_multiline_expansion(self):
-        from schengen_tui import CommandTextArea
+        from cmd.schengen_tui import CommandTextArea
         box = CommandTextArea()
         box.text = "Line 1"
         self.assertEqual(box.styles.height.value, 3)
@@ -623,7 +623,7 @@ class TestTUIInputExpansionAndObserverDisabled(unittest.IsolatedAsyncioTestCase)
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_observer_mode_input_disabled(self):
-        from schengen_tui import SchengenTUIApp, CommandTextArea
+        from cmd.schengen_tui import SchengenTUIApp, CommandTextArea
         app = SchengenTUIApp()
         app.is_controller = False  # Simulate observer mode
         async with app.run_test() as pilot:
@@ -639,7 +639,7 @@ class TestToolRedactionIntegration(unittest.TestCase):
 
     def test_read_file_snippet_redacts_secrets(self):
         import tempfile
-        from schengen_agent_llm import execute_tool_call
+        from tools.schengen_agent_llm import execute_tool_call
         dummy_aws = "".join(["AKIA", "IOSFODNN7", "EXAMPLE"])
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".env") as f:
             f.write(f"DB_PASSWORD=SuperSecretPass123\nAWS_SECRET={dummy_aws}\nBearer secrettoken123\n")

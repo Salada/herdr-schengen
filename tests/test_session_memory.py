@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from guard_db import enqueue_pending_escalation, init_db, resolve_escalation
-from security_evaluator import audit_dynamic_substitution_with_llm, audit_with_cloud_judge
-from session_memory import (
+from core.guard_db import enqueue_pending_escalation, init_db, resolve_escalation
+from core.security_evaluator import audit_dynamic_substitution_with_llm, audit_with_cloud_judge
+from core.session_memory import (
     PaneSessionMemory,
     check_pane_approval,
     clear_pane_memory,
@@ -69,7 +69,7 @@ class TestPaneSessionMemory(unittest.TestCase):
         )
 
         # 2. Call audit_dynamic_substitution_with_llm with mocked post_cloud_judge
-        with patch("security_evaluator.post_cloud_judge") as mock_post:
+        with patch("core.security_evaluator.post_cloud_judge") as mock_post:
             is_safe, reason = audit_dynamic_substitution_with_llm(
                 cmd_str=cmd,
                 scope=scope,
@@ -97,7 +97,7 @@ class TestPaneSessionMemory(unittest.TestCase):
         )
 
         # 2. Call audit_with_cloud_judge
-        with patch("security_evaluator.post_cloud_judge") as mock_post:
+        with patch("core.security_evaluator.post_cloud_judge") as mock_post:
             is_safe, reason = audit_with_cloud_judge(
                 cmd_str=cmd,
                 scope=scope,
@@ -164,8 +164,8 @@ class TestPaneSessionMemory(unittest.TestCase):
 
     def test_safe_pattern_template_matching(self):
         """Verify similar command with different search arguments matches session pattern template."""
-        cmd1 = "python3 scripts/schengen_feature.py --search '모드'"
-        cmd2 = "python3 scripts/schengen_feature.py --search '테마'"
+        cmd1 = "python3 scripts/cmd/schengen_feature.py --search '모드'"
+        cmd2 = "python3 scripts/cmd/schengen_feature.py --search '테마'"
         pane_id = "w1D:p1"
 
         # Record approval for cmd1

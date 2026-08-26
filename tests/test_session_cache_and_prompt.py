@@ -8,9 +8,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from guard_db import _IN_MEMORY_EVAL_CACHE, get_cached_evaluation, set_cached_evaluation
-from security_evaluator import DecisionLayer, audit_shell_command_with_taxonomy
-from session_cache import clear_session_cache, compute_cache_key, get_cached_result, store_cached_result
+from core.guard_db import _IN_MEMORY_EVAL_CACHE, get_cached_evaluation, set_cached_evaluation
+from core.security_evaluator import DecisionLayer, audit_shell_command_with_taxonomy
+from core.session_cache import clear_session_cache, compute_cache_key, get_cached_result, store_cached_result
 
 
 class TestSessionCacheAndPrompt(unittest.TestCase):
@@ -71,7 +71,7 @@ class TestSessionCacheAndPrompt(unittest.TestCase):
 
     def test_end_to_end_audit_command_caching(self):
         """audit_dynamic_substitution_with_llm reuses cached verdicts for dynamic parameters."""
-        from security_evaluator import audit_dynamic_substitution_with_llm
+        from core.security_evaluator import audit_dynamic_substitution_with_llm
 
         cmd = "echo $(cat /tmp/safe.txt)"
         dyn_key = compute_cache_key(cmd, cwd="/tmp", scope="wS:pA", agent_id="test-agy", origin="I")
@@ -125,7 +125,7 @@ class TestSessionCacheAndPrompt(unittest.TestCase):
 
     def test_dynamic_ruleset_hash_invalidation(self):
         """B3: Dynamic ruleset hash is deterministic and derived from prompt and rule patterns."""
-        from session_cache import get_dynamic_ruleset_version
+        from core.session_cache import get_dynamic_ruleset_version
 
         dyn_ver = get_dynamic_ruleset_version()
         self.assertTrue(dyn_ver.startswith("dyn-"))
@@ -212,7 +212,7 @@ class TestSessionCacheAndPrompt(unittest.TestCase):
         get_cached_evaluation("key_0")
 
         # Manually shrink max size for testing eviction
-        from guard_db import _IN_MEMORY_EVAL_CACHE
+        from core.guard_db import _IN_MEMORY_EVAL_CACHE
 
         while len(_IN_MEMORY_EVAL_CACHE) > 3:
             _IN_MEMORY_EVAL_CACHE.popitem(last=False)
@@ -223,7 +223,7 @@ class TestSessionCacheAndPrompt(unittest.TestCase):
 
     def test_few_shot_prompt_schema_and_adversarial_exemplars(self):
         """N1: Prompt contains English-only concise instructions and adversarial few-shot exemplars."""
-        from security_evaluator import MINIMAL_INSPECTOR_SYSTEM_PROMPT
+        from core.security_evaluator import MINIMAL_INSPECTOR_SYSTEM_PROMPT
 
         self.assertIn("Adversarial Exemplars:", MINIMAL_INSPECTOR_SYSTEM_PROMPT)
         self.assertIn(".env", MINIMAL_INSPECTOR_SYSTEM_PROMPT)

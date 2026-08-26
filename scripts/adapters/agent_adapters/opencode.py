@@ -11,9 +11,9 @@ import os
 import re
 import time
 
-from herdr_client import get_pane_text, run_cmd
+from adapters.herdr_client import get_pane_text, run_cmd
 
-from agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, register
+from adapters.agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, register
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 

@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import schengen_watcher
-from schengen_watcher import is_process_smartgate_watcher, list_active_guard_locks
+import cmd.schengen_watcher as schengen_watcher
+from cmd.schengen_watcher import is_process_smartgate_watcher, list_active_guard_locks
 
 
 class TestDaemonKillSync(unittest.TestCase):
@@ -33,7 +33,7 @@ class TestDaemonKillSync(unittest.TestCase):
         self.assertEqual(active, [])
         self.assertFalse(lock_file.exists())
 
-    @patch("schengen_watcher.is_process_smartgate_watcher")
+    @patch("cmd.schengen_watcher.is_process_smartgate_watcher")
     def test_active_lock_preserved_for_live_daemon(self, mock_is_watcher):
         """Verify lockfile for a genuine running watcher daemon is preserved."""
         mock_is_watcher.return_value = True
@@ -60,7 +60,7 @@ class TestDaemonKillSync(unittest.TestCase):
         """Verify python invocation running schengen_watcher is recognized."""
         mock_ps.return_value = MagicMock(
             returncode=0,
-            stdout="python3 /Users/kyjbusan/code/herdr-schengen/scripts/schengen_watcher.py --target auto\n",
+            stdout="python3 /Users/kyjbusan/code/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto\n",
         )
         current_pid = os.getpid()
         is_watcher = is_process_smartgate_watcher(current_pid)

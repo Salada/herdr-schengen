@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from guard_db import get_db_connection
+from core.guard_db import get_db_connection
 
 # Safe repeatable pattern templates recognized across development sessions
 SAFE_DYNAMIC_TEMPLATE_PATTERNS = [

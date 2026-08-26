@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Herdr CLI I/O primitives shared by the watcher core and agent adapters.
 
-Isolated from schengen_watcher.py so that agent adapters can import the raw
+Isolated from cmd.schengen_watcher.py so that agent adapters can import the raw
 Herdr primitives without creating a circular dependency.
 """
 

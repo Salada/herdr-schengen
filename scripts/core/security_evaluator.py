@@ -23,23 +23,23 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-from cloud_judge import (
+from core.cloud_judge import (
     DEFAULT_REASONING_EFFORT,
     GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT,
     parse_json_verdict,
     post_cloud_judge,
     resolve_guard_llm_config,
 )
-from gray_zone_evaluator import (
+from core.gray_zone_evaluator import (
     ResourceTier,
     Verdict,
     classify_resource_tier,
     evaluate_gray_zone_operation,
     format_decision_guidance,
 )
-from redaction import redact_for_cloud
-from semgrep_evaluator import audit_script_with_semgrep
-from shellcheck_evaluator import audit_shell_with_shellcheck
+from core.redaction import redact_for_cloud
+from core.semgrep_evaluator import audit_script_with_semgrep
+from core.shellcheck_evaluator import audit_shell_with_shellcheck
 
 # 1. Sensitive file patterns (Secrets & Credentials)
 SEP = r"(^|[\s/\"'@:=])"
@@ -617,7 +617,7 @@ def _cache_cloud_verdict(cache_key, cmd_str, is_safe, reason, decision_layer, cw
     if is_safe:
         return
     try:
-        from session_cache import store_cached_result
+        from core.session_cache import store_cached_result
 
         try:
             layer = DecisionLayer(decision_layer)
@@ -665,7 +665,7 @@ def audit_with_cloud_judge(
     """
     # 0. Check Pane-scoped Session Memory BEFORE expensive LLM call (ADR-010)
     try:
-        from session_memory import check_pane_approval, record_pane_approval
+        from core.session_memory import check_pane_approval, record_pane_approval
         pane_cached = check_pane_approval(scope, cmd_str, cwd=cwd)
         if pane_cached:
             return pane_cached[0], pane_cached[1]
@@ -676,7 +676,7 @@ def audit_with_cloud_judge(
     cache_key = None
     if not is_shadow_mode():
         try:
-            from session_cache import compute_cache_key, get_cached_result
+            from core.session_cache import compute_cache_key, get_cached_result
 
             cache_key = compute_cache_key(
                 f"cj:{cmd_str}||{context}", cwd=cwd, scope=scope, agent_id=agent_id, origin=origin
@@ -708,7 +708,7 @@ def audit_with_cloud_judge(
             _cache_cloud_verdict(cache_key, cmd_str, parsed[0], parsed[1], "CLOUD_JUDGE", cwd, scope, agent_id, origin)
             if parsed[0]:
                 try:
-                    from session_memory import record_pane_approval
+                    from core.session_memory import record_pane_approval
                     record_pane_approval(scope, cmd_str, decision_layer="CLOUD_JUDGE", reason=parsed[1], cwd=cwd)
                 except Exception:
                     pass
@@ -743,7 +743,7 @@ def audit_dynamic_substitution_with_llm(
     """
     # 0. Check Pane-scoped Session Memory BEFORE expensive LLM call (ADR-010)
     try:
-        from session_memory import check_pane_approval, record_pane_approval
+        from core.session_memory import check_pane_approval, record_pane_approval
         pane_cached = check_pane_approval(scope, cmd_str, cwd=cwd)
         if pane_cached:
             return pane_cached[0], pane_cached[1]
@@ -754,7 +754,7 @@ def audit_dynamic_substitution_with_llm(
     cache_key = None
     if not is_shadow_mode():
         try:
-            from session_cache import compute_cache_key, get_cached_result
+            from core.session_cache import compute_cache_key, get_cached_result
 
             cache_key = compute_cache_key(cmd_str, cwd=cwd, scope=scope, agent_id=agent_id, origin=origin)
             cached = get_cached_result(cache_key)
@@ -828,7 +828,7 @@ def audit_dynamic_substitution_with_llm(
                 )
                 if parsed[0]:
                     try:
-                        from session_memory import record_pane_approval
+                        from core.session_memory import record_pane_approval
                         record_pane_approval(scope, cmd_str, decision_layer="LLM_INSPECTOR", reason=parsed[1], cwd=cwd)
                     except Exception:
                         pass

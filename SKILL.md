@@ -34,26 +34,26 @@ shared.
 
 ```bash
 # Guard all target panes (AGY + OpenCode)
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto
 
 # Enable the private tool-calling semantic inspector (dynamic $(cat ...) judge)
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto --use-gpt-oss
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto --use-gpt-oss
 
 # Target a specific pane / reload / stop
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target wP:p2
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload --target wS:pF
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --stop --target wS:pF
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --stop
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --target wP:p2
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --reload
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --reload --target wS:pF
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --stop --target wS:pF
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --stop
 
 # Status / history / stats
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --status
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py -n 10
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --search "git"
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --tail 20
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py -n 5 --json
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --paths
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --stats
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --status
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py -n 10
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --search "git"
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --tail 20
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py -n 5 --json
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --paths
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --stats
 ```
 
 ---
@@ -65,7 +65,7 @@ python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --stats
 > any termination.
 
 ```bash
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target auto
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto
 ```
 
 > **Proactive Escalation Heartbeat & Exponential Drain Rule**:
@@ -75,7 +75,7 @@ python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --target aut
 >   ```
 > - At the start of EVERY turn / wakeup, drain the queue:
 >   ```bash
->   python3 ~/.agents/skills/herdr-schengen/scripts/schengen_history.py --pending
+>   python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --pending
 >   ```
 > - If a `PENDING` escalation exists, immediately evaluate and prompt the human / auto-resolve.
 

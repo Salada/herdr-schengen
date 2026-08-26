@@ -33,10 +33,11 @@ except ImportError:
     _HTTP_EXCEPTIONS = (Exception,)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPTS_ROOT = SCRIPT_DIR.parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from gray_zone_evaluator import (
+from core.gray_zone_evaluator import (
     canonicalize_path,
     classify_operation,
     classify_resource_tier,
@@ -44,18 +45,19 @@ from gray_zone_evaluator import (
     is_inside_git_work_tree,
     is_git_clean_and_committed,
 )
-from feature_db import (
+from core.feature_db import (
     add_feature_request,
     create_feature_request_with_similars,
     search_similar_feature_requests,
 )
-from guard_db import (
+from core.guard_db import (
     get_db_connection,
     get_pending_escalations,
     get_recent_audit_logs,
     resolve_escalation,
 )
-from herdr_client import get_pane_text
+from adapters.herdr_client import get_pane_text
+from core.redaction import redact_for_cloud
 
 # ── Shared fallback config ──────────────────────────────────────────
 _SHARED_KEY  = os.environ.get("OPENCODE_DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
@@ -292,11 +294,12 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
         full_dump = bool(args.get("full_dump", False))
         try:
             raw = get_pane_text(pane_id, lines=lines, full_dump=full_dump)
+            safe_text = redact_for_cloud(raw)
             return json.dumps({
                 "pane_id": pane_id,
                 "lines_read": lines,
                 "full_dump": full_dump,
-                "pane_text_snippet": raw[-12000:] if raw else "",
+                "pane_text_snippet": safe_text[-12000:] if safe_text else "",
             }, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -340,7 +343,8 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                 return json.dumps({"error": f"File '{p}' does not exist or is not a regular file."})
             with open(p, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read(8192)
-            return json.dumps({"path": str(p), "content": content}, ensure_ascii=False)
+            safe_content = redact_for_cloud(content)
+            return json.dumps({"path": str(p), "content": safe_content}, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)})
 
@@ -585,6 +589,7 @@ class SchengenAgentChat:
         self.log_file = SESSIONS_DIR / f"{self.session_id}.jsonl"
         self.history: List[Dict[str, Any]] = []
         self._current_esc_id: Optional[int] = None
+        self._cancel_requested: bool = False
         
         # Token Meter: Total & Breakdown by Phase
         self.total_api_calls = 0
@@ -597,6 +602,14 @@ class SchengenAgentChat:
         self.inspector_completion_tokens = 0
         self.judge_prompt_tokens = 0
         self.judge_completion_tokens = 0
+
+    def cancel(self) -> None:
+        """Flag current in-flight LLM call to abort immediately."""
+        self._cancel_requested = True
+
+    def reset_cancel(self) -> None:
+        """Reset the cancellation flag before starting a new chat turn."""
+        self._cancel_requested = False
 
     def get_token_usage_stats(self) -> Dict[str, Any]:
         """Return cumulative token usage and cache hit ratio breakdown."""
@@ -634,6 +647,7 @@ class SchengenAgentChat:
         if not self.inspector_api_key:
             return "⚠️ No API key found. Set DEEPSEEK_API_KEY or SCHENGEN_INSPECTOR_API_KEY."
 
+        self.reset_cancel()
         active_esc = get_current_active_escalation()
         active_id = active_esc["id"] if active_esc else None
 
@@ -667,8 +681,12 @@ class SchengenAgentChat:
             retryable_statuses = {429, 500, 502, 503, 504}
             last_err_msg = ""
             for attempt in range(1, max_retries + 1):
+                if self._cancel_requested:
+                    return None, "🛑 [Interrupted]: LLM call was aborted by user."
                 try:
                     resp = await client.post(url, json=payload, headers=headers)
+                    if self._cancel_requested:
+                        return None, "🛑 [Interrupted]: LLM call was aborted by user."
                     if resp.status_code == 200:
                         return resp, None
                     if resp.status_code in retryable_statuses and attempt < max_retries:
@@ -688,6 +706,8 @@ class SchengenAgentChat:
 
         try:
             for loop_turn in range(4):
+                if self._cancel_requested:
+                    return "🛑 [Interrupted]: LLM investigation aborted by user."
                 inspector_headers = {
                     "Authorization": f"Bearer {self.inspector_api_key}",
                     "Content-Type": "application/json",

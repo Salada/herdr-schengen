@@ -22,13 +22,13 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import guard_db
-from guard_db import (
+import core.guard_db as guard_db
+from core.guard_db import (
     get_pending_escalations,
     resolve_escalation,
     get_recent_audit_logs,
 )
-from schengen_agent_llm import execute_tool_call
+from tools.schengen_agent_llm import execute_tool_call
 
 
 class TestE2EEscalationLifecycle(unittest.TestCase):

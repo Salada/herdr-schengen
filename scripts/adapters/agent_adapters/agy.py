@@ -2,9 +2,9 @@
 
 import re
 
-from herdr_client import run_cmd
+from adapters.herdr_client import run_cmd
 
-from agent_adapters.base import AgentAdapter, register
+from adapters.agent_adapters.base import AgentAdapter, register
 
 
 @register

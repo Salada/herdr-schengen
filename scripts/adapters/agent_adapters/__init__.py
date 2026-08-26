@@ -7,8 +7,8 @@ schengen_watcher.py (Open/Closed Principle).
 """
 
 # Import adapter modules to trigger registration.
-import agent_adapters.agy  # noqa: F401
-import agent_adapters.opencode  # noqa: F401
-from agent_adapters.base import AgentAdapter, INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
+import adapters.agent_adapters.agy  # noqa: F401
+import adapters.agent_adapters.opencode  # noqa: F401
+from adapters.agent_adapters.base import AgentAdapter, INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
 
 __all__ = ["AgentAdapter", "get_adapter", "target_agent_kinds", "INJECT_SKIP_CHANGED"]
