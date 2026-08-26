@@ -32,7 +32,7 @@ QA
 
 Idea
 [x] /interrupt 로 기존 llm call을 강제중단시키고 메세지를 보내는 기능 구현 (PR #75)
-[] recent audits 의 scroll 비활성화 시킬것 ( fullscreen의 경우에는 chat view처럼 시인성있는 scrollview로 교체할것
+[x] recent audits 의 scroll 비활성화 시킬것 ( fullscreen의 경우에는 chat view처럼 시인성있는 scrollview로 교체할것 (PR #76)
 [x] chat view에서 기존 llm call중단 시킬떄 esc를 특정 간격으로 두번누르면 중단되게 ( 단 recent audits fullscreen을 끌떄 esc는 이벤트에 쌓이면 안됨 ) (PR #75)
 [] command 창이 new line이 넓어지면 자동으로 up방향으로 panel크기를 증가시켜서 최대한 전체 prompt가 보이게 할것. ( max-height는 맡기지만 기존 chat view에 overlap되어도됨 ) 
 [] observer mode일 경우에는 Ask gatekeeper... UI element 를 아예 비활성화 상태로 만들어버리기
