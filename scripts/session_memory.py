@@ -63,7 +63,7 @@ class PaneSessionMemory:
 
         # 2. Persist to DB cache table
         try:
-            con = get_db_connection(db_path)
+            con = get_db_connection()
             with con:
                 con.execute(
                     """
@@ -117,7 +117,7 @@ class PaneSessionMemory:
 
         # 2. Check DB
         try:
-            con = get_db_connection(db_path)
+            con = get_db_connection()
             cur = con.execute(
                 """
                 SELECT safety_reason, decision_layer, expires_at

@@ -1373,9 +1373,14 @@ def audit_shell_command_with_taxonomy(
     If SCHENGEN_SHADOW_MODE=1 is active, dangerous commands return is_safe=True with
     counterfactual logging metadata.
     """
-    is_safe, reason, layer = audit_shell_command(
+    is_safe, reason, raw_layer = audit_shell_command(
         cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
     )
+    try:
+        layer = DecisionLayer(raw_layer) if not isinstance(raw_layer, DecisionLayer) else raw_layer
+    except (ValueError, TypeError):
+        layer = DecisionLayer.FAST_TRACK_AST
+
     taxonomy = derive_taxonomy(cmd_str, layer, is_safe, reason, origin=origin)
 
     # Shadow Mode Handling
