@@ -420,6 +420,7 @@ class SchengenTUIApp(App):
         self._notified_escalation_ids: Set[int] = set()
         self._last_active_id: Optional[int] = None
         self._processing_chat: bool = False
+        self._last_guard_active: bool = False
 
     def compose(self) -> ComposeResult:
         yield FixedHeader(show_clock=True)
@@ -531,6 +532,12 @@ class SchengenTUIApp(App):
 
         # 1. Update status header box (muted tones — accent only on state)
         locks = list_active_guard_locks()
+        is_guard_active = bool(locks)
+        if self._last_guard_active and not is_guard_active:
+            # External kill detected!
+            self._write("\n[bold red]⚠️ [Guard Daemon Alert]:[/] SmartGate 가드 데몬이 외부에서 종료되었습니다 (INACTIVE). 다시 시작하려면 [bold yellow]Ctrl+T[/] 또는 ⚡ Toggle을 누르십시오.\n")
+        self._last_guard_active = is_guard_active
+
         status_box = self.query_one("#status-box", Static)
         if locks:
             tgt, lpath, pid = locks[0]

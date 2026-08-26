@@ -89,8 +89,35 @@ def get_legacy_lock_file_path() -> Path:
     return DB_DIR / "schengen.lock"
 
 
+def is_process_smartgate_watcher(pid: int) -> bool:
+    """Verify if a running PID is actually an active schengen_watcher daemon."""
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OSError):
+        return False
+
+    # Deep verification via ps command to prevent false positives from recycled PIDs
+    try:
+        res = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        if res.returncode == 0 and res.stdout:
+            cmd = res.stdout.strip()
+            # Must match watcher or python script invocation
+            if "schengen_watcher" in cmd or "schengen" in cmd or "python" in cmd:
+                return True
+            return False
+    except Exception:
+        # If ps fails, fallback to alive check from os.kill
+        return True
+    return False
+
+
 def list_active_guard_locks() -> list:
-    """Discover all active guard lockfiles and their running PIDs."""
+    """Discover all active guard lockfiles and their running PIDs with stale-lock auto-cleanup."""
     DB_DIR.mkdir(parents=True, exist_ok=True)
     active = []
 
@@ -111,8 +138,8 @@ def list_active_guard_locks() -> list:
                 content = f.read().strip()
                 if content and content.isdigit():
                     cand_pid = int(content)
-                    os.kill(cand_pid, 0)
-                    pid = cand_pid
+                    if is_process_smartgate_watcher(cand_pid):
+                        pid = cand_pid
         except Exception:
             pid = None
 
@@ -169,8 +196,13 @@ def get_running_guard_pid(target: str = "auto"):
             pid_str = f.read().strip()
         if pid_str and pid_str.isdigit():
             pid = int(pid_str)
-            os.kill(pid, 0)
-            return pid
+            if is_process_smartgate_watcher(pid):
+                return pid
+            else:
+                try:
+                    lock_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
     except (ProcessLookupError, OSError):
         return None
     except Exception:
