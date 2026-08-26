@@ -65,12 +65,12 @@ const TARGET = process.env.SCHENGEN_TARGET || "auto";
 
 // Minimal env allowlist for the watcher child process (ADR-008 / Issue #51).
 // The guard daemon must NOT inherit the host's full environment — OpenCode injects
-// provider keys like OPENCODE_DEEPSEEK_API_KEY into its own process, and spreading
-// `{...process.env}` forward lets `ps eww` against the watcher PID dump those secrets.
+// provider keys into its own process, and spreading `{...process.env}` forward lets
+// `ps eww` against the watcher PID dump those secrets.
 // Pass only what the watcher actually needs:
 //   - GUARD_*/OPENAI_*  (trusted: the cloud-judge config, which legitimately carries keys)
 //   - HERDR_*/SCHENGEN_* (runtime markers + our own config, subject to a suffix blocklist)
-//   - explicit standard/LLM keys (OPENCODE, PATH, HOME, LANG, DEEPSEEK_API_KEY, ...)
+//   - explicit standard/LLM keys (OPENCODE, PATH, HOME, LANG, ...)
 const ENV_TRUSTED_PREFIX = [/^GUARD_/, /^OPENAI_/];
 const ENV_PREFIX_ALLOWLIST = [/^HERDR_/, /^SCHENGEN_/];
 const ENV_KEY_ALLOWLIST = new Set([
@@ -87,7 +87,6 @@ const ENV_KEY_ALLOWLIST = new Set([
   "TMPDIR",
   "PWD",
   "COLORTERM",
-  "DEEPSEEK_API_KEY",
   "AI_AGENT",
   "ANTIGRAVITY_AGENT",
   "ANTIGRAVITY_CONVERSATION_ID",

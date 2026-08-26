@@ -678,7 +678,7 @@ class SchengenTUIApp(App):
         with Horizontal(id="main-body"):
             # Left: Chat log fills space; banner floats just above input
             with Vertical(id="chat-column"):
-                yield UnselectableLabel("[bold cyan]🤖 Schengen Security Gatekeeper (DeepSeek Flash)[/]")
+                yield UnselectableLabel("[bold cyan]🤖 Schengen Security Gatekeeper (GPT)[/]")
                 yield FocusableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
                 yield Static(id="active-target-banner")
                 yield CommandTextArea(placeholder="Ask Gatekeeper or type command (Enter to submit, Shift+Enter for newline)...", id="input-box")
