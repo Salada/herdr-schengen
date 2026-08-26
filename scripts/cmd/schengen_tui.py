@@ -200,6 +200,14 @@ class AuditFullscreenModal(ModalScreen):
         border: solid $surface-lighten-1;
         margin-top: 1;
         margin-bottom: 1;
+        overflow-y: scroll;
+        overflow-x: scroll;
+        scrollbar-size-vertical: 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-color: $surface-lighten-2;
+        scrollbar-color-hover: $accent;
+        scrollbar-color-active: $accent-lighten-1;
+        scrollbar-background: transparent;
     }
     #audit-modal-help {
         dock: bottom;
@@ -250,10 +258,25 @@ class FixedHeader(Header):
 
 
 class AuditDataTable(DataTable):
-    """Custom DataTable that triggers fullscreen audit modal on click or selection."""
+    """Compact Recent Audits table with scrolling disabled; opens fullscreen modal on click or selection."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(
+            show_cursor=False,
+            **kwargs,
+        )
+        self.show_vertical_scrollbar = False
+        self.show_horizontal_scrollbar = False
+
     def on_click(self, event: events.Click) -> None:
         event.stop()
         self.app.push_screen(AuditFullscreenModal())
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        event.stop()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        event.stop()
 
 
 class AuditSectionHeader(Label):
@@ -456,6 +479,14 @@ class SchengenTUIApp(App):
         margin-bottom: 1;
         content-align: left middle;
     }
+    #audit-table {
+        height: 11;
+        background: $surface-darken-1;
+        border: solid $surface-lighten-1;
+        margin-bottom: 1;
+        overflow-x: hidden;
+        overflow-y: hidden;
+    }
     DataTable {
         height: 11;
         background: $surface-darken-1;
@@ -627,7 +658,11 @@ class SchengenTUIApp(App):
             return
 
         # 0. Update Role header box (full width, dedicated panel)
-        role_box = self.query_one("#role-box", Static)
+        try:
+            role_box = self.query_one("#role-box", Static)
+        except Exception:
+            return
+
         if self.is_controller:
             role_box.update(f"[bold green]👑 CONTROLLER MODE[/]  [dim]PID {os.getpid()}[/]\n[dim]Autonomous LLM & Key Injection active[/]")
         else:

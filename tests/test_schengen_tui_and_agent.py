@@ -530,5 +530,30 @@ class TestTUIInterruptAndDoubleESC(unittest.IsolatedAsyncioTestCase):
                 app.tui_lock_fd.close()
 
 
+class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
+    """Test Recent Audits scroll disabling and Fullscreen Modal scroll configuration."""
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_audit_table_scroll_disabled(self):
+        from schengen_tui import SchengenTUIApp, AuditDataTable
+        app = SchengenTUIApp()
+        async with app.run_test() as pilot:
+            table = app.query_one("#audit-table", AuditDataTable)
+            self.assertFalse(table.show_vertical_scrollbar)
+            self.assertFalse(table.show_horizontal_scrollbar)
+            self.assertFalse(table.show_cursor)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_fullscreen_modal_css_scroll_styling(self):
+        from schengen_tui import AuditFullscreenModal
+        css = AuditFullscreenModal.CSS
+        self.assertIn("scrollbar-size-vertical: 1;", css)
+        self.assertIn("scrollbar-size-horizontal: 1;", css)
+        self.assertIn("overflow-y: scroll;", css)
+        self.assertIn("overflow-x: scroll;", css)
+
+
 if __name__ == "__main__":
     unittest.main()
