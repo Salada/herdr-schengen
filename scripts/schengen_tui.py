@@ -297,11 +297,31 @@ class CommandTextArea(TextArea):
             **kwargs,
         )
 
-    def watch_text(self, new_text: str) -> None:
-        """Dynamically adjust height based on multiline contents."""
-        line_count = new_text.count("\n") + 1
-        target_height = min(10, max(3, line_count + 2))
+    def _update_height(self, new_text: Optional[str] = None) -> None:
+        """Dynamically adjust height upward based on multiline contents and word-wrap."""
+        txt = new_text if new_text is not None else self.text
+        if not txt:
+            self.styles.height = 3
+            return
+
+        total_lines = 0
+        w = max(20, self.size.width - 4) if self.size.width > 0 else 80
+        for segment in txt.split("\n"):
+            seg_len = len(segment)
+            total_lines += max(1, (seg_len + w - 1) // w if seg_len > 0 else 1)
+
+        target_height = min(16, max(3, total_lines + 2))
         self.styles.height = target_height
+
+    def load_text(self, text: str) -> None:
+        super().load_text(text)
+        self._update_height(text)
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        self._update_height(event.text_area.text)
+
+    def watch_text(self, new_text: str) -> None:
+        self._update_height(new_text)
 
     def on_key(self, event: events.Key) -> None:
         is_shift_enter = (
@@ -429,7 +449,7 @@ class SchengenTUIApp(App):
         dock: bottom;
         height: 3;
         min-height: 3;
-        max-height: 10;
+        max-height: 16;
         margin-top: 1;
         margin-bottom: 0;
         border: tall $surface-lighten-2;
@@ -441,6 +461,12 @@ class SchengenTUIApp(App):
         border-top: tall $surface-lighten-2;
         border-left: tall $surface-lighten-2;
         border-right: tall $surface-lighten-2;
+    }
+    #input-box:disabled {
+        opacity: 0.5;
+        background: $surface-darken-2;
+        border: solid $surface-lighten-1;
+        color: $text-muted;
     }
     #status-container {
         height: 4;
@@ -599,7 +625,11 @@ class SchengenTUIApp(App):
                 self._notified_escalation_ids.add(e["id"])
 
         input_widget = self.query_one("#input-box", CommandTextArea)
-        input_widget.focus()
+        if not self.is_controller:
+            input_widget.disabled = True
+            input_widget.placeholder = "🔒 [Observer Mode]: Read-only instance (Input disabled). Leader PID controls gate."
+        else:
+            input_widget.focus()
 
         self.set_interval(0.5, self.update_radar_data)
 
@@ -607,8 +637,8 @@ class SchengenTUIApp(App):
             self._write("[bold green]🛡️ Schengen Security Gatekeeper TUI is online (Controller Mode).[/]")
             self._write("[dim]• [bold yellow]⚡ Toggle Guard[/]: Button or [bold cyan]Ctrl+T[/] (or /start, /stop)\n• Role: [green]Controller (Active Authority)[/]\n• Mode: Strict Sequential Single-Pending FIFO[/]\n")
         else:
-            self._write(f"[bold yellow]👁️ Schengen TUI is running in OBSERVER MODE (Leader PID: {self.leader_pid}).[/]")
-            self._write("[dim]• Read-only dashboard active. Auto-awaken and key injection are disabled on this instance.[/]\n")
+            self._write(f"[bold yellow]👁️ Schengen Security Gatekeeper TUI is online (Observer Mode - PID {os.getpid()}).[/]")
+            self._write(f"[dim]• Role: [yellow]Observer (Read-Only)[/]\n• Active Controller: Leader PID {self.leader_pid or 'Active'}\n• Input & mutation actions are disabled.\n[/]")
 
     def on_unmount(self) -> None:
         if self.tui_lock_fd:

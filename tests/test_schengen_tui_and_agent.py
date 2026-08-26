@@ -555,5 +555,35 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
         self.assertIn("overflow-x: scroll;", css)
 
 
+class TestTUIInputExpansionAndObserverDisabled(unittest.IsolatedAsyncioTestCase):
+    """Test dynamic height expansion in CommandTextArea and observer mode input disablement."""
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_input_text_area_multiline_expansion(self):
+        from schengen_tui import CommandTextArea
+        box = CommandTextArea()
+        box.text = "Line 1"
+        self.assertEqual(box.styles.height.value, 3)
+        
+        box.text = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5"
+        self.assertEqual(box.styles.height.value, 7)
+        
+        # Long prompt with 20 newlines should clamp to 16
+        box.text = "\n".join([f"Prompt line {i}" for i in range(20)])
+        self.assertEqual(box.styles.height.value, 16)
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_observer_mode_input_disabled(self):
+        from schengen_tui import SchengenTUIApp, CommandTextArea
+        app = SchengenTUIApp()
+        app.is_controller = False  # Simulate observer mode
+        async with app.run_test() as pilot:
+            input_box = app.query_one("#input-box", CommandTextArea)
+            self.assertTrue(input_box.disabled)
+            self.assertIn("Observer Mode", input_box.placeholder)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+
 if __name__ == "__main__":
     unittest.main()
