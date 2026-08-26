@@ -272,6 +272,18 @@ class AuditDataTable(DataTable):
         event.stop()
         self.app.push_screen(AuditFullscreenModal())
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        self.app.push_screen(AuditFullscreenModal())
+
+    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
+        event.stop()
+        self.app.push_screen(AuditFullscreenModal())
+
+    def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
+        event.stop()
+        self.app.push_screen(AuditFullscreenModal())
+
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
 
