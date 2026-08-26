@@ -151,7 +151,14 @@ class FocusableRichLog(RichLog):
         return line
 
     def on_key(self, event: events.Key) -> None:
-        if event.key == "pageup":
+        if event.key == "escape":
+            app = getattr(self, "app", None) or getattr(self, "_app", None)
+            if app and hasattr(app, "handle_esc_press"):
+                if app.handle_esc_press():
+                    event.stop()
+                    event.prevent_default()
+                    return
+        elif event.key == "pageup":
             event.stop()
             self.scroll_page_up()
         elif event.key == "pagedown":
@@ -298,6 +305,13 @@ class CommandTextArea(TextArea):
                 process_fn = getattr(app, "process_user_chat", None)
                 if callable(process_fn):
                     process_fn(text)
+        elif event.key == "escape":
+            app = getattr(self, "app", None) or getattr(self, "_app", None)
+            if app and hasattr(app, "handle_esc_press"):
+                if app.handle_esc_press():
+                    event.stop()
+                    event.prevent_default()
+                    return
         elif is_shift_enter:
             event.prevent_default()
             event.stop()
@@ -485,6 +499,31 @@ class SchengenTUIApp(App):
         self._last_active_id: Optional[int] = None
         self._processing_chat: bool = False
         self._last_guard_active: bool = False
+        self._last_esc_time: float = 0.0
+
+    def handle_esc_press(self) -> bool:
+        """Handle ESC key press with double-press (<= 0.4s) abort for in-flight LLM call."""
+        # If audit modal is currently active on top, do not capture ESC for chat abort
+        if len(self.screen_stack) > 1:
+            return False
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_esc_time <= 0.4:
+            self._last_esc_time = 0.0
+            if self._processing_chat:
+                self.interrupt_inflight_chat(reason="Double-ESC pressed")
+                return True
+        else:
+            self._last_esc_time = now
+        return False
+
+    def interrupt_inflight_chat(self, reason: str = "User interrupted") -> None:
+        """Interrupt and abort current in-flight LLM agent call."""
+        if hasattr(self, "agent") and self.agent:
+            self.agent.cancel()
+        self._processing_chat = False
+        self._write(f"\n[bold red]🛑 [Aborted]:[/] In-flight LLM call interrupted ({reason}).\n")
+        self.update_radar_data(force=True)
 
     def compose(self) -> ComposeResult:
         yield FixedHeader(show_clock=True)
@@ -810,8 +849,17 @@ class SchengenTUIApp(App):
                     self._write(f"    • [dim]#{sim['id']} [{sim['status']}][/] [dim]{rich_escape(sim['title'])}[/]")
             return
 
+        # 2. In-flight Interruption Command Handling (/interrupt [new_message])
+        if trimmed == "/interrupt" or trimmed.startswith("/interrupt "):
+            new_msg = trimmed[len("/interrupt"):].strip()
+            self.interrupt_inflight_chat(reason="/interrupt command")
+            if new_msg:
+                # Dispatch the new message immediately after abort
+                self.process_user_chat(new_msg)
+            return
+
         if self._processing_chat:
-            self._write("[dim]⏳ Another investigation/chat is currently in-flight. Please wait...[/]")
+            self._write("[dim]⏳ Another investigation/chat is currently in-flight. Press ESC twice or type [bold yellow]/interrupt[/] to abort.[/]")
             return
 
         if not self.is_controller and (user_msg.startswith("/approve") or user_msg.startswith("/reject") or user_msg.startswith("/start") or user_msg.startswith("/stop")):
