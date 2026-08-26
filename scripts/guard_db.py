@@ -634,6 +634,17 @@ def resolve_escalation(
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        approved_cmds: list[tuple[str, str]] = []
+        if resolution_status == "RESOLVED":
+            # Fetch raw commands to record in pane session memory
+            if escalation_id:
+                cursor.execute("SELECT pane_id, raw_command FROM pending_escalations WHERE id = ?", (escalation_id,))
+            elif command_hash:
+                cursor.execute("SELECT pane_id, raw_command FROM pending_escalations WHERE pane_id = ? AND command_hash = ?", (pane_id, command_hash))
+            else:
+                cursor.execute("SELECT pane_id, raw_command FROM pending_escalations WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')", (pane_id,))
+            approved_cmds = [(row["pane_id"], row["raw_command"]) for row in cursor.fetchall()]
+
         if escalation_id:
             cursor.execute(
                 """
@@ -662,6 +673,15 @@ def resolve_escalation(
                 (resolution_status, now_iso, pane_id),
             )
         conn.commit()
+
+        # Record in PaneSessionMemory for fast-path 0.1ms approval
+        if approved_cmds:
+            try:
+                from session_memory import record_pane_approval
+                for p_id, raw_c in approved_cmds:
+                    record_pane_approval(p_id, raw_c, decision_layer="HUMAN_APPROVAL", reason="Approved by human operator")
+            except Exception:
+                pass
 
 
 def cleanup_escalations(

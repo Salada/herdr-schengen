@@ -659,6 +659,15 @@ def audit_with_cloud_judge(
     Returns (is_safe, reason). Fail-closed: any error / unparseable / uncertain
     verdict returns is_safe=False so the caller defers to human review.
     """
+    # 0. Check Pane-scoped Session Memory BEFORE expensive LLM call (ADR-010)
+    try:
+        from session_memory import check_pane_approval, record_pane_approval
+        pane_cached = check_pane_approval(scope, cmd_str, cwd=cwd)
+        if pane_cached:
+            return pane_cached[0], pane_cached[1]
+    except Exception:
+        pass
+
     # Scoped cache (mirrors the dynamic-substitution inspector; key is namespaced 'cj:').
     cache_key = None
     if not is_shadow_mode():
@@ -693,6 +702,12 @@ def audit_with_cloud_judge(
         parsed = parse_json_verdict(content_str)
         if parsed is not None:
             _cache_cloud_verdict(cache_key, cmd_str, parsed[0], parsed[1], "CLOUD_JUDGE", cwd, scope, agent_id, origin)
+            if parsed[0]:
+                try:
+                    from session_memory import record_pane_approval
+                    record_pane_approval(scope, cmd_str, decision_layer="CLOUD_JUDGE", reason=parsed[1], cwd=cwd)
+                except Exception:
+                    pass
             return parsed
         if raise_on_error:
             raise RuntimeError(f"Unparseable cloud judge output: {content_str}")
@@ -722,6 +737,15 @@ def audit_dynamic_substitution_with_llm(
     available via OPENAI_BASE_URL). If no endpoint is configured, or the judge is
     unreachable / uncertain, fails closed to human review.
     """
+    # 0. Check Pane-scoped Session Memory BEFORE expensive LLM call (ADR-010)
+    try:
+        from session_memory import check_pane_approval, record_pane_approval
+        pane_cached = check_pane_approval(scope, cmd_str, cwd=cwd)
+        if pane_cached:
+            return pane_cached[0], pane_cached[1]
+    except Exception:
+        pass
+
     # Check scoped LLM cache (B1: cache strictly scoped to expensive LLM tier)
     cache_key = None
     if not is_shadow_mode():
@@ -798,6 +822,12 @@ def audit_dynamic_substitution_with_llm(
                 _cache_cloud_verdict(
                     cache_key, cmd_str, parsed[0], parsed[1], "LLM_INSPECTOR", cwd, scope, agent_id, origin
                 )
+                if parsed[0]:
+                    try:
+                        from session_memory import record_pane_approval
+                        record_pane_approval(scope, cmd_str, decision_layer="LLM_INSPECTOR", reason=parsed[1], cwd=cwd)
+                    except Exception:
+                        pass
                 return parsed
             if raise_on_error:
                 raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
