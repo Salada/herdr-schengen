@@ -105,6 +105,31 @@ Approved. All files verified safely."""
         self.assertNotIn("tool_calls", cleaned_dsml)
         self.assertIn("Approved. All files verified safely.", cleaned_dsml)
 
+    def test_format_tool_call_beautified(self):
+        from schengen_agent_llm import format_tool_call_beautified
+        # 1. Path check
+        s1 = format_tool_call_beautified("investigate_path_details", {"target_path": "~/code/file.py"})
+        self.assertIn("🔍 **[Path Check]**", s1)
+        self.assertIn("~/code/file.py", s1)
+
+        # 2. Pane buffer
+        s2 = format_tool_call_beautified("investigate_pane_history", {"pane_id": "w1D:p1", "lines": 100, "full_dump": True})
+        self.assertIn("📜 **[Pane Buffer]**", s2)
+        self.assertIn("scrollback", s2)
+
+        # 3. File read
+        s3 = format_tool_call_beautified("read_file_snippet", {"target_path": "TODO.md"})
+        self.assertIn("📄 **[File Read]**", s3)
+
+        # 4. Approval
+        s4 = format_tool_call_beautified("approve_escalation", {"escalation_id": 42, "english_feedback": "Approved."})
+        self.assertIn("✅ **[Auto Approve]**", s4)
+        self.assertIn("#42", s4)
+
+        # 5. Reject
+        s5 = format_tool_call_beautified("reject_escalation", {"escalation_id": 42, "english_feedback": "Critical risk."})
+        self.assertIn("🛑 **[Action Reject]**", s5)
+
     @patch("schengen_agent_llm.get_current_active_escalation")
     def test_build_system_prompt_structure(self, mock_get_active):
         mock_get_active.return_value = {

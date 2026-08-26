@@ -492,6 +492,46 @@ def clean_llm_response(text: str) -> str:
     return cleaned
 
 
+def format_tool_call_beautified(fn_name: str, fn_args: Dict[str, Any]) -> str:
+    """Format Inspector tool invocation into a high-visibility semantic badge."""
+    if fn_name == "investigate_path_details":
+        target = fn_args.get("target_path", "")
+        return f"🔍 **[Path Check]**: `{target}`"
+
+    elif fn_name == "investigate_pane_history":
+        pane = fn_args.get("pane_id", "")
+        lines = fn_args.get("lines", 100)
+        dump = " · scrollback" if fn_args.get("full_dump") else ""
+        return f"📜 **[Pane Buffer]**: `{pane}` ({lines} lines{dump})"
+
+    elif fn_name == "read_file_snippet":
+        target = fn_args.get("target_path", "")
+        return f"📄 **[File Read]**: `{target}`"
+
+    elif fn_name == "approve_escalation":
+        esc_id = fn_args.get("escalation_id", "")
+        note = fn_args.get("english_feedback", "")
+        note_short = f" — *{note[:60]}…*" if len(note) > 60 else f" — *{note}*"
+        return f"✅ **[Auto Approve]**: Escalation `#{esc_id}`{note_short}"
+
+    elif fn_name == "reject_escalation":
+        esc_id = fn_args.get("escalation_id", "")
+        reason = fn_args.get("english_feedback", "")
+        return f"🛑 **[Action Reject]**: Escalation `#{esc_id}` — *{reason}*"
+
+    elif fn_name == "create_feature_request":
+        title = fn_args.get("title", "")
+        prio = fn_args.get("priority", "NORMAL")
+        return f"💡 **[Feature Queued]**: `{title}` *(Priority: {prio})*"
+
+    elif fn_name == "search_feature_requests":
+        query = fn_args.get("query", "")
+        return f"🔎 **[Backlog Search]**: *\"{query}\"*"
+
+    raw = json.dumps(fn_args, ensure_ascii=False)
+    return f"⚙️ **[Inspector]**: `{fn_name}` `{raw}`"
+
+
 def build_system_prompt() -> str:
     active_esc = get_current_active_escalation()
 
@@ -759,12 +799,7 @@ class SchengenAgentChat:
                         fn_args = {}
 
                     if on_chunk:
-                        raw_args = json.dumps(fn_args, ensure_ascii=False)
-                        if len(raw_args) > 60:
-                            formatted_args = json.dumps(fn_args, ensure_ascii=False, indent=2)
-                            chunk_msg = f"⚙️ **[Inspector]**: `{fn_name}`\n```json\n{formatted_args}\n```"
-                        else:
-                            chunk_msg = f"⚙️ **[Inspector]**: `{fn_name}` `{raw_args}`"
+                        chunk_msg = format_tool_call_beautified(fn_name, fn_args)
                         on_chunk(chunk_msg)
 
                     tool_result = execute_tool_call(fn_name, fn_args)
