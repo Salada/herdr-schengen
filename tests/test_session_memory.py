@@ -147,6 +147,49 @@ class TestPaneSessionMemory(unittest.TestCase):
         self.assertIsNone(check_pane_approval("pane-1", cmd1, db_path=self.db_path))
         self.assertIsNotNone(check_pane_approval("pane-2", cmd2, db_path=self.db_path))
 
+    def test_safe_pattern_template_matching(self):
+        """Verify similar command with different search arguments matches session pattern template."""
+        cmd1 = "python3 scripts/schengen_feature.py --search '모드'"
+        cmd2 = "python3 scripts/schengen_feature.py --search '테마'"
+        pane_id = "w1D:p1"
+
+        # Record approval for cmd1
+        record_pane_approval(
+            pane_id=pane_id,
+            raw_cmd=cmd1,
+            decision_layer="LLM_INSPECTOR",
+            reason="Safe query script",
+            db_path=self.db_path,
+        )
+
+        # Check cmd2 (different arg): must match template in the same pane
+        res = check_pane_approval(pane_id, cmd2, db_path=self.db_path)
+        self.assertIsNotNone(res)
+        assert res is not None
+        self.assertTrue(res[0])
+        self.assertIn("Matches previously approved template", res[1])
+
+    def test_git_read_template_matching_and_isolation(self):
+        """Verify git show hash variations match template in the same pane but do not leak across panes."""
+        cmd1 = "git show a1b2c3d"
+        cmd2 = "git show e4f5g6h"
+        pane_a = "w1D:p1"
+        pane_b = "w1D:p2"
+
+        # Record approval in pane A
+        record_pane_approval(pane_id=pane_a, raw_cmd=cmd1, decision_layer="LLM_INSPECTOR", reason="Safe git show")
+
+        # Check in pane A: matches template
+        res_a = check_pane_approval(pane_a, cmd2)
+        self.assertIsNotNone(res_a)
+        assert res_a is not None
+        self.assertTrue(res_a[0])
+        self.assertIn("Matches previously approved template", res_a[1])
+
+        # Check in pane B: must NOT match (pane isolation)
+        res_b = check_pane_approval(pane_b, cmd2)
+        self.assertIsNone(res_b)
+
 
 if __name__ == "__main__":
     unittest.main()

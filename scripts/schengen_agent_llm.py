@@ -493,8 +493,10 @@ All previous tasks are finished. If the user asks questions, inform them that no
 - Detected Target: `{target_candidate}`
 
 [🔬 AUTONOMOUS INVESTIGATION & ADJUDICATION PROTOCOL]:
-1. **Autonomous Triaging & Investigation**:
-   - Assess the intercepted command. You have full discretion to call investigation tools:
+1. **Autonomous Triaging & Session Pattern Recognition**:
+   - Assess the intercepted command.
+   - **Session Pattern Memory**: If the command is a repetition or slight variation of a previously approved benign operation in this session (e.g. search keyword query, repetitive git query, pytest runner, or temporary file redirection), recognize this pattern and proceed directly to approval without redundant tool loops.
+   - You have full discretion to call investigation tools when necessary:
      - Call `investigate_path_details(target_path='{target_candidate}')` if the target filesystem status is unverified.
      - Call `investigate_pane_history(pane_id='{active_esc['pane_id']}')` to inspect worker intent from recent terminal buffer.
      - Call `read_file_snippet(target_path=...)` if a script/payload needs inspection.

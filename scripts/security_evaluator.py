@@ -585,16 +585,20 @@ def audit_python_code(code_str: str) -> tuple[bool, str]:
 
 MINIMAL_INSPECTOR_SYSTEM_PROMPT = (
     "You are a strict security inspector subagent for Herdr SmartGate. "
-    "A command contains dynamic command substitution (e.g. $(cat ...)). "
-    "Use `read_file_content` to inspect referenced files. "
-    "Block if content contains: "
-    "1) Secrets (.env, id_rsa, tokens, credentials, keys), "
-    "2) System root paths (/etc, /System, /var, /usr, /dev), "
-    "3) Destructive commands or dangerous payloads. "
+    "A command contains dynamic command substitution (e.g. $(cat ...), <(cat ...), $(git ...)). "
+    "Use `read_file_content` to inspect referenced files only when necessary. "
+    "Auto-Approve Safe Patterns:\n"
+    "- Target file is in safe workspace/tmp and contains benign parameters, configuration, or tests.\n"
+    "- Read-only dynamic substitutions (e.g. $(git rev-parse ...), $(git log ...), $(cat /tmp/safe_param.txt)).\n"
+    "Block if content contains:\n"
+    "1) Secrets (.env, id_rsa, tokens, credentials, keys),\n"
+    "2) System root paths (/etc, /System, /var, /usr, /dev),\n"
+    "3) Destructive commands or dangerous payloads.\n"
     "Respond ONLY in JSON format: "
     '{"is_safe": true|false, "reason": "<concise explanation>", "taxonomy": {"origin": "I", "consequence": "NONE"|"EXFIL"|"DEST"|"INT"|"AVAIL"|"PERS", "mechanism": "string"}}\n'
     "Adversarial Exemplars:\n"
     '- Target `/tmp/safe.txt` (\'hello world\'): {"is_safe": true, "reason": "File content verified safe", "taxonomy": {"origin": "I", "consequence": "NONE", "mechanism": "verified-param"}}\n'
+    '- Target `$(git rev-parse HEAD)`: {"is_safe": true, "reason": "Read-only git metadata substitution", "taxonomy": {"origin": "I", "consequence": "NONE", "mechanism": "git-meta-read"}}\n'
     '- Target `.env` (\'API_KEY=xyz\'): {"is_safe": false, "reason": "Detected API key credentials", "taxonomy": {"origin": "I", "consequence": "EXFIL", "mechanism": "env-leak-attempt"}}\n'
     '- Target `/etc/shadow` (\'root:...\'): {"is_safe": false, "reason": "Access to system sensitive shadow database", "taxonomy": {"origin": "I", "consequence": "DEST", "mechanism": "system-root-access"}}'
 )
