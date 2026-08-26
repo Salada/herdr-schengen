@@ -221,6 +221,35 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
         self.assertEqual(rows[0]["action"], "APPROVE")
         self.assertEqual(rows[0]["feedback"], "Approved. Safe.")
 
+    def test_adjudication_sets_resolution(self):
+        esc_id = guard_db.enqueue_pending_escalation(
+            "w1D:p1", "rm -rf /tmp/x", "destructive", "GRAY_ZONE", agent_kind="opencode"
+        )
+        self.assertIsNone(guard_db.get_escalation_resolution("w1D:p1", "rm -rf /tmp/x"))
+        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved.")
+        self.assertEqual(guard_db.get_escalation_resolution("w1D:p1", "rm -rf /tmp/x"), "APPROVED")
+
+    def test_cleanup_sets_unanswered_resolution(self):
+        esc_id = guard_db.enqueue_pending_escalation(
+            "w1D:p1", "rm -rf /tmp/y", "destructive", "GRAY_ZONE", agent_kind="opencode"
+        )
+        guard_db.cleanup_escalations(escalation_ids=[esc_id], new_status="STALE_EXPIRED")
+        self.assertEqual(guard_db.get_escalation_resolution("w1D:p1", "rm -rf /tmp/y"), "UNANSWERED")
+
+    def test_recent_audit_logs_includes_resolution(self):
+        guard_db.record_audit_log(
+            "w1D:p1", "rm -rf /tmp/x", "MANUAL_DELEGATED", "destructive",
+            agent_kind="opencode", decision_layer="GRAY_ZONE",
+        )
+        esc_id = guard_db.enqueue_pending_escalation(
+            "w1D:p1", "rm -rf /tmp/x", "destructive", "GRAY_ZONE", agent_kind="opencode"
+        )
+        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved.")
+        logs = guard_db.get_recent_audit_logs(limit=5)
+        matching = [l for l in logs if l["raw_command"] == "rm -rf /tmp/x"]
+        self.assertTrue(matching)
+        self.assertEqual(matching[0].get("resolution"), "APPROVED")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -171,6 +171,8 @@ def init_db():
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN session_id TEXT")
         if "dialog_snapshot" not in p_columns:
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN dialog_snapshot TEXT")
+        if "resolution" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN resolution TEXT")
 
         # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
@@ -487,22 +489,34 @@ def get_recent_audit_logs(
     pane_id: Optional[str] = None,
     layer: Optional[str] = None,
 ) -> list[dict]:
-    """Retrieve recent audit events from SQLite3 database with flexible filtering."""
+    """Retrieve recent audit events from SQLite3 database with flexible filtering.
+
+    Each row also carries the escalation ``resolution`` (APPROVED / REJECTED /
+    UNANSWERED / None) via a LEFT JOIN on pending_escalations (pane_id + raw_command),
+    so the TUI can display the post-escalation processing status for ESCALATED records.
+    """
     init_db()
-    query = "SELECT id, timestamp, pane_id, agent_kind, raw_command, normalized_pattern, decision, safety_reason, COALESCE(decision_layer, 'FAST_TRACK_AST') as decision_layer FROM audit_logs WHERE 1=1"
+    query = """
+        SELECT a.id, a.timestamp, a.pane_id, a.agent_kind, a.raw_command, a.normalized_pattern,
+               a.decision, a.safety_reason, COALESCE(a.decision_layer, 'FAST_TRACK_AST') AS decision_layer,
+               pe.resolution AS resolution
+        FROM audit_logs a
+        LEFT JOIN pending_escalations pe ON pe.pane_id = a.pane_id AND pe.raw_command = a.raw_command
+        WHERE 1=1
+    """
     params = []
 
     if decision:
-        query += " AND decision = ?"
+        query += " AND a.decision = ?"
         params.append(decision.upper())
     if pane_id:
-        query += " AND pane_id = ?"
+        query += " AND a.pane_id = ?"
         params.append(pane_id)
     if layer:
-        query += " AND UPPER(decision_layer) = ?"
+        query += " AND UPPER(a.decision_layer) = ?"
         params.append(layer.upper())
 
-    query += " ORDER BY id DESC LIMIT ?"
+    query += " ORDER BY a.id DESC LIMIT ?"
     params.append(max(1, limit))
 
     with get_db_connection() as conn:
@@ -533,6 +547,17 @@ def get_audit_log_by_id(audit_id: int) -> Optional[dict]:
     with get_db_connection() as conn:
         row = conn.execute("SELECT * FROM audit_logs WHERE id = ?", (audit_id,)).fetchone()
     return dict(row) if row else None
+
+
+def get_escalation_resolution(pane_id: str, raw_command: str) -> Optional[str]:
+    """Return the post-escalation resolution (APPROVED/REJECTED/UNANSWERED) for a command."""
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT resolution FROM pending_escalations WHERE pane_id = ? AND raw_command = ? ORDER BY id DESC LIMIT 1",
+            (pane_id, raw_command),
+        ).fetchone()
+    return row["resolution"] if row else None
 
 
 def get_adjudications_for_audit(
@@ -672,6 +697,7 @@ def record_adjudication(
     """Persist an approve/deny adjudication and its instruction for auditability."""
     init_db()
     now_iso = datetime.now(timezone.utc).isoformat()
+    resolution = "APPROVED" if action == "APPROVE" else "REJECTED"
     with get_db_connection() as conn:
         conn.execute(
             """
@@ -680,6 +706,11 @@ def record_adjudication(
             """,
             (escalation_id, pane_id, agent_kind, action, feedback, now_iso),
         )
+        if escalation_id:
+            conn.execute(
+                "UPDATE pending_escalations SET resolution = ? WHERE id = ?",
+                (resolution, escalation_id),
+            )
         conn.commit()
 
 
@@ -907,7 +938,7 @@ def cleanup_escalations(
             cursor.execute(
                 f"""
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?
+                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED')
                 WHERE id IN ({placeholders})
             """,
                 [new_status, now_iso] + escalation_ids,
@@ -921,7 +952,7 @@ def cleanup_escalations(
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?
+                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED')
                 WHERE status IN ('PENDING', 'DELIVERED')
                   AND started_at < ?
             """,
@@ -935,7 +966,7 @@ def cleanup_escalations(
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?
+                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED')
                 WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')
             """,
                 (new_status, now_iso, pane_id),
