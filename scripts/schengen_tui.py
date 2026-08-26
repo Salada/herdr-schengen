@@ -231,8 +231,9 @@ class CommandTextArea(TextArea):
                     return
                 self.text = ""
                 self.styles.height = 3
-                if app and hasattr(app, "process_user_chat"):
-                    app.process_user_chat(text)
+                process_fn = getattr(app, "process_user_chat", None)
+                if callable(process_fn):
+                    process_fn(text)
         elif is_shift_enter:
             event.prevent_default()
             event.stop()

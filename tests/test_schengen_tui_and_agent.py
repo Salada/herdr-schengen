@@ -294,7 +294,7 @@ class TestTUIInputUX(unittest.TestCase):
         text_area = CommandTextArea()
         mock_app = MagicMock()
         mock_app._processing_chat = True
-        text_area._app = mock_app
+        setattr(text_area, "_app", mock_app)
 
         text_area.text = "inflight command to retain"
         event = MagicMock()
