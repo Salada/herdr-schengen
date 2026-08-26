@@ -209,6 +209,14 @@ class TestSchengenTUIApp(unittest.TestCase):
         self.assertIn("border-left: heavy $warning;", css)
         self.assertIn("background: $surface-darken-1;", css)
 
+    def test_css_selection_visibility(self):
+        assert SchengenTUIApp is not None
+        css = SchengenTUIApp.CSS
+        # Text selection must be an opaque bright-cyan block with black text.
+        self.assertIn("Screen > .screen--selection", css)
+        self.assertIn("background: #00FFFF;", css)
+        self.assertIn("color: #000000;", css)
+
     def test_clear_chat_action(self):
         assert SchengenTUIApp is not None
         app = SchengenTUIApp()
@@ -478,6 +486,19 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(sel)
             self.assertTrue(len(sel) > 0)
             self.assertEqual(app.clipboard, sel)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_selection_component_style_high_contrast(self):
+        from cmd.schengen_tui import SchengenTUIApp
+        app = SchengenTUIApp()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            st = app.screen.get_component_styles("screen--selection")
+            self.assertEqual(st.color.hex, "#000000")
+            self.assertEqual(st.background.hex, "#00FFFF")
+            self.assertTrue(st.text_style.bold)
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
 

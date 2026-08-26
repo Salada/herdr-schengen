@@ -485,6 +485,12 @@ class SchengenTUIApp(App):
         layout: vertical;
         background: $surface-darken-2;
     }
+    /* Maximize text-selection visibility: opaque bright cyan block with black text. */
+    Screen > .screen--selection {
+        background: #00FFFF;
+        color: #000000;
+        text-style: bold;
+    }
     #main-body {
         width: 100%;
         height: 1fr;
