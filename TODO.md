@@ -50,4 +50,5 @@ Round 2 - Opencode
 [x] 승인/거절 지침전달 toggle: TUI 버튼(Approve/Reject Instr) + SQLite guard_config + CLI args(--send/--no-send-*). default: approve=false, reject=true.
 [x] 승인/deny 지침·논의를 SQLite adjudication_log table로 기록 (record_adjudication).
 [x] bloat_message 방지: approve 지침전달 기본 false로 opencode 승인 시 피드백 주입 중단.
-[] default-model을 gpt-5.6-luna 로, default-reasoning을 (설정가능하다면 ) low로 해줘. 정확히는 deekseek에 관련된 설정을 일부러 모든 코드에서 없애고 싶어. 다른게 아니라 내가 활동하는 회사에서 중국모델에 대한 거부감이 있어서. 이후 설정은 가능하게하더라도 기본 코드에는 노출하고 싶지않다. 
+[x] default-model을 gpt-5.6-luna 로, default-reasoning을 low로 (ADR-011): 코드·docs·plugin에서 DeepSeek 기본/문자열 제거, OPENAI_API_KEY/OPENAI_BASE_URL 표준화. (deepseek-v4-flash는 가격대비 최고, gpt-oss-120b 로컬이 안전 — ADR-011 Alternatives에 기록)
+[] select-style-suggestion.md 를 참조하여 스타일 개선을 부탁한다. 

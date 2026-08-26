@@ -47,8 +47,10 @@ SmartGate supports unified credential loading from user profile (`~/.zshrc`) or 
 
 ### 1) Standard Unified Fallback
 ```bash
-export OPENCODE_DEEPSEEK_API_KEY="sk-..."  # or DEEPSEEK_API_KEY
-export DEEPSEEK_BASE_URL="https://api.deepseek.com"
+export OPENAI_API_KEY="sk-..."           # OpenAI-standard (default provider)
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+# Optional: keep using a self-hosted / alternate OpenAI-compatible endpoint
+# (e.g. DeepSeek at home): export OPENAI_BASE_URL="https://api.deepseek.com/v1"
 ```
 
 ### 2) Dual-Model Phase Overrides (Optional / Advanced)
@@ -57,19 +59,19 @@ You can configure independent models and endpoints for Phase 1 (Inspector tool-c
 ```bash
 # Phase 1: Fast Tool-Calling Inspector
 export SCHENGEN_INSPECTOR_API_KEY="sk-..."
-export SCHENGEN_INSPECTOR_BASE_URL="https://api.deepseek.com"
-export SCHENGEN_INSPECTOR_MODEL="deepseek-chat"
+export SCHENGEN_INSPECTOR_BASE_URL="https://api.openai.com/v1"
+export SCHENGEN_INSPECTOR_MODEL="gpt-5.6-luna"
 
 # Phase 2: High-Precision Adjudication Judge
 export SCHENGEN_JUDGE_API_KEY="sk-..."
-export SCHENGEN_JUDGE_BASE_URL="https://api.deepseek.com"
-export SCHENGEN_JUDGE_MODEL="deepseek-chat"
+export SCHENGEN_JUDGE_BASE_URL="https://api.openai.com/v1"
+export SCHENGEN_JUDGE_MODEL="gpt-5.6-luna"
 ```
 
 ### 3) OpenCode Subagent Model Synchronization
 When `SCHENGEN_INSPECTOR_MODEL` is not explicitly set, SmartGate automatically reads `~/.config/opencode/opencode.jsonc` and synchronizes with OpenCode's subagent / small model:
-- `agent.schengen.model` (e.g. `deepseek/deepseek-v4-flash`)
-- `small_model` (e.g. `deepseek/deepseek-v4-flash`)
+- `agent.schengen.model` (e.g. `gpt-5.6-luna`)
+- `small_model` (e.g. `gpt-5.6-luna`)
 
 ---
 

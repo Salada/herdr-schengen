@@ -61,7 +61,7 @@ _LEAKED_TEXT_RE = re.compile(
     r"|\bsalada-nas Connected\b"                         # MCP status
     r"|• pyright"                                        # LSP server name
     r"|OpenCode \d+\.\d+\.\d+"                           # version
-    r"|Build · DeepSeek[^\s]*"                           # model name
+    r"|Build · [^\s]*"                                    # model name (any provider)
     r"|esc interrupt"                                    # keybinding
     r"|ctrl\+[a-z]+ [a-z]+"                              # "ctrl+f fullscreen" / "ctrl+p commands"
     r"|\bQUEUED\b"                                       # session status

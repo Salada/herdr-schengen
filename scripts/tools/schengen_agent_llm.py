@@ -5,9 +5,9 @@ Core Capabilities:
 1. Dual-Model Phase Routing:
    - Inspector Phase (tool-calling investigation): uses SCHENGEN_INSPECTOR_API_KEY + SCHENGEN_INSPECTOR_BASE_URL
    - Judge Phase (final text adjudication): uses SCHENGEN_JUDGE_API_KEY + SCHENGEN_JUDGE_BASE_URL
-   - Both fall back to shared DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL if phase-specific vars are not set.
+   - Both fall back to shared OPENAI_API_KEY / OPENAI_BASE_URL if phase-specific vars are not set.
    - Architecture note: OpenCode/AGY is the supervised *worker* — not the judge.
-     Judge = the final no-tool-call text turn in DeepSeek's chat loop, fully independent of OpenCode.
+     Judge = the final no-tool-call text turn in the LLM chat loop, fully independent of OpenCode.
 2. AGY Tab Amend Protocol: Tab → security note → Enter for AGY approvals.
 3. Strict Single-Task FIFO: one pending escalation resolved at a time.
 """
@@ -62,11 +62,14 @@ from adapters.herdr_client import get_pane_text
 from core.redaction import redact_for_cloud
 
 # ── Shared fallback config ──────────────────────────────────────────
-_SHARED_KEY  = os.environ.get("OPENCODE_DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
-_SHARED_URL  = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+# POLICY (ADR-011): OpenAI-standard env vars only. DeepSeek defaults are removed.
+# To keep using DeepSeek at home, set OPENAI_BASE_URL=https://api.deepseek.com/v1
+# (and OPENAI_API_KEY=<deepseek key>). See ADR-011.
+_SHARED_KEY  = os.environ.get("OPENAI_API_KEY", "")
+_SHARED_URL  = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
 
-def resolve_subagent_model(default: str = "deepseek-chat") -> str:
+def resolve_subagent_model(default: str = "gpt-5.6-luna") -> str:
     """Resolve model for subagents/fast inspector from OpenCode config or ENV."""
     env_model = os.environ.get("OPENCODE_SUBAGENT_MODEL") or os.environ.get("OPENCODE_MODEL")
     if env_model:
@@ -93,12 +96,12 @@ def resolve_subagent_model(default: str = "deepseek-chat") -> str:
 # Inspector (investigation tool-calling phase)
 INSPECTOR_API_KEY  = os.environ.get("SCHENGEN_INSPECTOR_API_KEY")  or _SHARED_KEY
 INSPECTOR_BASE_URL = os.environ.get("SCHENGEN_INSPECTOR_BASE_URL") or _SHARED_URL
-INSPECTOR_MODEL    = os.environ.get("SCHENGEN_INSPECTOR_MODEL")    or resolve_subagent_model("deepseek-chat")
+INSPECTOR_MODEL    = os.environ.get("SCHENGEN_INSPECTOR_MODEL")    or resolve_subagent_model("gpt-5.6-luna")
 
 # Judge (final adjudication text phase)
 JUDGE_API_KEY  = os.environ.get("SCHENGEN_JUDGE_API_KEY")  or _SHARED_KEY
 JUDGE_BASE_URL = os.environ.get("SCHENGEN_JUDGE_BASE_URL") or _SHARED_URL
-JUDGE_MODEL    = os.environ.get("SCHENGEN_JUDGE_MODEL")    or resolve_subagent_model("deepseek-chat")
+JUDGE_MODEL    = os.environ.get("SCHENGEN_JUDGE_MODEL")    or resolve_subagent_model("gpt-5.6-luna")
 
 SESSIONS_DIR = Path.home() / ".local" / "state" / "herdr-schengen" / "sessions"
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -485,7 +488,7 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
 def clean_llm_response(text: str) -> str:
     if not text:
         return ""
-    # 1. Strip all DeepSeek DSML / special token markers (e.g. <｜｜DSML｜｜...>, </｜｜DSML｜｜...>, <｜tool_calls｜>, etc.)
+    # 1. Strip DSML / special token markers (e.g. <｜tool_calls｜>, </...>) from LLM responses.
     cleaned = re.sub(r"<\/?(?:｜|\|){1,4}[^>]*>", "", text)
     cleaned = re.sub(r"<[｜|][^>]+>", "", cleaned)
     cleaned = re.sub(r"<\/[｜|][^>]+>", "", cleaned)
@@ -655,7 +658,7 @@ class SchengenAgentChat:
 
     async def send_message(self, user_text: str, on_chunk: Optional[Callable[[str], None]] = None) -> str:
         if not self.inspector_api_key:
-            return "⚠️ No API key found. Set DEEPSEEK_API_KEY or SCHENGEN_INSPECTOR_API_KEY."
+            return "⚠️ No API key found. Set OPENAI_API_KEY or SCHENGEN_INSPECTOR_API_KEY."
 
         self.reset_cancel()
         active_esc = get_current_active_escalation()
