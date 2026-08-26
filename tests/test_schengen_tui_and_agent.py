@@ -539,6 +539,22 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
 
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_audit_detail_modal_renders(self):
+        from cmd.schengen_tui import SchengenTUIApp, AuditDetailModal
+        app = SchengenTUIApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            app.push_screen(AuditDetailModal(999999999))
+            await pilot.pause()
+            self.assertIsInstance(app.screen, AuditDetailModal)
+            detail = app.screen
+            self.assertTrue(detail.query_one("#detail-fields"))
+            self.assertTrue(detail.query_one("#detail-command"))
+            self.assertTrue(detail.query_one("#detail-opinions"))
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
 
 class TestTUIInterruptAndDoubleESC(unittest.IsolatedAsyncioTestCase):
     """Test /interrupt command and double-ESC abort functionality."""

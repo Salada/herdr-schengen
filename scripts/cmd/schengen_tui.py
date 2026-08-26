@@ -71,7 +71,9 @@ from core.feature_db import (
 )
 from core.guard_db import (
     LOG_DIR,
+    get_adjudications_for_audit,
     get_answer_language,
+    get_audit_log_by_id,
     get_instruction_delivery_config,
     get_pending_escalations,
     get_recent_audit_logs,
@@ -267,15 +269,15 @@ class AuditFullscreenModal(ModalScreen):
         with Vertical(id="audit-modal-dialog"):
             yield Label("[bold cyan]📜 Schengen Security Audit Ledger (Fullscreen Maximize)[/]")
             yield DataTable(id="audit-modal-table")
-            yield Label("[dim]Press [bold yellow]ESC[/] to return · ↑/↓ navigate rows · ←/→ horizontal scroll for full single-line command[/]", id="audit-modal-help")
+            yield Label("[dim]Press [bold yellow]ESC[/] to return · ↑/↓ navigate · [bold yellow]Enter[/] or [bold yellow]click[/] a row for detail[/]", id="audit-modal-help")
 
     def on_mount(self) -> None:
         table = self.query_one("#audit-modal-table", DataTable)
         table.clear(columns=True)
         table.add_columns("ID", "Time", "Pane", "Agent", "Verdict", "Layer", "Reason", "Full Command Line")
         table.cursor_type = "row"
-        logs = get_recent_audit_logs(limit=100)
-        for log in logs:
+        self._logs = get_recent_audit_logs(limit=100)
+        for log in self._logs:
             dec = log['decision']
             badge = f"[green]APPROVED[/]" if "APPROVE" in dec else f"[red]ESCALATED[/]"
             full_cmd = log['raw_command'].replace("\n", " ").strip()
@@ -291,6 +293,137 @@ class AuditFullscreenModal(ModalScreen):
                 rich_escape(full_cmd)
             )
         table.focus()
+
+    def _open_detail(self, row_index: int) -> None:
+        if len(self.app.screen_stack) != 2:
+            return
+        if not (0 <= row_index < len(self._logs)):
+            return
+        audit_id = self._logs[row_index]["id"]
+        self.app.push_screen(AuditDetailModal(audit_id))
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        self._open_detail(event.row_index)
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        meta = getattr(event.style, "meta", None) or {}
+        row = meta.get("row")
+        if isinstance(row, int):
+            self._open_detail(row)
+
+
+class AuditDetailModal(ModalScreen):
+    """Fullscreen detail view of a single audit record, joined with past adjudication opinions."""
+
+    CSS = """
+    AuditDetailModal {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.85);
+    }
+    #detail-dialog {
+        width: 96%;
+        height: 94%;
+        background: $surface-darken-1;
+        border: tall $accent;
+        padding: 1;
+        layout: vertical;
+    }
+    #detail-scroll {
+        width: 100%;
+        height: 1fr;
+        background: $surface;
+        border: solid $surface-lighten-1;
+        padding: 1;
+        overflow-y: scroll;
+        overflow-x: hidden;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $surface-lighten-2;
+        scrollbar-color-hover: $accent;
+        scrollbar-color-active: $accent-lighten-1;
+    }
+    #detail-command {
+        background: $surface-darken-1;
+        border: solid $surface-lighten-1;
+        padding: 1;
+        margin-top: 1;
+        margin-bottom: 1;
+        width: 100%;
+        height: auto;
+    }
+    #detail-opinions {
+        background: $surface-darken-1;
+        border: solid $surface-lighten-1;
+        padding: 0 1;
+        margin-top: 1;
+        width: 100%;
+        height: auto;
+    }
+    #detail-help {
+        dock: bottom;
+        color: $text-muted;
+        text-align: center;
+    }
+    .detail-section {
+        color: $text-muted;
+        text-style: bold;
+        margin-top: 1;
+        margin-bottom: 0;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "app.pop_screen", "Back (ESC)", show=True),
+        Binding("q", "app.pop_screen", "Close (q)", show=False),
+    ]
+
+    def __init__(self, audit_id: int) -> None:
+        super().__init__()
+        self.audit_id = audit_id
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="detail-dialog"):
+            yield Label("[bold cyan]📜 Audit Record Detail[/]", id="detail-title")
+            with VerticalScroll(id="detail-scroll"):
+                yield Static(id="detail-fields")
+                yield Label("Full Command Line", classes="detail-section")
+                yield Static(id="detail-command")
+                yield Label("Past Gatekeeper Opinions (adjudication_log)", classes="detail-section")
+                yield Static(id="detail-opinions")
+            yield Label("[dim]Press [bold yellow]ESC[/] to return to the ledger[/]", id="detail-help")
+
+    def on_mount(self) -> None:
+        log = get_audit_log_by_id(self.audit_id)
+        if not log:
+            self.query_one("#detail-fields", Static).update("[bold red]Record not found.[/]")
+            return
+
+        dec = log.get("decision", "")
+        badge = "[green]APPROVED[/]" if "APPROVE" in str(dec) else "[red]ESCALATED[/]"
+        fields = (
+            f"[bold]ID[/]: #{log['id']}    [bold]Time[/]: {format_local_time(log.get('timestamp', ''))}\n"
+            f"[bold]Pane[/]: {log.get('pane_id', '')}    [bold]Agent[/]: {log.get('agent_kind', 'unknown')}\n"
+            f"[bold]Verdict[/]: {badge}    [bold]Layer[/]: {log.get('decision_layer', 'FAST_TRACK_AST')}\n"
+            f"[bold]Reason[/]: {rich_escape(str(log.get('safety_reason', '')))}\n"
+            f"[bold]Origin[/]: {log.get('origin', 'A')}    [bold]Consequence[/]: {log.get('consequence', 'NONE')}    [bold]Mechanism[/]: {log.get('mechanism', 'none')}\n"
+            f"[bold]Gate[/]: {log.get('gate_state', 'ENFORCE')}    [bold]Shadow[/]: {'ON' if log.get('shadow_mode') else 'OFF'}"
+        )
+        self.query_one("#detail-fields", Static).update(fields)
+        self.query_one("#detail-command", Static).update(rich_escape(str(log.get('raw_command', ''))))
+
+        adjudications = get_adjudications_for_audit(log.get("pane_id", ""), log.get("raw_command", ""))
+        if not adjudications:
+            self.query_one("#detail-opinions", Static).update("[dim](no past adjudication opinions recorded)[/]")
+            return
+        lines = []
+        for a in adjudications:
+            action_badge = "[green]APPROVE[/]" if a["action"] == "APPROVE" else "[red]REJECT[/]"
+            lines.append(
+                f"{action_badge}  [dim]{format_local_time(a.get('created_at', ''))}[/]  "
+                f"{rich_escape(str(a.get('feedback', '')))}"
+            )
+        self.query_one("#detail-opinions", Static).update("\n".join(lines))
+
 
 
 class FixedHeader(Header):
