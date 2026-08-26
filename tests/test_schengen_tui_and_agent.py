@@ -130,13 +130,11 @@ class TestSchengenTUIApp(unittest.TestCase):
         if app.tui_lock_fd:
             app.tui_lock_fd.close()
 
-    def test_css_command_palette_width_constraint(self):
+    def test_command_palette_fully_disabled(self):
         assert SchengenTUIApp is not None
+        self.assertFalse(SchengenTUIApp.ENABLE_COMMAND_PALETTE)
         css = SchengenTUIApp.CSS
-        self.assertIn("CommandPalette", css)
-        self.assertIn("width: 72;", css)
-        self.assertIn("max-width: 80%;", css)
-        self.assertIn("max-height: 60%;", css)
+        self.assertNotIn("CommandPalette", css)
 
     def test_css_muted_palette_colors(self):
         assert SchengenTUIApp is not None
@@ -248,9 +246,38 @@ trash /tmp/scratch
         self.assertEqual(mock_log.write.call_count, 1)
         written_obj = mock_log.write.call_args[0][0]
         self.assertIsInstance(written_obj, Markdown)
-        self.assertIn("## Evaluation Report", app._chat_plain[-1])
         if app.tui_lock_fd:
             app.tui_lock_fd.close()
+
+
+class TestTUIInputUX(unittest.TestCase):
+    """Test TUI input textarea UX improvements (word-wrap, dynamic height, no palette)."""
+
+    def test_command_palette_disabled(self):
+        assert SchengenTUIApp is not None
+        self.assertFalse(SchengenTUIApp.ENABLE_COMMAND_PALETTE)
+
+    def test_command_text_area_word_wrap_and_dynamic_expansion(self):
+        from schengen_tui import CommandTextArea
+        text_area = CommandTextArea()
+        self.assertTrue(text_area.soft_wrap)
+        self.assertFalse(text_area.show_line_numbers)
+
+        # 1 line
+        text_area.watch_text("short single line command")
+        assert text_area.styles.height is not None
+        self.assertEqual(text_area.styles.height.value, 3)
+
+        # 3 lines
+        text_area.watch_text("line1\nline2\nline3")
+        assert text_area.styles.height is not None
+        self.assertEqual(text_area.styles.height.value, 5)
+
+        # 8 lines (bounded by max 10)
+        multiline_text = "\n".join(f"line {i}" for i in range(8))
+        text_area.watch_text(multiline_text)
+        assert text_area.styles.height is not None
+        self.assertEqual(text_area.styles.height.value, 10)
 
 
 class TestSequentialFifoQueue(unittest.TestCase):

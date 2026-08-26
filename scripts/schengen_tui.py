@@ -173,7 +173,7 @@ class AuditSectionHeader(Label):
 
 
 class CommandTextArea(TextArea):
-    """Multi-line expanding command input supporting Shift+Enter for newline and Enter to submit."""
+    """Multi-line expanding command input with full word-wrap, Shift+Enter for newline, and Enter to submit."""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(
@@ -182,6 +182,12 @@ class CommandTextArea(TextArea):
             highlight_cursor_line=False,
             **kwargs,
         )
+
+    def watch_text(self, new_text: str) -> None:
+        """Dynamically adjust height based on multiline contents."""
+        line_count = new_text.count("\n") + 1
+        target_height = min(10, max(3, line_count + 2))
+        self.styles.height = target_height
 
     def on_key(self, event: events.Key) -> None:
         is_shift_enter = (
@@ -202,12 +208,6 @@ class CommandTextArea(TextArea):
             event.prevent_default()
             event.stop()
             self.insert("\n")
-            line_count = self.text.count("\n") + 1
-            self.styles.height = min(7, max(3, line_count + 2))
-
-    def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        line_count = self.text.count("\n") + 1
-        self.styles.height = min(7, max(3, line_count + 2))
 
 
 TUI_LOCK_FILE = Path.home() / ".local" / "state" / "herdr-schengen" / "schengen_tui.lock"
@@ -285,16 +285,17 @@ class SchengenTUIApp(App):
         overflow-y: scroll;
         overflow-x: hidden;
     }
-    /* Command input: expanding textarea, clean gray border, single accent line on focus */
+    /* Command input: expanding textarea with word-wrap and dynamic multiline height */
     #input-box {
         dock: bottom;
         height: 3;
         min-height: 3;
-        max-height: 7;
+        max-height: 10;
         margin-top: 1;
         margin-bottom: 0;
         border: tall $surface-lighten-2;
         background: $surface-darken-1;
+        overflow-x: hidden;
     }
     #input-box:focus {
         border-bottom: tall $accent;
@@ -359,14 +360,9 @@ class SchengenTUIApp(App):
         margin-top: 0;
         margin-bottom: 0;
     }
-    /* CommandPalette width constraint (ADR-009) */
-    CommandPalette > Vertical {
-        width: 72;
-        max-width: 80%;
-        max-height: 60%;
-        align: center middle;
-    }
     """
+
+    ENABLE_COMMAND_PALETTE = False
 
     BINDINGS = [
         Binding("ctrl+l", "clear_chat", "Clear Chat", show=True),
