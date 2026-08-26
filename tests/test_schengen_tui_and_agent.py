@@ -585,5 +585,28 @@ class TestTUIInputExpansionAndObserverDisabled(unittest.IsolatedAsyncioTestCase)
                 app.tui_lock_fd.close()
 
 
+class TestToolRedactionIntegration(unittest.TestCase):
+    """Test redaction wrapper integration during file reading and pane inspection."""
+
+    def test_read_file_snippet_redacts_secrets(self):
+        import tempfile
+        from schengen_agent_llm import execute_tool_call
+        dummy_aws = "".join(["AKIA", "IOSFODNN7", "EXAMPLE"])
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".env") as f:
+            f.write(f"DB_PASSWORD=SuperSecretPass123\nAWS_SECRET={dummy_aws}\nBearer secrettoken123\n")
+            temp_path = f.name
+        try:
+            res_str = execute_tool_call("read_file_snippet", {"target_path": temp_path})
+            data = json.loads(res_str)
+            self.assertIn("path", data)
+            content = data["content"]
+            self.assertNotIn("SuperSecretPass123", content)
+            self.assertNotIn(dummy_aws, content)
+            self.assertIn("DB_PASSWORD=***", content)
+            self.assertIn("Bearer ***", content)
+        finally:
+            os.remove(temp_path)
+
+
 if __name__ == "__main__":
     unittest.main()

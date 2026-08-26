@@ -56,6 +56,7 @@ from guard_db import (
     resolve_escalation,
 )
 from herdr_client import get_pane_text
+from redaction import redact_for_cloud
 
 # ── Shared fallback config ──────────────────────────────────────────
 _SHARED_KEY  = os.environ.get("OPENCODE_DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", "")
@@ -292,11 +293,12 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
         full_dump = bool(args.get("full_dump", False))
         try:
             raw = get_pane_text(pane_id, lines=lines, full_dump=full_dump)
+            safe_text = redact_for_cloud(raw)
             return json.dumps({
                 "pane_id": pane_id,
                 "lines_read": lines,
                 "full_dump": full_dump,
-                "pane_text_snippet": raw[-12000:] if raw else "",
+                "pane_text_snippet": safe_text[-12000:] if safe_text else "",
             }, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -340,7 +342,8 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                 return json.dumps({"error": f"File '{p}' does not exist or is not a regular file."})
             with open(p, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read(8192)
-            return json.dumps({"path": str(p), "content": content}, ensure_ascii=False)
+            safe_content = redact_for_cloud(content)
+            return json.dumps({"path": str(p), "content": safe_content}, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)})
 
