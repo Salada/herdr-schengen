@@ -89,6 +89,12 @@ def init_feature_db(con: sqlite3.Connection) -> None:
             END;
         """)
 
+        # 4. Compound index for fast FIFO pull and status lookups
+        con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_feature_requests_status_id
+            ON feature_requests(status, id);
+        """)
+
 
 def add_feature_request(
     title: str,
@@ -120,58 +126,84 @@ def search_similar_feature_requests(
     status: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
-    """Search similar feature requests using FTS5 trigram MATCH query and BM25 score ranking."""
+    """Search similar feature requests using FTS5 trigram MATCH query, with seamless LIKE fallback."""
     query_clean = query.strip()
     if not query_clean:
         return []
 
     con = get_feature_db_connection(db_path)
-    safe_query = f'"{query_clean}"' if '"' not in query_clean else query_clean
-    try:
+    results: List[Dict[str, Any]] = []
+
+    # 1. Attempt FTS5 Trigram query if query length >= 3
+    if len(query_clean) >= 3:
+        # Tokenize by whitespace to support partial phrase similarity (e.g. "TUI 알림음 커스텀" matches "TUI 알림음 설정")
+        words = [w.strip() for w in query_clean.split() if len(w.strip()) >= 2]
+        fts_clause = " OR ".join(f'"{w}"' for w in words) if words else f'"{query_clean}"'
+        try:
+            if status:
+                cur = con.execute(
+                    """
+                    SELECT f.id, f.created_at, f.source, f.requester, f.title, f.description,
+                           f.priority, f.category, f.status, f.assigned_to, f.resolved_at, f.resolution_note,
+                           bm25(feature_requests_fts) AS rank_score
+                    FROM feature_requests_fts fts
+                    JOIN feature_requests f ON f.id = fts.rowid
+                    WHERE feature_requests_fts MATCH ? AND f.status = ?
+                    ORDER BY rank_score ASC
+                    LIMIT ?
+                    """,
+                    (fts_clause, status.upper(), limit),
+                )
+            else:
+                cur = con.execute(
+                    """
+                    SELECT f.id, f.created_at, f.source, f.requester, f.title, f.description,
+                           f.priority, f.category, f.status, f.assigned_to, f.resolved_at, f.resolution_note,
+                           bm25(feature_requests_fts) AS rank_score
+                    FROM feature_requests_fts fts
+                    JOIN feature_requests f ON f.id = fts.rowid
+                    WHERE feature_requests_fts MATCH ?
+                    ORDER BY rank_score ASC
+                    LIMIT ?
+                    """,
+                    (fts_clause, limit),
+                )
+            results = [dict(row) for row in cur.fetchall()]
+        except sqlite3.OperationalError:
+            results = []
+
+    # 2. Fallback to LIKE substring search if FTS5 returned 0 results or query is sub-3-chars (e.g. 2-char Korean)
+    if not results:
+        like_pattern = f"%{query_clean}%"
         if status:
             cur = con.execute(
                 """
-                SELECT f.id, f.created_at, f.source, f.requester, f.title, f.description,
-                       f.priority, f.category, f.status, f.assigned_to, f.resolved_at, f.resolution_note,
-                       bm25(feature_requests_fts) AS rank_score
-                FROM feature_requests_fts fts
-                JOIN feature_requests f ON f.id = fts.rowid
-                WHERE feature_requests_fts MATCH ? AND f.status = ?
-                ORDER BY rank_score ASC
+                SELECT id, created_at, source, requester, title, description,
+                       priority, category, status, assigned_to, resolved_at, resolution_note,
+                       0.0 AS rank_score
+                FROM feature_requests
+                WHERE (title LIKE ? OR description LIKE ?) AND status = ?
+                ORDER BY id DESC
                 LIMIT ?
                 """,
-                (safe_query, status.upper(), limit),
+                (like_pattern, like_pattern, status.upper(), limit),
             )
         else:
             cur = con.execute(
                 """
-                SELECT f.id, f.created_at, f.source, f.requester, f.title, f.description,
-                       f.priority, f.category, f.status, f.assigned_to, f.resolved_at, f.resolution_note,
-                       bm25(feature_requests_fts) AS rank_score
-                FROM feature_requests_fts fts
-                JOIN feature_requests f ON f.id = fts.rowid
-                WHERE feature_requests_fts MATCH ?
-                ORDER BY rank_score ASC
+                SELECT id, created_at, source, requester, title, description,
+                       priority, category, status, assigned_to, resolved_at, resolution_note,
+                       0.0 AS rank_score
+                FROM feature_requests
+                WHERE title LIKE ? OR description LIKE ?
+                ORDER BY id DESC
                 LIMIT ?
                 """,
-                (safe_query, limit),
+                (like_pattern, like_pattern, limit),
             )
-        return [dict(row) for row in cur.fetchall()]
-    except sqlite3.OperationalError:
-        like_pattern = f"%{query_clean}%"
-        cur = con.execute(
-            """
-            SELECT id, created_at, source, requester, title, description,
-                   priority, category, status, assigned_to, resolved_at, resolution_note,
-                   0.0 AS rank_score
-            FROM feature_requests
-            WHERE title LIKE ? OR description LIKE ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (like_pattern, like_pattern, limit),
-        )
-        return [dict(row) for row in cur.fetchall()]
+        results = [dict(row) for row in cur.fetchall()]
+
+    return results
 
 
 def get_feature_request_by_id(
@@ -230,7 +262,7 @@ def pull_next_feature_request(
     worker_name: str = "dev-agent",
     db_path: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Strict FIFO lock: claim and return the oldest PENDING feature request for self-improvement job."""
+    """Strict FIFO atomic claim: claim and return the oldest PENDING feature request for self-improvement job."""
     con = get_feature_db_connection(db_path)
     with con:
         cur = con.execute(
@@ -248,17 +280,52 @@ def pull_next_feature_request(
             return None
         req = dict(row)
         req_id = req["id"]
-        con.execute(
+        update_cur = con.execute(
             """
             UPDATE feature_requests
             SET status = 'IN_PROGRESS', assigned_to = ?
-            WHERE id = ?
+            WHERE id = ? AND status = 'PENDING'
             """,
             (worker_name, req_id),
         )
+        if update_cur.rowcount <= 0:
+            return None  # Lost race to another concurrent worker
         req["status"] = "IN_PROGRESS"
         req["assigned_to"] = worker_name
         return req
+
+
+def create_feature_request_with_similars(
+    title: str,
+    description: str = "",
+    requester: str = "user",
+    priority: str = "NORMAL",
+    category: str = "GENERAL",
+    source: str = "tui_command",
+    similars_limit: int = 3,
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Single Source of Truth use-case: insert feature request and return it along with similar existing items."""
+    req_id = add_feature_request(
+        title=title,
+        description=description,
+        requester=requester,
+        priority=priority,
+        category=category,
+        source=source,
+        db_path=db_path,
+    )
+    similars = search_similar_feature_requests(title, limit=similars_limit + 1, db_path=db_path)
+    similars = [s for s in similars if s["id"] != req_id][:similars_limit]
+    return {
+        "id": req_id,
+        "title": title.strip(),
+        "description": description.strip(),
+        "priority": priority.upper(),
+        "category": category.upper(),
+        "status": "PENDING",
+        "similar_items": similars,
+    }
 
 
 def update_feature_request_status(

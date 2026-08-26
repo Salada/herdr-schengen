@@ -44,7 +44,7 @@ from gray_zone_evaluator import (
 )
 from feature_db import (
     add_feature_request,
-    list_feature_requests,
+    create_feature_request_with_similars,
     search_similar_feature_requests,
 )
 from guard_db import (
@@ -422,22 +422,21 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
         if not title:
             return json.dumps({"error": "Title is required for feature request."})
         try:
-            req_id = add_feature_request(
+            created = create_feature_request_with_similars(
                 title=title,
                 description=desc,
                 requester="user",
                 priority=priority,
                 category=category,
                 source="agent_tool",
+                similars_limit=3,
             )
-            similars = search_similar_feature_requests(title, limit=3)
-            similars = [s for s in similars if s["id"] != req_id]
             return json.dumps({
                 "status": "created",
-                "id": req_id,
-                "title": title,
-                "priority": priority,
-                "similar_items": similars,
+                "id": created["id"],
+                "title": created["title"],
+                "priority": created["priority"],
+                "similar_items": created["similar_items"],
             }, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)})

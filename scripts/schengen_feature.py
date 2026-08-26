@@ -30,6 +30,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from feature_db import (
     add_feature_request,
+    create_feature_request_with_similars,
     get_feature_request_by_id,
     list_feature_requests,
     pull_next_feature_request,
@@ -64,17 +65,17 @@ def main() -> int:
 
     # 1. Add
     if args.add:
-        req_id = add_feature_request(
+        created = create_feature_request_with_similars(
             title=args.add,
             description=args.desc,
             requester=args.requester,
             priority=args.priority,
             category=args.category,
             source=args.source,
+            similars_limit=3,
         )
-        similars = search_similar_feature_requests(args.add, limit=3)
-        # Filter out the newly created one
-        similars = [s for s in similars if s["id"] != req_id]
+        req_id = created["id"]
+        similars = created["similar_items"]
 
         if args.json:
             print(json.dumps({"status": "created", "id": req_id, "similar_items": similars}, indent=2, ensure_ascii=False))

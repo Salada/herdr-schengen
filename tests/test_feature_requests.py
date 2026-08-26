@@ -121,6 +121,52 @@ class TestFeatureRequestsDB(unittest.TestCase):
         res_resolved = search_similar_feature_requests("최적화", status="RESOLVED", db_path=self.db_path)
         self.assertEqual(len(res_resolved), 1)
 
+    def test_fts5_sub3_char_cjk_fallback(self):
+        # 2-char Korean words (sub-3-chars where pure trigram cannot construct 3-gram tokens)
+        add_feature_request(title="다크 모드 테마 지원", description="monokai 기반", db_path=self.db_path)
+        add_feature_request(title="마크다운 테이블 렌더링 최적화", description="GFM 표", db_path=self.db_path)
+
+        # 2-char query "모드"
+        res_mode = search_similar_feature_requests("모드", db_path=self.db_path)
+        self.assertGreaterEqual(len(res_mode), 1)
+        self.assertEqual(res_mode[0]["title"], "다크 모드 테마 지원")
+
+        # 1-char query "표"
+        res_table = search_similar_feature_requests("표", db_path=self.db_path)
+        self.assertGreaterEqual(len(res_table), 1)
+        self.assertEqual(res_table[0]["title"], "마크다운 테이블 렌더링 최적화")
+
+    def test_concurrent_fifo_pull_race_defense(self):
+        import threading
+        # Seed 1 single pending item
+        add_feature_request(title="단일 태스크", db_path=self.db_path)
+
+        claimed_workers = []
+        def try_pull(worker_id):
+            res = pull_next_feature_request(worker_name=worker_id, db_path=self.db_path)
+            if res:
+                claimed_workers.append(worker_id)
+
+        threads = [threading.Thread(target=try_pull, args=(f"worker-{i}",)) for i in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Exactly 1 worker must have claimed the single pending task
+        self.assertEqual(len(claimed_workers), 1)
+
+    def test_create_feature_request_with_similars_dry(self):
+        from feature_db import create_feature_request_with_similars
+        # Add initial item
+        create_feature_request_with_similars(title="TUI 알림음 설정", description="볼륨 조절", db_path=self.db_path)
+        # Add similar item
+        created = create_feature_request_with_similars(title="TUI 알림음 커스텀", description="사운드 파일 선택", db_path=self.db_path)
+        self.assertIn("id", created)
+        self.assertEqual(created["title"], "TUI 알림음 커스텀")
+        self.assertEqual(len(created["similar_items"]), 1)
+        self.assertEqual(created["similar_items"][0]["title"], "TUI 알림음 설정")
+
 
 class TestAgentLLMFeatureTools(unittest.TestCase):
     """Test LLM Agent tool execution for feature requests."""
@@ -173,15 +219,19 @@ class TestTUINonBlockingFeatureQueueing(unittest.TestCase):
             async with app.run_test() as pilot:
                 # Simulate active in-flight investigation
                 app._processing_chat = True
-                with patch("schengen_tui.add_feature_request") as mock_add, \
-                     patch("schengen_tui.search_similar_feature_requests") as mock_search:
-                    mock_add.return_value = 42
-                    mock_search.return_value = []
+                with patch("schengen_tui.create_feature_request_with_similars") as mock_create:
+                    mock_create.return_value = {
+                        "id": 42,
+                        "title": "TUI 알림음 커스텀",
+                        "description": "볼륨 조절 및 음소거 모드",
+                        "priority": "HIGH",
+                        "similar_items": [],
+                    }
                     app.process_user_chat("/feature-request TUI 알림음 커스텀 --desc 볼륨 조절 및 음소거 모드 --priority HIGH")
                     await pilot.pause(0.1)
 
-                    mock_add.assert_called_once()
-                    call_kwargs = mock_add.call_args.kwargs
+                    mock_create.assert_called_once()
+                    call_kwargs = mock_create.call_args.kwargs
                     self.assertEqual(call_kwargs["title"], "TUI 알림음 커스텀")
                     self.assertEqual(call_kwargs["description"], "볼륨 조절 및 음소거 모드")
                     self.assertEqual(call_kwargs["priority"], "HIGH")
