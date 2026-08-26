@@ -9,6 +9,7 @@ Verifies:
 5. CommandPalette width constraint CSS.
 """
 
+import json
 import os
 import sys
 import unittest
