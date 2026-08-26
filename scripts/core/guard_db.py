@@ -628,6 +628,7 @@ def resolve_escalation(
     command_hash: Optional[str] = None,
     escalation_id: Optional[int] = None,
     resolution_status: str = "RESOLVED",
+    is_approval: bool = False,
 ):
     """Mark escalation(s) as resolved or cancelled after user/agent action (ACK)."""
     init_db()
@@ -635,8 +636,8 @@ def resolve_escalation(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         approved_cmds: list[tuple[str, str]] = []
-        if resolution_status == "RESOLVED":
-            # Fetch raw commands to record in pane session memory
+        if resolution_status == "RESOLVED" and is_approval:
+            # Fetch raw commands to record in pane session memory only on explicit approval
             if escalation_id:
                 cursor.execute("SELECT pane_id, raw_command FROM pending_escalations WHERE id = ?", (escalation_id,))
             elif command_hash:
@@ -674,7 +675,7 @@ def resolve_escalation(
             )
         conn.commit()
 
-        # Record in PaneSessionMemory for fast-path 0.1ms approval
+        # Record in PaneSessionMemory for fast-path 0.1ms approval ONLY on explicit approval
         if approved_cmds:
             try:
                 from session_memory import record_pane_approval

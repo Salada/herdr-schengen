@@ -311,6 +311,7 @@ trash /tmp/scratch
             app.tui_lock_fd.close()
 
 
+@unittest.skipUnless(HAS_TEXTUAL, "Textual is required for TUI UI tests")
 class TestTUIInputUX(unittest.TestCase):
     """Test TUI input textarea UX improvements (word-wrap, dynamic height, no palette)."""
 

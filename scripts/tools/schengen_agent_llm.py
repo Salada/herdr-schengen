@@ -363,7 +363,7 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             target_pane = esc_row.get("pane_id") if esc_row else ""
             agent_kind = esc_row.get("agent_kind", "agy") if esc_row else "agy"
             
-            resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="RESOLVED")
+            resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
 
             if target_pane:
                 if agent_kind == "agy" and feedback:
@@ -775,10 +775,8 @@ class SchengenAgentChat:
 
                     raw_content = msg.get("content") or ""
                     final_content = clean_llm_response(raw_content)
-                    if not final_content and len(messages) > 1:
-                        final_content = "✅ Escalation investigated and resolved autonomously."
-                    elif not final_content:
-                        final_content = "Investigation and inspection completed."
+                    if not final_content:
+                        final_content = "⚠️ No explicit verdict returned by Inspector/Judge; deferring to human operator."
 
                     self._append_transcript(role="assistant", content=final_content)
                     self.history.append({"role": "user", "content": user_text})

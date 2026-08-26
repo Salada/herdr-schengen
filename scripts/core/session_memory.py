@@ -92,17 +92,17 @@ class PaneSessionMemory:
                 self._template_memory[norm_pane] = {}
             self._template_memory[norm_pane][template] = record
 
-        # 2. Persist to DB cache table
+        # 2. Persist to DB cache table (evaluation_cache)
         try:
-            con = get_db_connection()
+            con = get_db_connection(db_path)
             with con:
                 con.execute(
                     """
-                    INSERT INTO session_cache (
+                    INSERT INTO evaluation_cache (
                         cache_key, raw_command, is_safe, safety_reason, decision_layer,
                         taxonomy_json, cwd, scope, agent_id, origin, ruleset_version,
                         created_at, expires_at
-                    ) VALUES (?, ?, 1, ?, ?, '{}', ?, ?, 'default', 'MEM', 'session-mem', CURRENT_TIMESTAMP, ?)
+                    ) VALUES (?, ?, 1, ?, ?, '{}', ?, ?, 'default', 'MEM', 'session-mem', datetime('now'), datetime(?, 'unixepoch'))
                     ON CONFLICT(cache_key) DO UPDATE SET
                         is_safe=1,
                         safety_reason=excluded.safety_reason,
@@ -160,11 +160,11 @@ class PaneSessionMemory:
 
         # 2. Check DB
         try:
-            con = get_db_connection()
+            con = get_db_connection(db_path)
             cur = con.execute(
                 """
-                SELECT safety_reason, decision_layer, expires_at
-                FROM session_cache
+                SELECT safety_reason, decision_layer, strftime('%s', expires_at)
+                FROM evaluation_cache
                 WHERE cache_key = ? AND is_safe = 1
                 """,
                 (f"pane_mem:{norm_pane}:{fingerprint}",),
@@ -191,7 +191,7 @@ class PaneSessionMemory:
                         self._template_memory[norm_pane][template] = self._memory[norm_pane][fingerprint]
                     return (True, f"[Session Memory: {norm_pane}] {reason}", layer)
                 else:
-                    con.execute("DELETE FROM session_cache WHERE cache_key = ?", (f"pane_mem:{norm_pane}:{fingerprint}",))
+                    con.execute("DELETE FROM evaluation_cache WHERE cache_key = ?", (f"pane_mem:{norm_pane}:{fingerprint}",))
         except Exception:
             pass
 
@@ -239,7 +239,7 @@ def check_pane_approval(
     cwd: str = "",
     db_path: Optional[Path] = None,
 ) -> Optional[Tuple[bool, str, str]]:
-    """Check whether command has a valid approval record for the specified pane."""
+    """Check if command is approved in global pane session memory."""
     return _GLOBAL_PANE_MEMORY.check_approval(
         pane_id=pane_id,
         raw_cmd=raw_cmd,
@@ -248,6 +248,10 @@ def check_pane_approval(
     )
 
 
-def clear_pane_memory(pane_id: Optional[str] = None) -> None:
-    """Clear memory for specific pane or all panes."""
-    _GLOBAL_PANE_MEMORY.clear(pane_id=pane_id)
+def clear_pane_approval_memory(pane_id: Optional[str] = None) -> None:
+    """Clear memory globally or per pane."""
+    _GLOBAL_PANE_MEMORY.clear(pane_id)
+
+
+# Backward compatibility alias
+clear_pane_memory = clear_pane_approval_memory
