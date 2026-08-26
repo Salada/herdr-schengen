@@ -51,5 +51,5 @@ Round 2 - Opencode
 [x] 승인/deny 지침·논의를 SQLite adjudication_log table로 기록 (record_adjudication).
 [x] bloat_message 방지: approve 지침전달 기본 false로 opencode 승인 시 피드백 주입 중단.
 [x] default-model을 gpt-5.6-luna 로, default-reasoning을 low로 (ADR-011): 코드·docs·plugin에서 DeepSeek 기본/문자열 제거, OPENAI_API_KEY/OPENAI_BASE_URL 표준화. (deepseek-v4-flash는 가격대비 최고, gpt-oss-120b 로컬이 안전 — ADR-011 Alternatives에 기록)
-[] select-style-suggestion.md 를 참조하여 스타일 개선을 부탁한다. 
+[x] select-style-suggestion.md 를 참조하여 텍스트 선택 시인성 개선: Screen > .screen--selection 를 불투명 밝은 사이언(#00FFFF) 배경 + 검정(#000000) 텍스트 + bold 로 강화 (Textual은 선택 스팬에 border 미지원이라 배경 블록으로 경계 표현).
 [x] APPROVE/REJECT INSTR 토글을 두 줄로, Controller mode(role-box)는 approve 위로 이동, 전체 위→아래 스택 배치 (instruction-control Vertical 전환 + 버튼 full-width)
