@@ -38,6 +38,14 @@
 7. **Proactive Escalation Polling & Idle Defense Mandate**:
    - ❌ **Never** remain passive when worker panes are actively executing long-running or potentially dangerous workflows.
    - ✅ **Always** arm a proactive wakeup heartbeat timer (`schedule DurationSeconds=120, TimerCondition="any"`) before entering idle state, and drain the SQLite queue (`schengen_history.py --pending`) upon every wake turn to ensure blocked escalations are surfaced immediately.
+
+8. **English-Only Review Policy for Token Efficiency**:
+   - ❌ **Never** generate verbose localized text for multi-agent peer reviews.
+   - ✅ **Always** author multi-agent peer reviews, persona evaluations (DBA, PdM, SOLID Architect), and structured audit critiques in concise, professional English to minimize token consumption and maximize context economy.
+
+9. **Mandatory PR Review Commenting & History Persistence**:
+   - ❌ **Never** leave reviewer persona opinions ephemeral in transient Herdr terminal panes.
+   - ✅ **Always** persist and post the consolidated persona review evaluations directly to the corresponding Forgejo Pull Request via Forgejo API (`/api/v1/repos/.../issues/<id>/comments`) to guarantee immutable, version-controlled audit history.
 ---
 
 ## 🗺️ 2. Architecture & Decision Records (ADR SSOT)

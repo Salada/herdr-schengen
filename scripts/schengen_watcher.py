@@ -94,7 +94,7 @@ def list_active_guard_locks() -> list:
     DB_DIR.mkdir(parents=True, exist_ok=True)
     active = []
 
-    lock_files = list(DB_DIR.glob("schengen_*.lock"))
+    lock_files = [f for f in DB_DIR.glob("schengen_*.lock") if f.name != "schengen_tui.lock"]
     legacy = get_legacy_lock_file_path()
     if legacy.exists() and legacy not in lock_files:
         lock_files.append(legacy)
@@ -853,7 +853,7 @@ def main():
                     reason = wl_reason
                     decision = "ALLOWLIST_BYPASS"
                     layer = DecisionLayer.ALLOWLIST
-                    tax = derive_taxonomy(req_cmd, layer, is_safe, reason, origin=Origin.HUMAN)
+                    tax = derive_taxonomy(req_cmd, layer, is_safe, reason or "", origin=Origin.HUMAN)
                 else:
                     is_safe, reason, layer, tax = audit_shell_command_with_taxonomy(
                         req_cmd,
@@ -880,7 +880,7 @@ def main():
                     pane_id=pane_id,
                     raw_command=req_cmd,
                     decision=decision,
-                    safety_reason=reason,
+                    safety_reason=reason or "",
                     agent_kind=agent_kind,
                     decision_layer=layer,
                     origin=tax.get("origin", "A"),

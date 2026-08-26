@@ -42,6 +42,11 @@ from gray_zone_evaluator import (
     is_inside_git_work_tree,
     is_git_clean_and_committed,
 )
+from feature_db import (
+    add_feature_request,
+    list_feature_requests,
+    search_similar_feature_requests,
+)
 from guard_db import (
     get_db_connection,
     get_pending_escalations,
@@ -189,6 +194,57 @@ GUARD_TOOLS = [
                     },
                 },
                 "required": ["escalation_id", "english_feedback"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_feature_request",
+            "description": "Record a user feature request, enhancement proposal, or self-improvement task into the independent SQLite backlog queue.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Concise title of the requested feature or improvement.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Detailed explanation, rationale, user context, or acceptance criteria.",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["LOW", "NORMAL", "HIGH", "CRITICAL"],
+                        "description": "Priority level of the feature request (default: NORMAL).",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Category tag (e.g. UI, SECURITY, LLM, WORKFLOW).",
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_feature_requests",
+            "description": "Search existing feature requests using FTS5 CJK trigram similarity search to check for duplicates or related improvement ideas.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query or keywords.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results to return (default: 5).",
+                    },
+                },
+                "required": ["query"],
             },
         },
     },
@@ -357,6 +413,48 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             }, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"status": "error", "error": str(e)})
+
+    elif name == "create_feature_request":
+        title = str(args.get("title", "")).strip()
+        desc = str(args.get("description", "")).strip()
+        priority = str(args.get("priority", "NORMAL")).upper()
+        category = str(args.get("category", "GENERAL")).upper()
+        if not title:
+            return json.dumps({"error": "Title is required for feature request."})
+        try:
+            req_id = add_feature_request(
+                title=title,
+                description=desc,
+                requester="user",
+                priority=priority,
+                category=category,
+                source="agent_tool",
+            )
+            similars = search_similar_feature_requests(title, limit=3)
+            similars = [s for s in similars if s["id"] != req_id]
+            return json.dumps({
+                "status": "created",
+                "id": req_id,
+                "title": title,
+                "priority": priority,
+                "similar_items": similars,
+            }, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    elif name == "search_feature_requests":
+        query = str(args.get("query", "")).strip()
+        raw_limit = args.get("limit", 5)
+        limit = int(raw_limit) if str(raw_limit).isdigit() else 5
+        try:
+            results = search_similar_feature_requests(query, limit=limit)
+            return json.dumps({
+                "query": query,
+                "count": len(results),
+                "results": results,
+            }, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"error": str(e)})
 
     return json.dumps({"error": f"Unknown tool: {name}"})
 
@@ -609,7 +707,13 @@ class SchengenAgentChat:
                         fn_args = {}
 
                     if on_chunk:
-                        on_chunk(f"\n⚙️ [Inspector]: `{fn_name}` {json.dumps(fn_args, ensure_ascii=False)}\n")
+                        raw_args = json.dumps(fn_args, ensure_ascii=False)
+                        if len(raw_args) > 60:
+                            formatted_args = json.dumps(fn_args, ensure_ascii=False, indent=2)
+                            chunk_msg = f"⚙️ **[Inspector]**: `{fn_name}`\n```json\n{formatted_args}\n```"
+                        else:
+                            chunk_msg = f"⚙️ **[Inspector]**: `{fn_name}` `{raw_args}`"
+                        on_chunk(chunk_msg)
 
                     tool_result = execute_tool_call(fn_name, fn_args)
                     self._append_transcript(role="tool", content=tool_result)
