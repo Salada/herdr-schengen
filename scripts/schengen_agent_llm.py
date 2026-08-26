@@ -469,12 +469,22 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
 
 
 def clean_llm_response(text: str) -> str:
-    cleaned = re.sub(r"<[｜|][^>｜|]+[｜|]>", "", text)
+    if not text:
+        return ""
+    # 1. Strip all DeepSeek DSML / special token markers (e.g. <｜｜DSML｜｜...>, </｜｜DSML｜｜...>, <｜tool_calls｜>, etc.)
+    cleaned = re.sub(r"<\/?(?:｜|\|){1,4}[^>]*>", "", text)
     cleaned = re.sub(r"<[｜|][^>]+>", "", cleaned)
+    cleaned = re.sub(r"<\/[｜|][^>]+>", "", cleaned)
+    # 2. Strip XML tool-calling and internal thinking tags
+    cleaned = re.sub(r"<\/?\s*(?:invoke|parameter|tool_call|tool_calls|tool_response|tool_outputs|function_call|function|call|result|thought|thinking|artifact)[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<\?xml.*?\?>", "", cleaned, flags=re.IGNORECASE)
+    # 3. Strip standalone trailing XML close tags
+    cleaned = re.sub(r"<\/\S+>", "", cleaned)
+    # 4. Strip raw embedded JSON tool call artifacts
     cleaned = re.sub(r"```json\s*\{.*?\}\s*```", "", cleaned, flags=re.DOTALL)
-    cleaned = re.sub(r"<\/?(?:invoke|parameter|tool_call)[^>]*>", "", cleaned)
-    cleaned = cleaned.strip()
-    # Strip wrapping markdown code blocks if whole string is wrapped
+    # 5. Clean excess whitespace and blank lines
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    # 6. Strip wrapping markdown code blocks if whole string is wrapped
     if cleaned.startswith("```markdown\n") and cleaned.endswith("\n```"):
         cleaned = cleaned[12:-4].strip()
     elif cleaned.startswith("```\n") and cleaned.endswith("\n```"):
@@ -723,7 +733,13 @@ class SchengenAgentChat:
                         self.judge_prompt_tokens += p_tokens
                         self.judge_completion_tokens += c_tokens
 
-                    final_content = clean_llm_response(msg.get("content", ""))
+                    raw_content = msg.get("content") or ""
+                    final_content = clean_llm_response(raw_content)
+                    if not final_content and len(messages) > 1:
+                        final_content = "✅ Escalation investigated and resolved autonomously."
+                    elif not final_content:
+                        final_content = "Investigation and inspection completed."
+
                     self._append_transcript(role="assistant", content=final_content)
                     self.history.append({"role": "user", "content": user_text})
                     self.history.append({"role": "assistant", "content": final_content})

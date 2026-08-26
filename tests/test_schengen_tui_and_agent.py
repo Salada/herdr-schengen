@@ -88,6 +88,23 @@ class TestSchengenAgentChatDualRouting(unittest.TestCase):
         raw_plain = "Approved. Target does not exist."
         self.assertEqual(clean_llm_response(raw_plain), "Approved. Target does not exist.")
 
+        # Broken DeepSeek DSML / XML tag leak regression test
+        raw_dsml_leak = """~/code/herdr-schengen/scripts/schengen_agent_llm.py</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+
+~/code/herdr-schengen/scripts/herdr_client.py</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+
+<｜tool_calls｜><｜tool_call｜>investigate_path_details<｜/tool_call｜></｜tool_calls｜>
+</｜｜DSML｜｜tool_calls>
+Approved. All files verified safely."""
+        cleaned_dsml = clean_llm_response(raw_dsml_leak)
+        self.assertNotIn("DSML", cleaned_dsml)
+        self.assertNotIn("parameter", cleaned_dsml)
+        self.assertNotIn("invoke", cleaned_dsml)
+        self.assertNotIn("tool_calls", cleaned_dsml)
+        self.assertIn("Approved. All files verified safely.", cleaned_dsml)
+
     @patch("schengen_agent_llm.get_current_active_escalation")
     def test_build_system_prompt_structure(self, mock_get_active):
         mock_get_active.return_value = {
