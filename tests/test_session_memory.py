@@ -127,7 +127,7 @@ class TestPaneSessionMemory(unittest.TestCase):
         self.assertIsNone(check_pane_approval(pane_id, cmd, db_path=self.db_path))
 
         # 2. Human operator resolves/approves escalation
-        resolve_escalation(pane_id=pane_id, escalation_id=esc_id, resolution_status="RESOLVED")
+        resolve_escalation(pane_id=pane_id, escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
 
         # 3. Check pane memory: must now be populated
         res = check_pane_approval(pane_id, cmd, db_path=self.db_path)
@@ -135,6 +135,21 @@ class TestPaneSessionMemory(unittest.TestCase):
         assert res is not None
         self.assertTrue(res[0])
         self.assertIn("Approved by human operator", res[1])
+
+    def test_reset_dismiss_path_does_not_populate_memory(self):
+        """Verify non-approval reset path (is_approval=False) defends against fail-open memory leaks."""
+        cmd = "npm install -g malicious-pkg"
+        pane_id = "w1D:p1"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id,
+            raw_command=cmd,
+            safety_reason="Malicious package",
+            decision_layer="GRAY_ZONE",
+        )
+        # Dismiss/reset without approval
+        resolve_escalation(pane_id=pane_id, escalation_id=esc_id, resolution_status="RESOLVED", is_approval=False)
+        # Must remain None
+        self.assertIsNone(check_pane_approval(pane_id, cmd, db_path=self.db_path))
 
     def test_clear_pane_memory_isolated(self):
         """Verify clearing pane memory for one pane leaves other panes intact."""
