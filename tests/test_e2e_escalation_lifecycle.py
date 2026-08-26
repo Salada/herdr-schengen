@@ -171,6 +171,46 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
         self.assertEqual(guard_db.set_answer_language("gibberish"), "korean")
         self.assertEqual(guard_db.get_answer_language(), "korean")
 
+    def test_get_audit_log_by_id_roundtrip(self):
+        guard_db.record_audit_log(
+            "w1D:p1", "git status", "AUTO_APPROVED", "safe git query",
+            agent_kind="opencode", decision_layer="FAST_TRACK_AST",
+        )
+        logs = guard_db.get_recent_audit_logs(limit=1)
+        self.assertEqual(len(logs), 1)
+        full = guard_db.get_audit_log_by_id(logs[0]["id"])
+        self.assertIsNotNone(full)
+        self.assertEqual(full["raw_command"], "git status")
+        self.assertEqual(full["agent_kind"], "opencode")
+        self.assertIn("consequence", full)
+        self.assertIn("gate_state", full)
+
+    def test_get_adjudications_for_audit_join(self):
+        conn = guard_db.get_db_connection()
+        now = datetime.now(timezone.utc).isoformat()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO pending_escalations
+            (pane_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, status, started_at, last_transitioned_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'RESOLVED', ?, ?)
+            """,
+            ("w1D:p1", "opencode", "rm -rf /tmp/x", "hash1", "destructive", "GRAY_ZONE", now, now),
+        )
+        esc_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved. Safe.")
+
+        adj = guard_db.get_adjudications_for_audit("w1D:p1", "rm -rf /tmp/x")
+        self.assertEqual(len(adj), 1)
+        self.assertEqual(adj[0]["action"], "APPROVE")
+        self.assertEqual(adj[0]["feedback"], "Approved. Safe.")
+        self.assertEqual(adj[0]["escalation_id"], esc_id)
+
+        # A different command on the same pane must not match.
+        self.assertEqual(guard_db.get_adjudications_for_audit("w1D:p1", "echo hello"), [])
+
     def test_record_adjudication_inserts_row(self):
         guard_db.record_adjudication(123, "w1D:p1", "opencode", "APPROVE", "Approved. Safe.")
         conn = guard_db.get_db_connection()

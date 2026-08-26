@@ -527,6 +527,41 @@ def search_audit_logs(keyword: str, limit: int = 20) -> list[dict]:
         return [dict(row) for row in cursor.fetchall()]
 
 
+def get_audit_log_by_id(audit_id: int) -> Optional[dict]:
+    """Fetch the full audit record by its ID."""
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM audit_logs WHERE id = ?", (audit_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_adjudications_for_audit(
+    pane_id: str,
+    raw_command: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Return past adjudication opinions (feedback) joined to an audit record.
+
+    Joins `adjudication_log` -> `pending_escalations` (via escalation_id) -> the
+    audit record (via pane_id + raw_command) so the TUI detail view can show the
+    gatekeeper's past approve/reject opinions for a specific intercepted command.
+    """
+    init_db()
+    query = """
+        SELECT al.id, al.escalation_id, al.pane_id, al.agent_kind, al.action, al.feedback, al.created_at
+        FROM adjudication_log al
+        JOIN pending_escalations pe ON pe.id = al.escalation_id
+        WHERE pe.pane_id = ? AND pe.raw_command = ?
+        ORDER BY al.id DESC
+        LIMIT ?
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, (pane_id, raw_command, max(1, limit)))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+
 def get_state_file_paths() -> dict[str, str]:
     """Return dictionary of all SmartGate / Schengen state and database paths."""
     return {
