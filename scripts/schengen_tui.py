@@ -12,16 +12,26 @@ Key Features:
 
 import asyncio
 import os
+import re
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# Prevent TUI process from exiting on SIGHUP daemon reloads
+if hasattr(signal, "SIGHUP"):
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    except Exception:
+        pass
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
 from rich.text import Text
 from textual import events, work
@@ -43,6 +53,11 @@ from textual.widgets import (
     TextArea,
 )
 
+from feature_db import (
+    add_feature_request,
+    list_feature_requests,
+    search_similar_feature_requests,
+)
 from guard_db import (
     get_pending_escalations,
     get_recent_audit_logs,
@@ -623,6 +638,71 @@ class SchengenTUIApp(App):
 
     @work(exclusive=False)
     async def process_user_chat(self, user_msg: str) -> None:
+        trimmed = user_msg.strip()
+
+        # 1. Non-blocking Feature Request Command Handling (Queues immediately even if an agent task is in-flight)
+        if (trimmed.startswith("/feature-request") or trimmed.startswith("/feature") or 
+            trimmed.startswith("/idea") or trimmed.startswith("/features") or trimmed.startswith("/feature-list")):
+            safe_user_msg = rich_escape(user_msg)
+            self._write(f"\n[bold yellow]👤 You:[/] {safe_user_msg}")
+
+            if trimmed in ("/features", "/feature-list", "/feature --list", "/feature-request --list"):
+                items = list_feature_requests(status="PENDING", limit=10)
+                if not items:
+                    self._write("📋 [bold cyan][Feature Backlog]:[/] No pending feature requests in queue.")
+                else:
+                    self._write(f"📋 [bold cyan][Feature Backlog ({len(items)} pending)]:[/]")
+                    for it in items:
+                        self._write(f"  • [bold yellow]#{it['id']}[/] ({it['priority']}) [white]{rich_escape(it['title'])}[/]")
+                return
+
+            content = trimmed
+            for pfx in ("/feature-request", "/feature", "/idea"):
+                if content.startswith(pfx):
+                    content = content[len(pfx):].strip()
+                    break
+
+            if not content:
+                self._write("[dim]💡 Usage: [bold yellow]/feature-request <title>[/] [dim]or[/] [bold yellow]/feature <title> --desc <desc>[/]")
+                return
+
+            desc = ""
+            priority = "NORMAL"
+
+            # Extract and strip --priority <LEVEL> case-insensitively
+            p_match = re.search(r"--priority\s+(CRITICAL|HIGH|NORMAL|LOW)", content, re.IGNORECASE)
+            if p_match:
+                priority = p_match.group(1).upper()
+                content = re.sub(r"--priority\s+(?:CRITICAL|HIGH|NORMAL|LOW)", "", content, flags=re.IGNORECASE).strip()
+
+            if " --desc " in content:
+                parts = content.split(" --desc ", 1)
+                title = parts[0].strip()
+                desc = parts[1].strip()
+            elif " -d " in content:
+                parts = content.split(" -d ", 1)
+                title = parts[0].strip()
+                desc = parts[1].strip()
+            else:
+                title = content.strip()
+
+            req_id = add_feature_request(
+                title=title,
+                description=desc,
+                requester="user",
+                priority=priority,
+                source="tui_command",
+            )
+            similars = search_similar_feature_requests(title, limit=3)
+            similars = [s for s in similars if s["id"] != req_id]
+
+            self._write(f"💡 [bold green][Feature Request Queued]:[/] #{req_id} [bold white]{rich_escape(title)}[/] [dim](Priority: {priority})[/]")
+            if similars:
+                self._write(f"  [dim]🔍 {len(similars)} similar request(s) found in backlog via FTS5 CJK trigram:[/]")
+                for sim in similars:
+                    self._write(f"    • [dim]#{sim['id']} [{sim['status']}][/] [dim]{rich_escape(sim['title'])}[/]")
+            return
+
         if self._processing_chat:
             self._write("[dim]⏳ Another investigation/chat is currently in-flight. Please wait...[/]")
             return
@@ -647,7 +727,8 @@ class SchengenTUIApp(App):
                 esc_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 reason = parts[2] if len(parts) > 2 else "Approved via TUI"
                 resp = await self.agent.send_message(f"Approve escalation #{esc_id} with English note: '{reason}'")
-                self._write(f"🤖 Gatekeeper: {resp}")
+                self._write("🤖 [bold cyan]Gatekeeper[/]:")
+                self._write_markdown(resp)
                 self.update_radar_data(force=True)
                 return
 
@@ -656,15 +737,17 @@ class SchengenTUIApp(App):
                 esc_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 reason = parts[2] if len(parts) > 2 else "Rejected via TUI"
                 resp = await self.agent.send_message(f"Reject escalation #{esc_id} with English reason: '{reason}'")
-                self._write(f"🤖 Gatekeeper: {resp}")
+                self._write("🤖 [bold cyan]Gatekeeper[/]:")
+                self._write_markdown(resp)
                 self.update_radar_data(force=True)
                 return
 
             def on_tool(chunk: str):
-                self._write(chunk)
+                self._write_markdown(chunk)
 
             resp = await self.agent.send_message(user_msg, on_chunk=on_tool)
-            self._write(f"🤖 Gatekeeper:\n{resp}")
+            self._write("🤖 [bold cyan]Gatekeeper[/]:")
+            self._write_markdown(resp)
             self._write(f"[dim]{'─'*70}[/]")
             self.update_radar_data(force=True)
         finally:
@@ -677,14 +760,27 @@ class SchengenTUIApp(App):
         event.input.value = ""
         self.process_user_chat(val)
 
+    def _write_markdown(self, md_text: str, prefix: Optional[str] = None) -> None:
+        """Render structured GFM Markdown (syntax highlighting, tables, lists) to RichLog."""
+        if prefix:
+            self._write(prefix)
+        if md_text and md_text.strip():
+            md = Markdown(md_text.strip(), code_theme="monokai", justify="left")
+            self._write(md)
+
     def _write(self, msg: Any) -> None:
         """Write to RichLog and append plain-text to clipboard buffer."""
         import re as _re
         chat_log = self.query_one(RichLog)
         chat_log.write(msg)
-        plain = _re.sub(r"\[/?[^\]]*\]", "", str(msg)).strip()
-        if plain:
-            self._chat_plain.append(plain)
+        if isinstance(msg, Markdown):
+            raw_text = getattr(msg, "markup", str(msg)).strip()
+            if raw_text:
+                self._chat_plain.append(raw_text)
+        else:
+            plain = _re.sub(r"\[/?[^\]]*\]", "", str(msg)).strip()
+            if plain:
+                self._chat_plain.append(plain)
 
     def action_clear_chat(self) -> None:
         self.query_one(RichLog).clear()

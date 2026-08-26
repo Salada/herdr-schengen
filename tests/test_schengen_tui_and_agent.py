@@ -109,6 +109,17 @@ class TestSchengenAgentChatDualRouting(unittest.TestCase):
 class TestSchengenTUIApp(unittest.TestCase):
     """Test TUI components, CSS constraints, and clipboard interactions."""
 
+    def setUp(self):
+        import asyncio
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+    def tearDown(self):
+        import asyncio
+        if hasattr(self, "loop") and not self.loop.is_closed():
+            self.loop.close()
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     def test_tui_app_instantiation(self):
         assert SchengenTUIApp is not None
         app = SchengenTUIApp()
@@ -192,6 +203,55 @@ class TestSchengenTUIApp(unittest.TestCase):
         if app.tui_lock_fd:
             app.tui_lock_fd.close()
 
+    def test_write_markdown_rendering_and_plain_buffer(self):
+        from rich.markdown import Markdown
+        assert SchengenTUIApp is not None
+        app = SchengenTUIApp()
+        mock_log = MagicMock()
+        app.query_one = MagicMock(return_value=mock_log)
+
+        md_content = "### Security Assessment\n\n- Verdict: **APPROVED**\n- Risk: `LOW`"
+        app._write_markdown(md_content, prefix="🤖 [bold cyan]Gatekeeper[/]:")
+
+        # Verify RichLog.write was called twice: once for prefix, once for Markdown object
+        self.assertEqual(mock_log.write.call_count, 2)
+        written_md = mock_log.write.call_args_list[1][0][0]
+        self.assertIsInstance(written_md, Markdown)
+
+        # Verify plain-text buffer contains prefix and raw markdown text
+        self.assertEqual(len(app._chat_plain), 2)
+        self.assertIn("Gatekeeper", app._chat_plain[0])
+        self.assertEqual(app._chat_plain[1], md_content)
+        if app.tui_lock_fd:
+            app.tui_lock_fd.close()
+
+    def test_write_markdown_code_fence_and_table(self):
+        from rich.markdown import Markdown
+        assert SchengenTUIApp is not None
+        app = SchengenTUIApp()
+        mock_log = MagicMock()
+        app.query_one = MagicMock(return_value=mock_log)
+
+        md_table_code = """
+## Evaluation Report
+| Field | Value |
+| :--- | :--- |
+| Action | `rm -rf /tmp/scratch` |
+| Result | `BLOCKED` |
+
+```bash
+# Safe alternative
+trash /tmp/scratch
+```
+"""
+        app._write_markdown(md_table_code)
+        self.assertEqual(mock_log.write.call_count, 1)
+        written_obj = mock_log.write.call_args[0][0]
+        self.assertIsInstance(written_obj, Markdown)
+        self.assertIn("## Evaluation Report", app._chat_plain[-1])
+        if app.tui_lock_fd:
+            app.tui_lock_fd.close()
+
 
 class TestSequentialFifoQueue(unittest.TestCase):
     """Test that get_current_active_escalation returns oldest PENDING item."""
@@ -205,6 +265,7 @@ class TestSequentialFifoQueue(unittest.TestCase):
         ]
         active = get_current_active_escalation()
         self.assertIsNotNone(active)
+        assert active is not None
         self.assertEqual(active["id"], 101)  # oldest item
 
     @patch("schengen_agent_llm.get_pending_escalations")
