@@ -3,11 +3,12 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from agent_adapters import get_adapter, target_agent_kinds
+from agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
 from agent_adapters.opencode import decide_opencode_injection, resolve_opencode_injection, strip_ansi, strip_leaked_text, strip_tui
 from schengen_watcher import agent_matches
 
@@ -359,6 +360,45 @@ class TestAgentDispatch(unittest.TestCase):
         adapter = get_adapter("opencode")
         oc_text = "Permission required\n\n$ ls -la\n\nAllow once  Allow always  Reject  ⇆ select  enter confirm"
         self.assertEqual(adapter.parse_permission_request(oc_text), "ls -la")
+
+
+class TestOpenCodeInjectSkip(unittest.TestCase):
+    """inject_approval must SKIP (not escalate) when the dialog trampolines to a
+    different permission request mid-evaluation (e.g. access_directory -> shell)."""
+
+    def setUp(self):
+        self.adapter = get_adapter("opencode")
+
+    def test_inject_skips_when_dialog_command_changed(self):
+        # req_cmd is the stale access_directory request; the live dialog has already
+        # advanced to a "Shell command" request (the classic two-dialogs-in-sequence
+        # trampoline). inject_approval must NOT escalate the stale command.
+        shell_dialog = "Permission required\n\n  $ git status --porcelain\n\nAllow once  Allow always  Reject"
+        with patch("agent_adapters.opencode.get_pane_text", return_value=shell_dialog):
+            approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory /tmp")
+        self.assertFalse(approved)
+        self.assertEqual(reason, INJECT_SKIP_CHANGED)
+
+    def test_inject_skips_when_dialog_moved_to_shell_command(self):
+        # Same trampoline but with a wrapped command body, ensuring the skip is based
+        # on command identity mismatch rather than a transient parse failure.
+        shell_dialog = (
+            "Permission required\n"
+            "Shell command\n\n"
+            "$ cp a b && cp c d\n"
+            "Allow once  Allow always  Reject"
+        )
+        with patch("agent_adapters.opencode.get_pane_text", return_value=shell_dialog):
+            approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory ~/.config/herdr")
+        self.assertFalse(approved)
+        self.assertEqual(reason, INJECT_SKIP_CHANGED)
+
+    def test_inject_success_when_dialog_already_cleared(self):
+        # If the dialog is already gone (stage unknown), injection is a no-op success.
+        with patch("agent_adapters.opencode.get_pane_text", return_value="random terminal output"):
+            approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory /tmp")
+        self.assertTrue(approved)
+        self.assertIn("dialog cleared", reason)
 
 
 if __name__ == "__main__":

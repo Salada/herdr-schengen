@@ -37,7 +37,7 @@ import importlib
 import gray_zone_evaluator
 import guard_db
 import security_evaluator
-from agent_adapters import get_adapter, target_agent_kinds
+from agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
 from cloud_judge import DEFAULT_REASONING_EFFORT
 from guard_db import (
     DB_DIR,
@@ -937,6 +937,18 @@ def main():
 
                         approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
                         if not approved:
+                            if inject_reason == INJECT_SKIP_CHANGED:
+                                # The live dialog trampolined to a DIFFERENT request
+                                # (e.g. access_directory -> shell command) while we
+                                # evaluated. The stale req_cmd is gone; skip and let the
+                                # next poll re-parse the new request. Escalating the stale
+                                # command would enqueue an un-resolvable escalation and
+                                # deadlock the strict FIFO queue.
+                                print(
+                                    f"⏭️  [SKIP] Pane {pane_id} dialog changed to a different request during evaluation; deferring to next poll.",
+                                    flush=True,
+                                )
+                                continue
                             print(f"🚨 [{agent_kind}] {inject_reason} on {pane_id}", flush=True)
                             # 'OPENCODE_FAILSAFE' is a watcher-level escalation marker, deliberately
                             # outside the command-classification DecisionLayer enum.
