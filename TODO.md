@@ -45,13 +45,9 @@ Round 2 - Opencode
 [x] (PR #80) access_directory TOCTOU → stale OPENCODE_FAILSAFE escalation으로 FIFO deadlock. inject_approval이 dialog command 변경 시 skip(INJECT_SKIP_CHANGED)하도록 수정. (원인: [지침] 3단계 선택지 에러가 계속 opencode에 전달되는 버그)
 [x] (PR #80) CI 실패 원인: Alpine host runner에 textual/rich/httpx 미설치 → ModuleNotFoundError('rich'). workflow에 venv+pip install 단계 추가.
 [x] (PR #80, PR #73 close) PR #73(AGY QA test)는 이미 PR #74로 main 병합된 중복 → close 처리.
-[] recent audits 마우스 클릭 → fullscreen 전환 (미해결, root cause 확정)
-   - 증상: 헤더/셀 클릭 모두 좌상단 타이틀(x=12,y=1)에 착지 → focus가 chat으로 감.
-   - ROOT CAUSE: Textual이 in-band window resize(2048) 지원 감지 후 SGR pixel mouse(1016h) 활성화. Herdr 터미널은 1016 무시하고 CELL 좌표 보고 → Textual이 PIXEL로 해석해 나눠 좌표 축소.
-   - 증거: raw SGR `\x1b[<0;115;30M`(cell x=115,y=30) → parsed MouseDown(x=11,y=1).
-   - FIX 방향: LinuxDriver subclass로 _enable_mouse_pixels() no-op(1016h 미전송) + App.driver_class 주입.
-   - 미커밋: schengen_tui.py(+cmd) on_mouse_down 픽스 + ALLOW_SELECT 격리 + SCHENGEN_MOUSE_DEBUG 영구 로깅(1MB×3 rotate), test mouse test. keys.log(Textual debug 잔여) 정리 필요.
-[] Question 다이얼로그: 어떤 command도 보내지 않고 approve/reject 없이 미대응 종료해야함(유저가 pane에서 주관식 대응).
-[] 승인 지침전달을 (agy의 경우에는 tab을 사용한것, opencode의 경우는 추가 comment를 보내는것) 을 선택적으로 할수있는 toggle 버튼을 tui에 만들어줘. 이 구현은 몇가지 config layer ( args, runtime configuration change ) 가 가능한 방법을 모색해줘. 또한 reject 시에도 지침전달에 대해서 동일하게 customize 하게해줘. default 값은 승인 지침전달은 false ( 이 경우 breaking change임 ), reject 지침전달은 true다.
-[] 승인/deny 지침 및 user와의 논의를 sqlite의 table로 남겨. 기존 table을 alter할지 새로운 table에 join할지는 네게 맡긴다. 
-[] bloat_message_opencode.md 형식의 데이터가 계속 opencode로 승인시마다 전달되는 상황이 있는데 그어떤 경우도 저렇게 프롬프트를 더럽히는 의견을 전달하지않도록해. opencode에만 한정된 버그로 보인다. 
+[x] recent audits 마우스 클릭 → fullscreen 전환: NoPixelMouseDriver로 1016h(pixel mouse)/2048h(in-band resize) 무효화해 SGR 좌표를 cell로 해석. (Textual이 2048 지원 감지 후 1016 활성화 → Herdr 터미널이 CELL 좌표를 보내는데 PIXEL로 나눠 좌표 축소)
+[x] Question 다이얼로그: command/approve/reject 전송 없이 미대응 종료 (watcher에서 "question" sentinel skip — 유저가 pane에서 주관식 대응).
+[x] 승인/거절 지침전달 toggle: TUI 버튼(Approve/Reject Instr) + SQLite guard_config + CLI args(--send/--no-send-*). default: approve=false, reject=true.
+[x] 승인/deny 지침·논의를 SQLite adjudication_log table로 기록 (record_adjudication).
+[x] bloat_message 방지: approve 지침전달 기본 false로 opencode 승인 시 피드백 주입 중단.
+[] default-model을 gpt-5.6-luna 로, default-reasoning을 (설정가능하다면 ) low로 해줘. 정확히는 deekseek에 관련된 설정을 일부러 모든 코드에서 없애고 싶어. 다른게 아니라 내가 활동하는 회사에서 중국모델에 대한 거부감이 있어서. 이후 설정은 가능하게하더라도 기본 코드에는 노출하고 싶지않다. 

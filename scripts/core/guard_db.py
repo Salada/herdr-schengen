@@ -126,6 +126,22 @@ def init_db():
             hit_count INTEGER DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS guard_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS adjudication_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            escalation_id INTEGER,
+            pane_id TEXT,
+            agent_kind TEXT,
+            action TEXT NOT NULL, -- 'APPROVE' | 'REJECT'
+            feedback TEXT,
+            created_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp);
         CREATE INDEX IF NOT EXISTS idx_audit_pattern ON audit_logs(normalized_pattern);
         CREATE INDEX IF NOT EXISTS idx_pending_status ON pending_escalations(status);
@@ -520,6 +536,81 @@ def get_state_file_paths() -> dict[str, str]:
         "log_file": str(LOG_FILE),
         "log_dir": str(LOG_DIR),
     }
+
+
+_INSTRUCTION_CONFIG_DEFAULTS = {
+    "send_approve_instruction": False,
+    "send_reject_instruction": True,
+}
+
+
+def _parse_bool(value) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def get_instruction_delivery_config() -> dict[str, bool]:
+    """Return the instruction-delivery config: whether to send the gatekeeper
+    feedback (instruction) to the target pane on approve/reject.
+
+    Defaults: send_approve_instruction=False (do NOT pollute the agent prompt on
+    approve), send_reject_instruction=True (explain why a command was rejected).
+    Backed by the `guard_config` table; missing keys fall back to the defaults.
+    """
+    init_db()
+    config = dict(_INSTRUCTION_CONFIG_DEFAULTS)
+    with get_db_connection() as conn:
+        rows = conn.execute("SELECT key, value FROM guard_config").fetchall()
+        for row in rows:
+            if row["key"] in config:
+                config[row["key"]] = _parse_bool(row["value"])
+    return config
+
+
+def set_instruction_delivery_config(
+    send_approve_instruction: Optional[bool] = None,
+    send_reject_instruction: Optional[bool] = None,
+) -> dict[str, bool]:
+    """Update instruction-delivery config keys (None = leave unchanged). Returns the new config."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    updates = {}
+    if send_approve_instruction is not None:
+        updates["send_approve_instruction"] = "true" if send_approve_instruction else "false"
+    if send_reject_instruction is not None:
+        updates["send_reject_instruction"] = "true" if send_reject_instruction else "false"
+    if updates:
+        with get_db_connection() as conn:
+            for key, value in updates.items():
+                conn.execute(
+                    """
+                    INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    (key, value, now_iso),
+                )
+            conn.commit()
+    return get_instruction_delivery_config()
+
+
+def record_adjudication(
+    escalation_id: int,
+    pane_id: str,
+    agent_kind: str,
+    action: str,
+    feedback: str,
+) -> None:
+    """Persist an approve/deny adjudication and its instruction for auditability."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO adjudication_log (escalation_id, pane_id, agent_kind, action, feedback, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (escalation_id, pane_id, agent_kind, action, feedback, now_iso),
+        )
+        conn.commit()
 
 
 def enqueue_pending_escalation(

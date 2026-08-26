@@ -603,6 +603,31 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
         self.assertIn("overflow-y: scroll;", css)
         self.assertIn("overflow-x: scroll;", css)
 
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_no_pixel_mouse_driver_wired_and_disables_pixel_resize(self):
+        from cmd.schengen_tui import NoPixelMouseDriver, SchengenTUIApp
+        from textual.drivers.linux_driver import LinuxDriver
+
+        self.assertTrue(issubclass(NoPixelMouseDriver, LinuxDriver))
+
+        # The overrides are no-ops: they must not write escape sequences nor
+        # flip the driver's internal pixel-mouse / in-band-resize flags.
+        d = NoPixelMouseDriver.__new__(NoPixelMouseDriver)
+        d._mouse_pixels = False
+        d._in_band_window_resize = False
+        d._enable_mouse_pixels()
+        d._enable_in_band_window_resize()
+        self.assertFalse(getattr(d, "_mouse_pixels", True))
+        self.assertFalse(getattr(d, "_in_band_window_resize", True))
+
+        # The TUI app must select this driver so mouse coords stay in cell mode.
+        app = SchengenTUIApp()
+        try:
+            self.assertIs(app.driver_class, NoPixelMouseDriver)
+        finally:
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
 
 class TestTUIInputExpansionAndObserverDisabled(unittest.IsolatedAsyncioTestCase):
     """Test dynamic height expansion in CommandTextArea and observer mode input disablement."""

@@ -27,6 +27,7 @@ from core.guard_db import (
     get_pending_escalations,
     resolve_escalation,
     get_recent_audit_logs,
+    set_instruction_delivery_config,
 )
 from tools.schengen_agent_llm import execute_tool_call
 
@@ -82,6 +83,8 @@ class TestE2EEscalationLifecycle(unittest.TestCase):
         # 3. Simulate Tab Amend approval on #id1 (AGY)
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
+            # Enable approve-instruction delivery so the AGY tab-amend flow is exercised.
+            set_instruction_delivery_config(send_approve_instruction=True)
             res = execute_tool_call("approve_escalation", {
                 "escalation_id": id1,
                 "english_feedback": "Approved. Test target path verified non-existent.",
@@ -129,6 +132,42 @@ class TestE2EEscalationLifecycle(unittest.TestCase):
         # 8. Queue is now completely clear (clean slate)
         final_pending = get_pending_escalations(include_delivered=False)
         self.assertEqual(len(final_pending), 0)
+
+
+class TestInstructionDeliveryConfig(unittest.TestCase):
+    """Instruction-delivery config (approve/reject feedback gating) + adjudication log."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_guard.db"
+        self.db_patch = patch.object(guard_db, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        guard_db.init_db()
+
+    def tearDown(self):
+        self.db_patch.stop()
+        self.temp_dir.cleanup()
+
+    def test_default_config_approve_off_reject_on(self):
+        cfg = guard_db.get_instruction_delivery_config()
+        self.assertFalse(cfg["send_approve_instruction"])
+        self.assertTrue(cfg["send_reject_instruction"])
+
+    def test_set_config_persists(self):
+        guard_db.set_instruction_delivery_config(send_approve_instruction=True, send_reject_instruction=False)
+        cfg = guard_db.get_instruction_delivery_config()
+        self.assertTrue(cfg["send_approve_instruction"])
+        self.assertFalse(cfg["send_reject_instruction"])
+
+    def test_record_adjudication_inserts_row(self):
+        guard_db.record_adjudication(123, "w1D:p1", "opencode", "APPROVE", "Approved. Safe.")
+        conn = guard_db.get_db_connection()
+        rows = conn.execute("SELECT id, escalation_id, pane_id, action, feedback FROM adjudication_log").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["escalation_id"], 123)
+        self.assertEqual(rows[0]["pane_id"], "w1D:p1")
+        self.assertEqual(rows[0]["action"], "APPROVE")
+        self.assertEqual(rows[0]["feedback"], "Approved. Safe.")
 
 
 if __name__ == "__main__":
