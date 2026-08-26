@@ -11,12 +11,14 @@ Key Features:
 """
 
 import asyncio
+import logging
 import os
 import re
 import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -66,6 +68,7 @@ from feature_db import (
     search_similar_feature_requests,
 )
 from guard_db import (
+    LOG_DIR,
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
@@ -86,6 +89,39 @@ def format_local_time(iso_ts: str) -> str:
         return local_dt.strftime("%H:%M")
     except Exception:
         return iso_ts.split("T")[-1][:5] if "T" in iso_ts else iso_ts[:5]
+
+
+# --- Mouse-event diagnostic logging (gated by SCHENGEN_MOUSE_DEBUG) ---------
+#
+# Permanent, opt-in instrumentation for debugging terminal mouse-coordinate /
+# click-routing issues (e.g. the "Recent Audits click -> focus goes to chat"
+# bug). It is OFF by default and only writes when the environment variable
+# SCHENGEN_MOUSE_DEBUG is set to a truthy value (1/true/yes/on). Logs rotate
+# via a standard RotatingFileHandler so it never grows unbounded.
+
+MOUSE_DEBUG_LOG_PATH = LOG_DIR / "schengen_tui_mouse.log"
+_mouse_debug_logger: Optional[logging.Logger] = None
+
+
+def _mouse_debug_enabled() -> bool:
+    return os.environ.get("SCHENGEN_MOUSE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _mouse_debug_log(message: str) -> None:
+    """Append a mouse-event line to the rotating debug log (no-op unless enabled)."""
+    global _mouse_debug_logger
+    if not _mouse_debug_enabled():
+        return
+    if _mouse_debug_logger is None:
+        _mouse_debug_logger = logging.getLogger("schengen.tui.mouse")
+        _mouse_debug_logger.setLevel(logging.DEBUG)
+        _mouse_debug_logger.propagate = False
+        handler = RotatingFileHandler(
+            MOUSE_DEBUG_LOG_PATH, maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        _mouse_debug_logger.addHandler(handler)
+    _mouse_debug_logger.debug(message)
 
 
 class FocusableRichLog(RichLog):
@@ -253,8 +289,15 @@ class AuditFullscreenModal(ModalScreen):
 
 class FixedHeader(Header):
     """Header that does not expand or toggle tall mode on click."""
+    ALLOW_SELECT = False
+
     def on_click(self, event: events.Click) -> None:
         event.stop()
+
+
+class UnselectableLabel(Label):
+    """Label that explicitly rejects text drag selection to prevent suppressing click events."""
+    ALLOW_SELECT = False
 
 
 class AuditDataTable(DataTable):
@@ -268,21 +311,29 @@ class AuditDataTable(DataTable):
         self.show_vertical_scrollbar = False
         self.show_horizontal_scrollbar = False
 
-    def on_click(self, event: events.Click) -> None:
+    def _open_modal(self) -> None:
+        # Prevent opening modal multiple times if already present
+        if len(self.app.screen_stack) == 1:
+            self.app.push_screen(AuditFullscreenModal())
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        # DataTable with show_cursor=False never brokers a Click message nor posts
+        # Row/CellSelected on a mouse click, so opening on press is the only reliable
+        # mouse trigger (immune to micro-drag and release-position).
         event.stop()
-        self.app.push_screen(AuditFullscreenModal())
+        self._open_modal()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         event.stop()
-        self.app.push_screen(AuditFullscreenModal())
+        self._open_modal()
 
     def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
         event.stop()
-        self.app.push_screen(AuditFullscreenModal())
+        self._open_modal()
 
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         event.stop()
-        self.app.push_screen(AuditFullscreenModal())
+        self._open_modal()
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
         event.stop()
@@ -293,9 +344,17 @@ class AuditDataTable(DataTable):
 
 class AuditSectionHeader(Label):
     """Clickable header for Recent Audits section."""
-    def on_click(self, event: events.Click) -> None:
+    ALLOW_SELECT = False
+
+    def _open_modal(self) -> None:
+        if len(self.app.screen_stack) == 1:
+            self.app.push_screen(AuditFullscreenModal())
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        # Open on press for reliability against micro-drag (Label ALLOW_SELECT=False
+        # prevents text drag-selection from swallowing the press).
         event.stop()
-        self.app.push_screen(AuditFullscreenModal())
+        self._open_modal()
 
 
 class CommandTextArea(TextArea):
@@ -599,7 +658,7 @@ class SchengenTUIApp(App):
         with Horizontal(id="main-body"):
             # Left: Chat log fills space; banner floats just above input
             with Vertical(id="chat-column"):
-                yield Label("[bold cyan]🤖 Schengen Security Gatekeeper (DeepSeek Flash)[/]")
+                yield UnselectableLabel("[bold cyan]🤖 Schengen Security Gatekeeper (DeepSeek Flash)[/]")
                 yield FocusableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
                 yield Static(id="active-target-banner")
                 yield CommandTextArea(placeholder="Ask Gatekeeper or type command (Enter to submit, Shift+Enter for newline)...", id="input-box")
@@ -619,7 +678,37 @@ class SchengenTUIApp(App):
         yield Footer()
 
     def action_open_audit_modal(self) -> None:
-        self.push_screen(AuditFullscreenModal())
+        if len(self.screen_stack) == 1:
+            self.push_screen(AuditFullscreenModal())
+
+    def _log_mouse_event(self, kind: str, event: events.MouseEvent) -> None:
+        if not _mouse_debug_enabled():
+            return
+        target = getattr(event, "widget", None)
+        t_id = getattr(target, "id", "") or ""
+        t_cls = target.__class__.__name__ if target is not None else "None"
+        under = "NoWidget"
+        try:
+            w, _r = self.screen.get_widget_at(event.screen_x, event.screen_y)
+            under = f"{w.__class__.__name__}({getattr(w, 'id', '')})"
+        except Exception:
+            pass
+        _mouse_debug_log(
+            f"[{kind}] screen_x={event.screen_x} screen_y={event.screen_y} "
+            f"event_widget={t_cls}({t_id}) under={under}"
+        )
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        self._log_mouse_event("mouse_down", event)
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        self._log_mouse_event("mouse_up", event)
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        self._log_mouse_event("mouse_move", event)
+
+    def on_click(self, event: events.Click) -> None:
+        self._log_mouse_event("click", event)
 
     def on_mount(self) -> None:
         self.title = "Herdr Schengen Security Gatekeeper"
