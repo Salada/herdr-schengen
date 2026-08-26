@@ -13,14 +13,14 @@ import hashlib
 import json
 from typing import Any, Optional
 
-from guard_db import clear_in_memory_cache, get_cached_evaluation, set_cached_evaluation
+from core.guard_db import clear_in_memory_cache, get_cached_evaluation, set_cached_evaluation
 
 
 def get_dynamic_ruleset_version() -> str:
     """Compute deterministic dynamic ruleset version from cryptographic hash of prompts, rules, and redaction."""
-    import redaction
-    from cloud_judge import DEFAULT_GUARD_LLM_MODEL, GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT
-    from security_evaluator import CRITICAL_SHELL_PATTERNS, MINIMAL_INSPECTOR_SYSTEM_PROMPT
+    import core.redaction as redaction
+    from core.cloud_judge import DEFAULT_GUARD_LLM_MODEL, GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT
+    from core.security_evaluator import CRITICAL_SHELL_PATTERNS, MINIMAL_INSPECTOR_SYSTEM_PROMPT
 
     hasher = hashlib.sha256()
     hasher.update(MINIMAL_INSPECTOR_SYSTEM_PROMPT.encode("utf-8"))

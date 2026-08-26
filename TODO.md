@@ -52,4 +52,6 @@ Round 2 - Opencode
    - FIX 방향: LinuxDriver subclass로 _enable_mouse_pixels() no-op(1016h 미전송) + App.driver_class 주입.
    - 미커밋: schengen_tui.py(+cmd) on_mouse_down 픽스 + ALLOW_SELECT 격리 + SCHENGEN_MOUSE_DEBUG 영구 로깅(1MB×3 rotate), test mouse test. keys.log(Textual debug 잔여) 정리 필요.
 [] Question 다이얼로그: 어떤 command도 보내지 않고 approve/reject 없이 미대응 종료해야함(유저가 pane에서 주관식 대응).
-[] 지침전달을 (agy의 경우에는 tab을 사용한것, opencode의 경우는 추가 comment를 보내는것) 을 선택적으로 할수있는 toggle 버튼을 tui에 만들어줘
+[] 승인 지침전달을 (agy의 경우에는 tab을 사용한것, opencode의 경우는 추가 comment를 보내는것) 을 선택적으로 할수있는 toggle 버튼을 tui에 만들어줘. 이 구현은 몇가지 config layer ( args, runtime configuration change ) 가 가능한 방법을 모색해줘. 또한 reject 시에도 지침전달에 대해서 동일하게 customize 하게해줘. default 값은 승인 지침전달은 false ( 이 경우 breaking change임 ), reject 지침전달은 true다.
+[] 승인/deny 지침 및 user와의 논의를 sqlite의 table로 남겨. 기존 table을 alter할지 새로운 table에 join할지는 네게 맡긴다. 
+[] bloat_message_opencode.md 형식의 데이터가 계속 opencode로 승인시마다 전달되는 상황이 있는데 그어떤 경우도 저렇게 프롬프트를 더럽히는 의견을 전달하지않도록해. opencode에만 한정된 버그로 보인다. 

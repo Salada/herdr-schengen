@@ -8,9 +8,9 @@ from unittest.mock import patch
 SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
-from agent_adapters.opencode import decide_opencode_injection, resolve_opencode_injection, strip_ansi, strip_leaked_text, strip_tui
-from schengen_watcher import agent_matches
+from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
+from adapters.agent_adapters.opencode import decide_opencode_injection, resolve_opencode_injection, strip_ansi, strip_leaked_text, strip_tui
+from cmd.schengen_watcher import agent_matches
 
 
 class TestAgentMatches(unittest.TestCase):
@@ -374,7 +374,7 @@ class TestOpenCodeInjectSkip(unittest.TestCase):
         # advanced to a "Shell command" request (the classic two-dialogs-in-sequence
         # trampoline). inject_approval must NOT escalate the stale command.
         shell_dialog = "Permission required\n\n  $ git status --porcelain\n\nAllow once  Allow always  Reject"
-        with patch("agent_adapters.opencode.get_pane_text", return_value=shell_dialog):
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value=shell_dialog):
             approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory /tmp")
         self.assertFalse(approved)
         self.assertEqual(reason, INJECT_SKIP_CHANGED)
@@ -388,14 +388,14 @@ class TestOpenCodeInjectSkip(unittest.TestCase):
             "$ cp a b && cp c d\n"
             "Allow once  Allow always  Reject"
         )
-        with patch("agent_adapters.opencode.get_pane_text", return_value=shell_dialog):
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value=shell_dialog):
             approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory ~/.config/herdr")
         self.assertFalse(approved)
         self.assertEqual(reason, INJECT_SKIP_CHANGED)
 
     def test_inject_success_when_dialog_already_cleared(self):
         # If the dialog is already gone (stage unknown), injection is a no-op success.
-        with patch("agent_adapters.opencode.get_pane_text", return_value="random terminal output"):
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value="random terminal output"):
             approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory /tmp")
         self.assertTrue(approved)
         self.assertIn("dialog cleared", reason)

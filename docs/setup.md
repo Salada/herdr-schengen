@@ -79,7 +79,7 @@ When `SCHENGEN_INSPECTOR_MODEL` is not explicitly set, SmartGate automatically r
 In a dedicated Herdr pane (e.g. `w1D:p7`):
 
 ```bash
-~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/schengen_tui.py
+~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/cmd/schengen_tui.py
 ```
 
 ### Option B: Standalone Background Watcher Daemon
@@ -87,16 +87,16 @@ To run the background monitoring daemon without the interactive TUI:
 
 ```bash
 # Start background guard on all active agent panes
-python3 ~/code/herdr-schengen/scripts/schengen_watcher.py --target auto
+python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto
 
 # Check status of active daemon locks
-python3 ~/code/herdr-schengen/scripts/schengen_watcher.py --status
+python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --status
 
 # Gracefully reload rulesets in-process via SIGHUP (0ms downtime)
-python3 ~/code/herdr-schengen/scripts/schengen_watcher.py --reload
+python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --reload
 
 # Safely stop guard daemon
-python3 ~/code/herdr-schengen/scripts/schengen_watcher.py --stop
+python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --stop
 ```
 
 ---
@@ -123,7 +123,7 @@ To ensure the environment is fully operational:
 HERDR_ENV=1 ~/.local/share/herdr-schengen-tui-venv/bin/python3 -m unittest discover -s tests
 
 # 2. Run static type checker
-pyright scripts/schengen_agent_llm.py scripts/schengen_tui.py
+pyright scripts/tools/schengen_agent_llm.py scripts/cmd/schengen_tui.py
 ```
 
 ---
@@ -132,7 +132,7 @@ pyright scripts/schengen_agent_llm.py scripts/schengen_tui.py
 
 1. **`ModuleNotFoundError: No module named 'textual'`**:
    - Ensure you are running the script using the dedicated virtualenv binary:
-     `~/.local/share/herdr-schengen-tui-venv/bin/python3 scripts/schengen_tui.py`
+     `~/.local/share/herdr-schengen-tui-venv/bin/python3 scripts/cmd/schengen_tui.py`
 2. **`[SCHENGEN_FATAL] Execution rejected: must run within an active agent session`**:
    - Schengen requires an active Herdr session (`HERDR_ENV=1`) and an agent session marker (`ANTIGRAVITY_AGENT=1` or `OPENCODE=1`).
 3. **Clipboard copy (`Ctrl+Y`) shows error on Linux**:

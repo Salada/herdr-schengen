@@ -110,23 +110,23 @@ npx skills add ssh://git@salada-git:2222/InhouseOriented/herdr-schengen.git -g -
 ### Quick Commands & History CLI
 ```bash
 # 1. Start SmartGate daemon monitoring all active & future AGY + OpenCode panes
-python3 scripts/schengen_watcher.py --target auto
+python3 scripts/cmd/schengen_watcher.py --target auto
 
 # 2. Check live status and active Herdr panes
-python3 scripts/schengen_watcher.py --status
+python3 scripts/cmd/schengen_watcher.py --status
 
 # 3. View recent audit history with layer attribution
-python3 scripts/schengen_history.py --recent 10
+python3 scripts/cmd/schengen_history.py --recent 10
 
 # 4. Search audit logs across commands and layers
-python3 scripts/schengen_history.py --search "git push"
+python3 scripts/cmd/schengen_history.py --search "git push"
 
 # 5. Discover decision layers and decision types
-python3 scripts/schengen_history.py --list-layers
-python3 scripts/schengen_history.py --list-decisions
+python3 scripts/cmd/schengen_history.py --list-layers
+python3 scripts/cmd/schengen_history.py --list-decisions
 
 # 6. Stop the SmartGate daemon
-python3 scripts/schengen_watcher.py --stop
+python3 scripts/cmd/schengen_watcher.py --stop
 ```
 
 ---
@@ -156,7 +156,7 @@ python3 -m unittest tests/test_llm_evaluator_integration.py
 ## 🤝 Contributing & Extensibility
 
 Herdr Schengen is designed to be open-source ready and modular:
-- **New AST Rules**: Extend [`scripts/security_evaluator.py`](scripts/security_evaluator.py) to add language-specific parsers.
+- **New AST Rules**: Extend [`scripts/core/security_evaluator.py`](scripts/core/security_evaluator.py) to add language-specific parsers.
 - **Custom LLM Providers**: Compatible with any OpenAI-compliant endpoint (vLLM, Ollama, DeepSeek, LocalAI).
 - **Architecture Decision Records**: Consult [`docs/adr-001`](docs/adr-001-runtime-architecture-python-vs-go.md) and [`docs/adr-002`](docs/adr-002-dynamic-substitution-tool-calling-inspector.md) for technical trade-off details.
 

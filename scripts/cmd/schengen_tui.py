@@ -30,10 +30,9 @@ if hasattr(signal, "SIGHUP"):
         pass
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SCRIPTS_ROOT = SCRIPT_DIR.parent if SCRIPT_DIR.name in ("cmd", "core", "tools", "adapters") else SCRIPT_DIR
-for _p in (SCRIPTS_ROOT, SCRIPTS_ROOT / "core", SCRIPTS_ROOT / "tools", SCRIPTS_ROOT / "cmd", SCRIPTS_ROOT / "adapters"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+SCRIPTS_ROOT = SCRIPT_DIR.parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
@@ -61,20 +60,20 @@ from textual.widgets import (
     TextArea,
 )
 
-from feature_db import (
+from core.feature_db import (
     add_feature_request,
     create_feature_request_with_similars,
     list_feature_requests,
     search_similar_feature_requests,
 )
-from guard_db import (
+from core.guard_db import (
     LOG_DIR,
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
 )
-from schengen_agent_llm import SchengenAgentChat, get_current_active_escalation
-from schengen_watcher import list_active_guard_locks
+from tools.schengen_agent_llm import SchengenAgentChat, get_current_active_escalation
+from cmd.schengen_watcher import list_active_guard_locks
 
 
 def format_local_time(iso_ts: str) -> str:

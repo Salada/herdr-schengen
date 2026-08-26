@@ -25,10 +25,11 @@ import sys
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPTS_ROOT = SCRIPT_DIR.parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from feature_db import (
+from core.feature_db import (
     add_feature_request,
     create_feature_request_with_similars,
     get_feature_request_by_id,

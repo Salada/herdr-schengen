@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 import unittest
 
-from security_evaluator import (
+from core.security_evaluator import (
     DYNAMIC_SUBSTITUTION_PATTERN,
     audit_shell_command,
     safe_read_file_content,

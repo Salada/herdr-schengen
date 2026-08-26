@@ -8,7 +8,7 @@ import urllib.error
 from email.message import Message
 from unittest.mock import MagicMock, patch
 
-from cloud_judge import (
+from core.cloud_judge import (
     MAX_ADAPTIVE_RETRIES,
     post_cloud_judge,
 )

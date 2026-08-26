@@ -14,7 +14,7 @@ This specification introduces **Semantic Tool Badges & Compact Visual Cards** de
 | :--- | :--- | :--- | :--- |
 | `investigate_path_details` | `🔍 [Path Check]` | `🔍 [Path Check]  `~/code/project/file.py`` | `Target: ~/path (VCS committed)` |
 | `investigate_pane_history` | `📜 [Pane Buffer]` | `📜 [Pane Buffer]  `w1D:p1` (100 lines · scrollback)` | `Pane: w1D:p1 · Lines: 100 · Full Dump: Yes` |
-| `read_file_snippet` | `📄 [File Read]` | `📄 [File Read]  `scripts/security_evaluator.py`` | `Reading 8KB header snippet` |
+| `read_file_snippet` | `📄 [File Read]` | `📄 [File Read]  `scripts/core/security_evaluator.py`` | `Reading 8KB header snippet` |
 | `approve_escalation` | `✅ [Auto Approve]` | `✅ [Auto Approve]  Escalation #123` | `Feedback: Approved. Zero risk verified.` |
 | `reject_escalation` | `🛑 [Action Reject]` | `🛑 [Action Reject]  Escalation #123` | `Feedback: Denied per critical denylist.` |
 | `create_feature_request` | `💡 [Feature Backlog]` | `💡 [Feature Backlog]  #42: Add word-wrap` | `Priority: HIGH · Category: UI` |

@@ -13,10 +13,11 @@ from pathlib import Path
 
 # Add scripts directory to path
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPTS_ROOT = SCRIPT_DIR.parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from guard_db import (
+from core.guard_db import (
     cleanup_escalations,
     get_pattern_analysis,
     get_pending_escalations,
@@ -25,7 +26,7 @@ from guard_db import (
     search_audit_logs,
     tail_state_log,
 )
-from security_evaluator import DecisionLayer
+from core.security_evaluator import DecisionLayer
 
 
 def main():
@@ -211,7 +212,7 @@ def main():
         return
 
     if args.summary:
-        from guard_db import get_session_dashboard_summary
+        from core.guard_db import get_session_dashboard_summary
 
         summary_data = get_session_dashboard_summary(
             pane_id=args.pane,

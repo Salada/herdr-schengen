@@ -8,13 +8,13 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from cloud_judge import (
+from core.cloud_judge import (
     DEFAULT_GUARD_LLM_ENDPOINT,
     DEFAULT_GUARD_LLM_MODEL,
     resolve_guard_llm_config,
 )
-from redaction import redact_for_cloud
-from security_evaluator import (
+from core.redaction import redact_for_cloud
+from core.security_evaluator import (
     DecisionLayer,
     _audit_static_shell_command,
     audit_with_cloud_judge,
@@ -174,8 +174,8 @@ class TestAuditWithCloudJudge(unittest.TestCase):
         self.assertEqual(DecisionLayer.CLOUD_JUDGE, "CLOUD_JUDGE")
 
     def test_cache_verdict_skips_safe_true(self):
-        from security_evaluator import _cache_cloud_verdict
-        from session_cache import clear_session_cache, compute_cache_key, get_cached_result
+        from core.security_evaluator import _cache_cloud_verdict
+        from core.session_cache import clear_session_cache, compute_cache_key, get_cached_result
 
         clear_session_cache()
         key = compute_cache_key("cj:test-safe", cwd="/tmp", scope="t", agent_id="a", origin="A")
@@ -183,8 +183,8 @@ class TestAuditWithCloudJudge(unittest.TestCase):
         self.assertIsNone(get_cached_result(key))
 
     def test_cache_verdict_stores_unsafe(self):
-        from security_evaluator import _cache_cloud_verdict
-        from session_cache import clear_session_cache, compute_cache_key, get_cached_result
+        from core.security_evaluator import _cache_cloud_verdict
+        from core.session_cache import clear_session_cache, compute_cache_key, get_cached_result
 
         clear_session_cache()
         key = compute_cache_key("cj:test-unsafe", cwd="/tmp", scope="t", agent_id="a", origin="A")

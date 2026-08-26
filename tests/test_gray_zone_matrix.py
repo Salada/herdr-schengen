@@ -16,7 +16,7 @@ from pathlib import Path
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from gray_zone_evaluator import (
+from core.gray_zone_evaluator import (
     BASE_GOVERNANCE_MATRIX,
     OperationType,
     ResourceTier,

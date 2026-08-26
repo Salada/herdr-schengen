@@ -7,13 +7,13 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from security_evaluator import (
+from core.security_evaluator import (
     Consequence,
     DecisionLayer,
     Origin,
     audit_shell_command_with_taxonomy,
 )
-from shellcheck_evaluator import audit_shell_with_shellcheck, is_shellcheck_available
+from core.shellcheck_evaluator import audit_shell_with_shellcheck, is_shellcheck_available
 
 
 class TestShellCheckSAST(unittest.TestCase):
@@ -83,7 +83,7 @@ class TestShellCheckSAST(unittest.TestCase):
         """When shellcheck is unavailable, destructive commands with vars emit DEGRADED telemetry."""
         from unittest.mock import patch
 
-        with patch("shellcheck_evaluator.is_shellcheck_available", return_value=False):
+        with patch("core.shellcheck_evaluator.is_shellcheck_available", return_value=False):
             safe, reason, details = audit_shell_with_shellcheck('rm -rf "$TARGET_DIR"')
             self.assertTrue(safe)  # Fails open to Layer 2 pattern guards
             self.assertIsNotNone(details)

@@ -11,7 +11,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from security_evaluator import (
+from core.security_evaluator import (
     DecisionLayer,
     _python_normalization_candidates,
     audit_python_code,
@@ -27,7 +27,7 @@ def _try_parse(code: str) -> bool:
         return False
 
 
-from guard_db import (
+from core.guard_db import (
     get_recent_audit_logs,
     get_state_file_paths,
     init_db,
@@ -500,7 +500,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         self.assertIsInstance(lines, list)
 
     def test_scoped_lock_naming_and_path(self):
-        from schengen_watcher import get_lock_file_path, sanitize_target_name
+        from cmd.schengen_watcher import get_lock_file_path, sanitize_target_name
 
         self.assertEqual(sanitize_target_name("wS:pF"), "wS_pF")
         self.assertEqual(sanitize_target_name("auto"), "auto")
@@ -513,7 +513,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         self.assertTrue(str(lock_pane).endswith("schengen_wS_pF.lock"))
 
     def test_graceful_reload_execution(self):
-        from schengen_watcher import execute_graceful_reload
+        from cmd.schengen_watcher import execute_graceful_reload
 
         # Calling execute_graceful_reload() should succeed without throwing exceptions
         success = execute_graceful_reload()
@@ -524,10 +524,10 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         import tempfile
         import types
 
-        from schengen_watcher import verify_module_integrity
+        from cmd.schengen_watcher import verify_module_integrity
 
         # 1. Untracked / Null-stubbed module (outside SCM) -> rejected
-        fake_mod = types.ModuleType("security_evaluator")
+        fake_mod = types.ModuleType("core.security_evaluator")
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
             f.write(
                 "class DecisionLayer: ALLOWLIST = 'ALLOWLIST'\ndef audit_shell_command(*args, **kwargs): return True, 'approved', 'ALLOWLIST'\n"
@@ -542,7 +542,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
                 os.unlink(fake_path)
 
         # 2. Syntax corrupted module -> rejected
-        bad_syntax_mod = types.ModuleType("guard_db")
+        bad_syntax_mod = types.ModuleType("core.guard_db")
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
             f.write("def broken syntax (:::\n")
             bad_path = f.name
@@ -564,7 +564,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
     def test_escalation_queue_lifecycle_and_cleanup(self):
-        from guard_db import (
+        from core.guard_db import (
             cleanup_escalations,
             enqueue_pending_escalation,
             get_pending_escalations,
@@ -639,7 +639,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_2d_taxonomy_emission(self):
         """Verify that audit_shell_command_with_taxonomy correctly extracts 2D taxonomy."""
-        from security_evaluator import (
+        from core.security_evaluator import (
             Consequence,
             GateState,
             Origin,
@@ -693,7 +693,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_shadow_mode_kill_switch(self):
         """Verify that SCHENGEN_SHADOW_MODE=1 allows execution while logging counterfactual block."""
-        from security_evaluator import GateState, audit_shell_command_with_taxonomy
+        from core.security_evaluator import GateState, audit_shell_command_with_taxonomy
 
         old_env = os.environ.get("SCHENGEN_SHADOW_MODE")
         try:
@@ -713,7 +713,7 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
 
     def test_guard_db_taxonomy_columns_and_idempotency(self):
         """Verify SQLite3 schema includes 2D taxonomy and record_audit_log stores it."""
-        from guard_db import get_db_connection, record_audit_log
+        from core.guard_db import get_db_connection, record_audit_log
 
         test_pane = "wTest:pTax"
         test_cmd = "rm -rf /tmp/test_taxonomy_target"

@@ -22,7 +22,7 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from feature_db import (
+from core.feature_db import (
     add_feature_request,
     get_feature_request_by_id,
     list_feature_requests,
@@ -30,10 +30,10 @@ from feature_db import (
     search_similar_feature_requests,
     update_feature_request_status,
 )
-from schengen_agent_llm import execute_tool_call
+from tools.schengen_agent_llm import execute_tool_call
 
 try:
-    from schengen_tui import SchengenTUIApp
+    from cmd.schengen_tui import SchengenTUIApp
     HAS_TEXTUAL = True
 except ImportError:
     SchengenTUIApp = None  # type: ignore
@@ -157,7 +157,7 @@ class TestFeatureRequestsDB(unittest.TestCase):
         self.assertEqual(len(claimed_workers), 1)
 
     def test_create_feature_request_with_similars_dry(self):
-        from feature_db import create_feature_request_with_similars
+        from core.feature_db import create_feature_request_with_similars
         # Add initial item
         create_feature_request_with_similars(title="TUI 알림음 설정", description="볼륨 조절", db_path=self.db_path)
         # Add similar item
@@ -219,7 +219,7 @@ class TestTUINonBlockingFeatureQueueing(unittest.TestCase):
             async with app.run_test() as pilot:
                 # Simulate active in-flight investigation
                 app._processing_chat = True
-                with patch("schengen_tui.create_feature_request_with_similars") as mock_create:
+                with patch("cmd.schengen_tui.create_feature_request_with_similars") as mock_create:
                     mock_create.return_value = {
                         "id": 42,
                         "title": "TUI 알림음 커스텀",

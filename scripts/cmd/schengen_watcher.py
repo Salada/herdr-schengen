@@ -29,17 +29,18 @@ from pathlib import Path
 
 # Add script directory to sys.path for local imports
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPTS_ROOT = SCRIPT_DIR.parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
 import importlib
 
-import gray_zone_evaluator
-import guard_db
-import security_evaluator
-from agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
-from cloud_judge import DEFAULT_REASONING_EFFORT
-from guard_db import (
+import core.gray_zone_evaluator as gray_zone_evaluator
+import core.guard_db as guard_db
+import core.security_evaluator as security_evaluator
+from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
+from core.cloud_judge import DEFAULT_REASONING_EFFORT
+from core.guard_db import (
     DB_DIR,
     LOG_DIR,
     check_persisted_allowlist,
@@ -53,14 +54,14 @@ from guard_db import (
     search_audit_logs,
     tail_state_log,
 )
-from herdr_client import (
+from adapters.herdr_client import (
     detect_self_pane_id,
     get_all_panes,
     get_pane_info,
     get_pane_text,
     run_cmd,
 )
-from security_evaluator import (
+from core.security_evaluator import (
     DecisionLayer,
     Origin,
     audit_shell_command_with_taxonomy,
@@ -445,22 +446,22 @@ def execute_graceful_reload():
         importlib.reload(guard_db)
         importlib.reload(gray_zone_evaluator)
         importlib.reload(security_evaluator)
-        from security_evaluator import (
+        from core.security_evaluator import (
             DecisionLayer as _dl,
         )
-        from security_evaluator import (
+        from core.security_evaluator import (
             audit_python_code as _apc,
         )
-        from security_evaluator import (
+        from core.security_evaluator import (
             audit_shell_command as _asc,
         )
-        from security_evaluator import (
+        from core.security_evaluator import (
             audit_shell_command_with_taxonomy as _asct,
         )
-        from security_evaluator import (
+        from core.security_evaluator import (
             derive_taxonomy as _dt,
         )
-        from security_evaluator import (
+        from core.security_evaluator import (
             sanitize_output as _so,
         )
 

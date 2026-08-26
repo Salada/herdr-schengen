@@ -7,7 +7,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from security_evaluator import Consequence, DecisionLayer, GateState, Origin, audit_shell_command_with_taxonomy
+from core.security_evaluator import Consequence, DecisionLayer, GateState, Origin, audit_shell_command_with_taxonomy
 
 
 class TestSemgrepSASTAndHardening(unittest.TestCase):

@@ -704,7 +704,7 @@ def resolve_escalation(
         # Record in PaneSessionMemory for fast-path 0.1ms approval ONLY on explicit approval
         if approved_cmds:
             try:
-                from session_memory import record_pane_approval
+                from core.session_memory import record_pane_approval
                 for p_id, raw_c in approved_cmds:
                     record_pane_approval(p_id, raw_c, decision_layer="HUMAN_APPROVAL", reason="Approved by human operator")
             except Exception:

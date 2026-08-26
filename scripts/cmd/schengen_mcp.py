@@ -16,17 +16,18 @@ from pathlib import Path
 
 # Add herdr-schengen scripts directory to path
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPTS_ROOT = SCRIPT_DIR.parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from guard_db import (
+from core.guard_db import (
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
     get_state_file_paths,
     resolve_escalation,
 )
-from schengen_watcher import list_active_guard_locks
+from cmd.schengen_watcher import list_active_guard_locks
 
 
 def check_daemon_liveness():

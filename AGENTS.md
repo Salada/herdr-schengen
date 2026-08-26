@@ -19,7 +19,7 @@
    - **Ephemeral Runtime Testing**: Live debugging directly in `~/.agents/skills/` is permitted only for immediate hypothesis verification, but final code must be authored, tested, and committed inside `~/code/herdr-schengen/` (never blind reverse-copied).
 
 3. **In-Process Graceful Reload via SIGHUP (0ms Downtime)**:
-   - When modifying rule sets or evaluators, do NOT kill the daemon process. Use `python3 scripts/schengen_watcher.py --reload` to trigger an instant in-process hot reload via `importlib.reload()` and `SIGHUP`.
+   - When modifying rule sets or evaluators, do NOT kill the daemon process. Use `python3 scripts/cmd/schengen_watcher.py --reload` to trigger an instant in-process hot reload via `importlib.reload()` and `SIGHUP`.
 
 4. **100% Unit Test Baseline**:
    - Before committing any changes, verify all test suites pass without error:
@@ -82,19 +82,19 @@ For full setup, installation, and environment variable configuration, refer to *
 ### SOP-01: Updating Guard Rules & Hot-Reloading
 ```bash
 # 1. Edit evaluator in source repo
-nvim ~/code/herdr-schengen/scripts/security_evaluator.py
+nvim ~/code/herdr-schengen/scripts/core/security_evaluator.py
 # 2. Run test suite
 HERDR_ENV=1 ~/.local/share/herdr-schengen-tui-venv/bin/python3 -m unittest discover -s tests
 # 3. Mirror to runtime skill
 cp -r ~/code/herdr-schengen/scripts/ ~/.agents/skills/herdr-schengen/scripts/
 cp -r ~/code/herdr-schengen/docs/ ~/.agents/skills/herdr-schengen/docs/
 # 4. Gracefully hot-reload running daemon via SIGHUP (0ms downtime)
-python3 ~/.agents/skills/herdr-schengen/scripts/schengen_watcher.py --reload
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --reload
 ```
 
 ### SOP-02: Launching Interactive Gatekeeper TUI
 ```bash
-~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/schengen_tui.py
+~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/cmd/schengen_tui.py
 ```
 
 ### SOP-03: Documenting New Architectural Decisions

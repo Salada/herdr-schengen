@@ -16,9 +16,8 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 # Tests add the scripts/ dir to sys.path before importing (no installed package).
 "tests/*.py" = ["E402"]
-# Standalone scripts add SCRIPT_DIR to sys.path before importing sibling modules.
-"scripts/schengen_history.py" = ["E402"]
-"scripts/schengen_watcher.py" = ["E402"]
+# Standalone entry points add scripts/ to sys.path before importing subpackages.
+"scripts/cmd/*.py" = ["E402"]
 
 [tool.black]
 line-length = 120

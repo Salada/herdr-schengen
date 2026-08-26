@@ -25,7 +25,7 @@ import path from "node:path";
 
 const WATCHER_PATH =
   process.env.SCHENGEN_WATCHER_PATH ||
-  path.join(os.homedir(), ".agents", "skills", "herdr-schengen", "scripts", "schengen_watcher.py");
+  path.join(os.homedir(), ".agents", "skills", "herdr-schengen", "scripts", "cmd", "schengen_watcher.py");
 
 const LOG_PATH = (() => {
   const override = process.env.SCHENGEN_LOG_PATH;

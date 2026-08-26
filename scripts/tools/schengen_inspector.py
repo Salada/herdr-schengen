@@ -19,10 +19,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+SCRIPTS_ROOT = SCRIPT_DIR.parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from gray_zone_evaluator import (
+from core.gray_zone_evaluator import (
     ResourceTier,
     OperationType,
     IrreversibilityGrade,
@@ -33,7 +34,7 @@ from gray_zone_evaluator import (
     is_inside_git_work_tree,
     is_git_clean_and_committed,
 )
-from herdr_client import get_pane_text
+from adapters.herdr_client import get_pane_text
 
 
 def investigate_pane_intent(pane_id: str, lines: int = 25) -> str:
