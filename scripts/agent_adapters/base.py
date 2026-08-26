@@ -5,6 +5,15 @@ agent kind (e.g. codex, cursor) means adding a new adapter module — no changes
 schengen_watcher.py (Open/Closed Principle).
 """
 
+# Sentinel `reason` returned by `inject_approval` when the live permission dialog
+# trampolined to a DIFFERENT request than `req_cmd` while the caller was evaluating
+# (e.g. opencode's "Access external directory" prompt advances to the "Shell command"
+# prompt). The stale `req_cmd` is gone and the new request will be re-parsed and
+# evaluated on the next poll. The caller MUST skip (defer to the next poll) rather
+# than escalate the stale command — escalating it would enqueue an un-resolvable
+# escalation that deadlocks the strict FIFO escalation queue.
+INJECT_SKIP_CHANGED = "SKIP_DIALOG_CHANGED"
+
 
 class AgentAdapter:
     """Common interface implemented by each target agent adapter.

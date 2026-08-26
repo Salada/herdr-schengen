@@ -13,7 +13,7 @@ import time
 
 from herdr_client import get_pane_text, run_cmd
 
-from agent_adapters.base import AgentAdapter, register
+from agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, register
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 
@@ -307,7 +307,11 @@ class OpenCodeAdapter(AgentAdapter):
                     return True, "once approved (dialog cleared)"
                 return False, f"post-inject: dialog moved to '{live_stage}' before inject; aborted"
             if self.parse_permission_request(visible) != req_cmd:
-                return False, "post-inject: dialog command changed before inject; aborted (TOCTOU)"
+                # The dialog trampolined to a DIFFERENT permission request while we
+                # were evaluating (e.g. "Access external directory" -> "Shell command").
+                # The stale req_cmd is gone; skip so the next poll re-parses the new
+                # request, instead of escalating an un-resolvable stale command.
+                return False, INJECT_SKIP_CHANGED
 
             # Inject a single enter (no arrows/numbers). run_cmd returns None on
             # subprocess failure (herdr_client swallows CalledProcessError).

@@ -53,15 +53,20 @@ jobs:
           git --version
           shellcheck --version || true
 
+      - name: Install Python Dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --no-cache-dir --quiet textual rich httpx
+
       - name: Run Unit Guardrail Tests
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          python3 -m unittest discover -s tests -v
+          .venv/bin/python3 -m unittest discover -s tests -v
 
       - name: Run Live LLM Integration Tests (OpenAI-compatible cloud judge)
         run: |
           if [ -n "${OPENAI_API_KEY}" ]; then
-            python3 -m unittest tests/test_llm_evaluator_integration.py
+            .venv/bin/python3 -m unittest tests/test_llm_evaluator_integration.py
           else
             echo "ℹ️  OPENAI_API_KEY secret not set; skipping live integration tests in CI."
           fi
