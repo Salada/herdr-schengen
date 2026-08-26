@@ -580,6 +580,17 @@ class SchengenTUIApp(App):
         min-width: 10;
         padding: 0;
     }
+    #instruction-control {
+        layout: vertical;
+        height: auto;
+        margin-bottom: 1;
+    }
+    #instruction-control Button {
+        width: 100%;
+        height: 1;
+        min-height: 1;
+        margin-bottom: 0;
+    }
     #role-box {
         height: 4;
         background: $surface-darken-1;
@@ -688,10 +699,10 @@ class SchengenTUIApp(App):
                 with Horizontal(id="status-container"):
                     yield Static(id="status-box")
                     yield Button("⚡ Toggle", id="btn-toggle-guard", variant="warning")
-                with Horizontal(id="instruction-control"):
+                yield Static(id="role-box")
+                with Vertical(id="instruction-control"):
                     yield Button("📤 Approve Instr: OFF", id="btn-toggle-approve-instr")
                     yield Button("📤 Reject Instr: ON", id="btn-toggle-reject-instr")
-                yield Static(id="role-box")
                 yield Label("⚡ Token & Cache Meter", classes="section-title")
                 yield Static(id="token-meter-box")
                 yield AuditSectionHeader("📜 Recent Audits (Click: ⛶ Fullscreen)", classes="section-title")
