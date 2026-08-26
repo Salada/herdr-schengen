@@ -159,6 +159,18 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
         self.assertTrue(cfg["send_approve_instruction"])
         self.assertFalse(cfg["send_reject_instruction"])
 
+    def test_default_answer_language_korean(self):
+        self.assertEqual(guard_db.get_answer_language(), "korean")
+
+    def test_set_answer_language_persists(self):
+        self.assertEqual(guard_db.set_answer_language("english"), "english")
+        self.assertEqual(guard_db.get_answer_language(), "english")
+        self.assertEqual(guard_db.set_answer_language("japanese"), "japanese")
+        self.assertEqual(guard_db.get_answer_language(), "japanese")
+        # Invalid value falls back to the korean default.
+        self.assertEqual(guard_db.set_answer_language("gibberish"), "korean")
+        self.assertEqual(guard_db.get_answer_language(), "korean")
+
     def test_record_adjudication_inserts_row(self):
         guard_db.record_adjudication(123, "w1D:p1", "opencode", "APPROVE", "Approved. Safe.")
         conn = guard_db.get_db_connection()

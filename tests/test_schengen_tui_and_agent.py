@@ -153,6 +153,25 @@ Approved. All files verified safely."""
         self.assertIn("NO Autonomous Reject", prompt)
         self.assertIn("AGY Worker Context", prompt)
 
+    @patch("tools.schengen_agent_llm.get_current_active_escalation")
+    def test_build_system_prompt_language_directive(self, mock_get_active):
+        mock_get_active.return_value = {
+            "id": 123,
+            "pane_id": "w1D:p1",
+            "agent_kind": "agy",
+            "raw_command": "rm -rf /tmp/test_dir",
+            "safety_reason": "Destructive deletion",
+        }
+        en = build_system_prompt(language="english")
+        self.assertIn("concise professional English", en)
+        ko = build_system_prompt(language="korean")
+        self.assertIn("간결하고 건조한 한국어", ko)
+        ja = build_system_prompt(language="japanese")
+        self.assertIn("簡潔で淡々とした日本語", ja)
+        # herdr instruction (english_feedback) must remain English regardless of language.
+        self.assertIn("english_feedback", ko)
+        self.assertIn("professional English", ko)
+
     @patch("tools.schengen_agent_llm.get_pane_text")
     def test_investigate_pane_history_full_dump(self, mock_get_pane):
         from tools.schengen_agent_llm import execute_tool_call
@@ -501,6 +520,24 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(st.text_style.bold)
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_answer_language_radio_set(self):
+        from cmd.schengen_tui import SchengenTUIApp
+        from textual.widgets import RadioSet
+        from unittest.mock import patch
+        app = SchengenTUIApp()
+        with patch("cmd.schengen_tui.get_answer_language", return_value="korean"):
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                radio_set = app.query_one("#answer-language-set", RadioSet)
+                radios = list(radio_set.query("RadioButton"))
+                self.assertEqual([r.id for r in radios], ["lang-english", "lang-korean", "lang-japanese"])
+                # Default is korean.
+                self.assertTrue(app.query_one("#lang-korean").value)
+                self.assertFalse(app.query_one("#lang-english").value)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
 
 
 class TestTUIInterruptAndDoubleESC(unittest.IsolatedAsyncioTestCase):
