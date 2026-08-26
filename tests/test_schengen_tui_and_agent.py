@@ -546,6 +546,28 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
                 app.tui_lock_fd.close()
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_audit_table_selection_triggers_modal(self):
+        from schengen_tui import SchengenTUIApp, AuditDataTable, AuditFullscreenModal
+        app = SchengenTUIApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            app.update_radar_data(force=True)
+            await pilot.pause()
+            table = app.query_one("#audit-table", AuditDataTable)
+            
+            # RowSelected message test
+            if table.row_count > 0:
+                row_key = table.ordered_rows[0].key
+                table.post_message(AuditDataTable.RowSelected(table, cursor_row=0, row_key=row_key))
+                await pilot.pause()
+                self.assertGreater(len(app.screen_stack), 1)
+                self.assertIsInstance(app.screen, AuditFullscreenModal)
+                app.pop_screen()
+                await pilot.pause()
+                
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_fullscreen_modal_css_scroll_styling(self):
         from schengen_tui import AuditFullscreenModal
         css = AuditFullscreenModal.CSS
