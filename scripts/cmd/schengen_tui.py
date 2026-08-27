@@ -111,6 +111,17 @@ def format_resolution_badge(resolution: Optional[str], short: bool = False) -> s
     return "[dim]—[/]"
 
 
+def _update_static_if_changed(widget: Static, content: str) -> None:
+    """Update a Static only when its content changes, avoiding redundant re-render/layout.
+
+    `Static.update()` always refreshes with `layout=True`, so unconditional calls
+    (e.g. from a periodic timer) cause constant re-render + re-layout and visible
+    flickering. Guard with a content comparison.
+    """
+    if getattr(widget, "content", None) != content:
+        widget.update(content)
+
+
 # --- Mouse-event diagnostic logging (gated by SCHENGEN_MOUSE_DEBUG) ---------
 #
 # Permanent, opt-in instrumentation for debugging terminal mouse-coordinate /
@@ -1066,9 +1077,10 @@ class SchengenTUIApp(App):
             return
 
         if self.is_controller:
-            role_box.update(f"[bold green]👑 CONTROLLER MODE[/]  [dim]PID {os.getpid()}[/]\n[dim]Autonomous LLM & Key Injection active[/]")
+            role_text = f"[bold green]👑 CONTROLLER MODE[/]  [dim]PID {os.getpid()}[/]\n[dim]Autonomous LLM & Key Injection active[/]"
         else:
-            role_box.update(f"[bold yellow]👁 OBSERVER MODE[/]  [dim]Leader PID {self.leader_pid or 'active'}[/]\n[dim]Read-only monitoring (Actions disabled)[/]")
+            role_text = f"[bold yellow]👁 OBSERVER MODE[/]  [dim]Leader PID {self.leader_pid or 'active'}[/]\n[dim]Read-only monitoring (Actions disabled)[/]"
+        _update_static_if_changed(role_box, role_text)
 
         # 1. Update status header box (muted tones — accent only on state)
         locks = list_active_guard_locks()
@@ -1081,14 +1093,15 @@ class SchengenTUIApp(App):
         status_box = self.query_one("#status-box", Static)
         if locks:
             tgt, lpath, pid = locks[0]
-            status_box.update(f"[green]● ACTIVE[/]  [dim]PID {pid}[/]\n[dim]{tgt}[/]")
+            status_text = f"[green]● ACTIVE[/]  [dim]PID {pid}[/]\n[dim]{tgt}[/]"
         else:
-            status_box.update("[dim]○ Inactive[/]\n[dim]Toggle / Ctrl+T to start[/]")
+            status_text = "[dim]○ Inactive[/]\n[dim]Toggle / Ctrl+T to start[/]"
+        _update_static_if_changed(status_box, status_text)
 
         # 2. Update Token Meter (muted: data in white, labels in dim)
         stats = self.agent.get_token_usage_stats()
         meter_box = self.query_one("#token-meter-box", Static)
-        meter_box.update(
+        meter_text = (
             f"[dim]Calls[/]   [white]{stats['api_calls']:,}[/]\n"
             f"[dim]In[/]      [white]{stats['prompt_tokens']:,}[/] tk\n"
             f"[dim]Out[/]     [white]{stats['completion_tokens']:,}[/] tk\n"
@@ -1096,6 +1109,7 @@ class SchengenTUIApp(App):
             f"[dim]Inspector  In {stats['inspector_in']:,} / Out {stats['inspector_out']:,}[/]\n"
             f"[dim]Judge      In {stats['judge_in']:,} / Out {stats['judge_out']:,}[/]"
         )
+        _update_static_if_changed(meter_box, meter_text)
 
         # 3. Active Target Banner (left-accent line only; no solid fill)
         active_esc = get_current_active_escalation()
@@ -1111,12 +1125,13 @@ class SchengenTUIApp(App):
                 cmd_display = "\n".join(cmd_lines)
             
             reason_short = active_esc['safety_reason'][:72]
-            banner.update(
+            banner_text = (
                 f"[bold yellow]▶ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
                 f"[bold white]{rich_escape(cmd_display)}[/]\n"
                 f"[dim]⚠ {rich_escape(reason_short)}[/]\n"
                 f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
             )
+            _update_static_if_changed(banner, banner_text)
 
             # STRICT SEQUENTIAL FIFO: Only CONTROLLER awakens/delivers chat for active escalation
             if self.is_controller and active_id not in self._notified_escalation_ids and not self._processing_chat:
@@ -1146,10 +1161,11 @@ class SchengenTUIApp(App):
                 self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
 
         else:
-            banner.update(
+            _update_static_if_changed(
+                banner,
                 "\n[bold green]✔ No active escalations  —  Queue clear[/]\n"
                 "[dim]🛡️  Autonomous border control active across all Herdr workspaces[/]\n"
-                "[dim]   Listening for Gray-Zone mutations and critical AST denylists[/]"
+                "[dim]   Listening for Gray-Zone mutations and critical AST denylists[/]",
             )
             if self._last_active_id is not None:
                 self._write(f"\n[dim]{'─'*20} ✔ Escalation #{self._last_active_id} resolved {'─'*20}[/]\n")
