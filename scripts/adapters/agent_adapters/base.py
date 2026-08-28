@@ -31,6 +31,13 @@ class AgentAdapter:
         """Extract the command/action being requested, or None if none pending."""
         return None
 
+    def get_pending_request(self, pane_id: str, visible_text: str):
+        """Return the pending command/action for a pane, using any cleaner source
+        available (e.g. a structured plugin channel), falling back to pane-text
+        parsing. The default is the pane-text parser; adapters with a structured
+        source override this."""
+        return self.parse_permission_request(visible_text)
+
     def inject_approval(self, pane_id: str, req_cmd: str):
         """Inject the approval keystroke(s).
 
