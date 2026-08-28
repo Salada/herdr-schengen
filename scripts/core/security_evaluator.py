@@ -65,8 +65,12 @@ SENSITIVE_FILE_PATTERN = re.compile(
 HERMES_SANDBOX_PATTERN = re.compile(r"(\.hermes/sandboxes|hermes_sandbox)", re.IGNORECASE)
 
 # 2b. Sensitive directory pattern (for external-directory access screening)
+# NOTE: `.config/opencode` is deliberately NOT listed. It holds OpenCode's config,
+# plugins/, and skills/ (not secrets) — the agent legitimately writes its own
+# plugin folder there (issue #54). OpenCode's actual auth state lives elsewhere
+# (~/.local/share/opencode/auth.json), not under `.config/opencode`.
 SENSITIVE_DIRECTORY_PATTERN = re.compile(
-    r"(^|/)\.(ssh|aws|gnupg|kube|docker|hermes|config/gh|config/opencode)(/|\\|$)",
+    r"(^|/)\.(ssh|aws|gnupg|kube|docker|hermes|config/gh)(/|\\|$)",
     re.IGNORECASE,
 )
 
