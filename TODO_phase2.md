@@ -1,10 +1,13 @@
 Bug (HIGHEST PRIORITY — handoff 후 최우선):
-[ ] TUI가 terminal resize를 감지 못함: terminal 크기가 바뀌어도 작게 유지됨.
-  - 원인 추정: NoPixelMouseDriver(schengen_tui.py)가 pixel-mouse(1016)와 함께
-    _enable_in_band_window_resize(2048)를 no-op으로 비활성화 → in-band resize 감지 꺼짐.
-    SIGWINCH fallback이 Herdr 터미널에서 불안정/미전달일 가능성.
-  - 해결 방향: 1016(pixel mouse)만 끄고 2048(in-band resize)은 유지하도록 재구성,
-    또는 SIGWINCH resize 경로 복구. (mouse cell-mode fix의 regression일 가능성 높음)
+[x] TUI가 terminal resize를 감지 못함: terminal 크기가 바뀌어도 작게 유지됨. (PR #94)
+  - 실제 원인: NoPixelMouseDriver가 _enable_in_band_window_resize(2048h)만 no-op하고
+    _query_in_band_window_resize(2048$p)는 그대로 실행 → Herdr가 "2048 supported"로
+    응답 → LinuxDriver.process_message가 _in_band_window_resize=True로 플립 →
+    SIGWINCH 핸들러(`if not self._in_band_window_resize`)가 죽음.
+    즉, in-band resize는 실제로 켜지지 않았는데 SIGWINCH도 꺼져 resize 이벤트 전무.
+  - 해결: capability query(2048$p)도 no-op 처리 → 플래그가 False로 유지되어
+    SIGWINCH fallback이 정상 동작. 1016(pixel mouse)은 그대로 off로 mouse cell-mode 유지.
+  - 검증: live — pane 154→30cols 축소 시 narrow re-render, 30→180cols 확장 시 wide re-render 확인.
 
 Small task?
 [x] Full screen 에서 item클릭했을때 한 record만 focus해서 더 자세히 볼수있는 뷰
