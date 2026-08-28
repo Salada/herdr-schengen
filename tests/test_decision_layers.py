@@ -563,6 +563,20 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
             if os.path.exists(bad_path):
                 os.unlink(bad_path)
 
+    def test_find_git_repo_ssot_fallback_preserves_subdirectory(self):
+        """The SSOT fallback must reconstruct scripts/<subdir>/<name> for mirror modules (issue #98)."""
+        from cmd.schengen_watcher import find_git_repo_and_rel_path
+
+        ssot = Path.home() / "code" / "herdr-schengen"
+        if not (ssot / ".git").exists() or not (ssot / "scripts" / "core" / "security_evaluator.py").exists():
+            self.skipTest("SSOT repo not available")
+
+        # A module loaded from a non-git mirror, nested under scripts/core/.
+        mirror_path = Path("/tmp") / "fake-mirror" / "scripts" / "core" / "security_evaluator.py"
+        repo_dir, rel_path = find_git_repo_and_rel_path(mirror_path)
+        self.assertEqual(repo_dir, ssot)
+        self.assertEqual(rel_path, "scripts/core/security_evaluator.py")
+
     def test_new_file_creation_in_git_repo_fast_track(self):
         """Verify that creating a new file in a git repo via redirection (cat << 'EOF' > new_file) is classified as T2 Fast-Track."""
         repo_root = Path(__file__).resolve().parent.parent

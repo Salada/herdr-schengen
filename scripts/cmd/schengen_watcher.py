@@ -358,7 +358,15 @@ def find_git_repo_and_rel_path(mod_path: Path):
     # Fallback to SSOT repository at ~/code/herdr-schengen
     ssot_repo = Path.home() / "code" / "herdr-schengen"
     if (ssot_repo / ".git").exists():
+        # Reconstruct the module's path relative to its "scripts" root so
+        # subdirectory modules (core/, tools/, adapters/, cmd/) resolve to the
+        # correct SSOT path. The runtime mirror (~/.agents/skills/herdr-schengen)
+        # is not a git work tree, so a bare `scripts/{mod_path.name}` misses
+        # every module nested below scripts/ (issue #98).
+        parts = mod_path.parts
         rel_candidate = f"scripts/{mod_path.name}"
+        if "scripts" in parts:
+            rel_candidate = "/".join(parts[parts.index("scripts"):])
         try:
             rel_res = subprocess.run(
                 ["git", "-C", str(ssot_repo), "ls-files", "--error-unmatch", rel_candidate],
