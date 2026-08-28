@@ -1,3 +1,11 @@
+Bug (HIGHEST PRIORITY — handoff 후 최우선):
+[ ] TUI가 terminal resize를 감지 못함: terminal 크기가 바뀌어도 작게 유지됨.
+  - 원인 추정: NoPixelMouseDriver(schengen_tui.py)가 pixel-mouse(1016)와 함께
+    _enable_in_band_window_resize(2048)를 no-op으로 비활성화 → in-band resize 감지 꺼짐.
+    SIGWINCH fallback이 Herdr 터미널에서 불안정/미전달일 가능성.
+  - 해결 방향: 1016(pixel mouse)만 끄고 2048(in-band resize)은 유지하도록 재구성,
+    또는 SIGWINCH resize 경로 복구. (mouse cell-mode fix의 regression일 가능성 높음)
+
 Small task?
 [x] Full screen 에서 item클릭했을때 한 record만 focus해서 더 자세히 볼수있는 뷰
   - 과거에 추가의견에 대해서 보관한 table이 있을텐데 join해서 보여줄수있으면 더 좋음. (AuditDetailModal + get_audit_log_by_id/get_adjudications_for_audit join)
