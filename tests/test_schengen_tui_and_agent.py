@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -214,6 +215,29 @@ class TestSchengenTUIApp(unittest.TestCase):
         self.assertFalse(app._processing_chat)
         if app.tui_lock_fd:
             app.tui_lock_fd.close()
+
+    def test_chat_timestamp_date_only_on_day_change(self):
+        assert SchengenTUIApp is not None
+        app = SchengenTUIApp()
+        try:
+            with patch("cmd.schengen_tui.datetime") as mock_dt:
+                mock_dt.now.return_value = datetime(2026, 8, 29, 14, 5, 30)
+                ts1 = app._timestamp()
+                self.assertIn("2026-08-29", ts1)  # first message of a new day -> date + time
+                self.assertIn("14:05:30", ts1)
+
+                mock_dt.now.return_value = datetime(2026, 8, 29, 15, 10, 0)
+                ts2 = app._timestamp()
+                self.assertNotIn("2026-08-29", ts2)  # same day -> time only
+                self.assertIn("15:10:00", ts2)
+
+                mock_dt.now.return_value = datetime(2026, 8, 30, 9, 0, 0)
+                ts3 = app._timestamp()
+                self.assertIn("2026-08-30", ts3)  # new day -> date + time again
+                self.assertIn("09:00:00", ts3)
+        finally:
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
 
     def test_command_palette_fully_disabled(self):
         assert SchengenTUIApp is not None
