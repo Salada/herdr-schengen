@@ -245,7 +245,65 @@ class FocusableRichLog(RichLog):
             self.scroll_down()
 
 
-class AuditFullscreenModal(ModalScreen):
+# --- Modal close-button convention (shared by every audit modal) -----------
+#
+# Any modal that wants a mouse-only dismiss path composes a
+# Horizontal(id="modal-title-bar") as its first dialog child, containing the
+# title Label (left, 1fr) and a Button(id="modal-close", classes="modal-close")
+# at the far right, then inherits ModalCloseMixin. Same id/class/styling/
+# placement everywhere — this is the house convention, not a one-off.
+
+MODAL_CLOSE_CSS = """
+    #modal-title-bar {
+        height: auto;
+        layout: horizontal;
+    }
+    #modal-title-bar > Label {
+        width: 1fr;
+        height: 1;
+        content-align: left middle;
+    }
+    #modal-close {
+        width: 3;
+        height: 1;
+        min-width: 3;
+        max-width: 3;
+        margin: 0;
+        padding: 0;
+        border: none;
+        background: transparent;
+        color: $text-muted;
+        text-style: bold;
+        content-align: center middle;
+    }
+    #modal-close:hover {
+        background: $error-darken-1;
+        color: $text;
+    }
+    #modal-close:focus {
+        background: $error-darken-1;
+        color: $text;
+        border: solid $accent;
+    }
+"""
+
+
+class ModalCloseMixin:
+    """Shared modal-close convention: a top-right ✕ button pops the modal screen.
+
+    Compose a ``Button("✕", id="modal-close", classes="modal-close")`` as the
+    last child of a ``Horizontal(id="modal-title-bar")`` row and inherit this
+    mixin to get mouse dismissal. The existing keyboard bindings (escape/q)
+    remain untouched.
+    """
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if getattr(event.button, "id", None) == "modal-close":
+            event.stop()
+            self.app.pop_screen()
+
+
+class AuditFullscreenModal(ModalCloseMixin, ModalScreen):
     """Fullscreen expanded view for Recent Audit Ledger with full single-line command display."""
     CSS = """
     AuditFullscreenModal {
@@ -282,6 +340,7 @@ class AuditFullscreenModal(ModalScreen):
         text-align: center;
     }
     """
+    CSS += MODAL_CLOSE_CSS
 
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back (ESC)", show=True),
@@ -290,7 +349,9 @@ class AuditFullscreenModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="audit-modal-dialog"):
-            yield Label("[bold cyan]📜 Schengen Security Audit Ledger (Fullscreen Maximize)[/]")
+            with Horizontal(id="modal-title-bar"):
+                yield Label("[bold cyan]📜 Schengen Security Audit Ledger (Fullscreen Maximize)[/]")
+                yield Button("✕", id="modal-close", classes="modal-close")
             yield DataTable(id="audit-modal-table")
             yield Label("[dim]Press [bold yellow]ESC[/] to return · ↑/↓ navigate · [bold yellow]Enter[/] or [bold yellow]click[/] a row for detail[/]", id="audit-modal-help")
 
@@ -337,7 +398,7 @@ class AuditFullscreenModal(ModalScreen):
             self._open_detail(row)
 
 
-class AuditDetailModal(ModalScreen):
+class AuditDetailModal(ModalCloseMixin, ModalScreen):
     """Fullscreen detail view of a single audit record, joined with past adjudication opinions."""
 
     CSS = """
@@ -395,6 +456,7 @@ class AuditDetailModal(ModalScreen):
         margin-bottom: 0;
     }
     """
+    CSS += MODAL_CLOSE_CSS
 
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back (ESC)", show=True),
@@ -407,7 +469,9 @@ class AuditDetailModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="detail-dialog"):
-            yield Label("[bold cyan]📜 Audit Record Detail[/]", id="detail-title")
+            with Horizontal(id="modal-title-bar"):
+                yield Label("[bold cyan]📜 Audit Record Detail[/]", id="detail-title")
+                yield Button("✕", id="modal-close", classes="modal-close")
             with VerticalScroll(id="detail-scroll"):
                 yield Static(id="detail-fields")
                 yield Label("Full Command Line", classes="detail-section")
