@@ -702,6 +702,69 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
         self.assertIn("overflow-x: scroll;", css)
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_modal_close_button_shared_convention(self):
+        """Both audit modals share one top-right ✕ close-button convention.
+
+        The same MODAL_CLOSE_CSS block (single source of truth) must be embedded
+        in both modals, and each must compose a Horizontal(id="modal-title-bar")
+        title row plus a Button(id="modal-close", classes="modal-close").
+        """
+        from cmd.schengen_tui import (
+            AuditDetailModal,
+            AuditFullscreenModal,
+            MODAL_CLOSE_CSS,
+            ModalCloseMixin,
+        )
+
+        for modal in (AuditFullscreenModal, AuditDetailModal):
+            css = modal.CSS
+            self.assertIn(MODAL_CLOSE_CSS, css)
+            self.assertIn("#modal-title-bar", css)
+            self.assertIn("#modal-close", css)
+            # Both modals must share the exact same close-button styling source.
+            self.assertTrue(css.endswith(MODAL_CLOSE_CSS))
+            self.assertTrue(issubclass(modal, ModalCloseMixin))
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_modal_close_button_mouse_dismisses(self):
+        """Clicking the top-right ✕ pops both audit modals (mouse-only dismissal)."""
+        from cmd.schengen_tui import (
+            AuditDetailModal,
+            AuditFullscreenModal,
+            SchengenTUIApp,
+        )
+        from textual.widgets import Button
+
+        app = SchengenTUIApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+
+            # Fullscreen ledger modal: X must exist in the title row and dismiss on click.
+            app.push_screen(AuditFullscreenModal())
+            await pilot.pause()
+            close_btn = app.screen.query_one("#modal-close", Button)
+            self.assertIsNotNone(close_btn)
+            self.assertIn("modal-close", close_btn.classes)
+            title_bar = close_btn.parent
+            self.assertEqual(title_bar.id, "modal-title-bar")
+            await pilot.click(close_btn)
+            await pilot.pause()
+            self.assertEqual(len(app.screen_stack), 1)
+
+            # Detail modal: same convention, same dismissal behavior.
+            app.push_screen(AuditDetailModal(999999999))
+            await pilot.pause()
+            close_btn = app.screen.query_one("#modal-close", Button)
+            self.assertIsNotNone(close_btn)
+            self.assertEqual(close_btn.parent.id, "modal-title-bar")
+            await pilot.click(close_btn)
+            await pilot.pause()
+            self.assertEqual(len(app.screen_stack), 1)
+
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     def test_no_pixel_mouse_driver_wired_and_disables_pixel_resize(self):
         from cmd.schengen_tui import NoPixelMouseDriver, SchengenTUIApp
         from textual.drivers.linux_driver import LinuxDriver
