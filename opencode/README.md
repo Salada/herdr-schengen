@@ -61,6 +61,20 @@ panes. Other OpenCode sessions do nothing unless the user starts it there too
   daemon; on host close the daemon dies, and the user re-starts it in another
   session.
 
+## Permission allow rules
+
+The host plugin polls the pending-escalation queue via
+`schengen_history.py --pending --json`, which is read-only and must never
+trigger an interactive prompt. Add this allow rule to OpenCode's
+`permission.bash` config (`~/.config/opencode/opencode.jsonc`):
+
+```jsonc
+"python3 *schengen_history.py --pending*": "allow"
+```
+
+Rule ordering follows "broad first, narrow last": it sits after `"*": "ask"`
+and the `bw *` deny rules so it wins for this command.
+
 ## Note
 
 `--target auto` monitors all panes. To instead guard a *subset* while `auto`
