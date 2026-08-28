@@ -240,8 +240,30 @@ export default async ({ client }) => {
       proc.stdout.on("data", (chunk) => {
         out += chunk;
       });
-      proc.on("close", () => resolve(out));
-      proc.on("error", () => resolve(""));
+      proc.on("close", (code) => {
+        const trimmed = (out || "").trim();
+        if (trimmed) {
+          resolve(trimmed);
+          return;
+        }
+        // Empty output: the history CLI failed or produced no JSON. Return a
+        // valid empty list so the poller does not crash; log the exit code.
+        if (code !== 0) {
+          try {
+            fs.appendFileSync(
+              LOG_PATH,
+              `[schengen-host] history --pending --json exited ${code} with empty output\n`,
+            );
+          } catch {}
+        }
+        resolve("[]");
+      });
+      proc.on("error", (err) => {
+        try {
+          fs.appendFileSync(LOG_PATH, `[schengen-host] failed to spawn history CLI: ${err.message}\n`);
+        } catch {}
+        resolve("[]");
+      });
     });
   }
 
