@@ -371,6 +371,15 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.SECRET_GUARD)
 
+        # OpenCode config/plugin dir is NOT a secret store -> allowed (issue #54)
+        safe, reason, layer = audit_shell_command("access_directory ~/.config/opencode/plugins")
+        self.assertTrue(safe, f"Expected ~/.config/opencode/plugins allowed, got: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+        safe, reason, layer = audit_shell_command("access_directory ~/.config/opencode")
+        self.assertTrue(safe, f"Expected ~/.config/opencode allowed, got: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
         # Hermes sandbox -> SANDBOX_GUARD
         safe, reason, layer = audit_shell_command("access_directory ~/.hermes/sandboxes/default")
         self.assertFalse(safe)
