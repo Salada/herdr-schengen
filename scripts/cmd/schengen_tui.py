@@ -859,6 +859,15 @@ class SchengenTUIApp(App):
         self._processing_chat: bool = False
         self._last_guard_active: bool = False
         self._last_esc_time: float = 0.0
+        self._last_chat_date = None  # last chat-message date (for day-change timestamp)
+
+    def _timestamp(self) -> str:
+        """Return a dim chat timestamp: HH:MM:SS, prefixed with the date only on day change."""
+        now = datetime.now()
+        if self._last_chat_date != now.date():
+            self._last_chat_date = now.date()
+            return f"[dim]{now.strftime('%Y-%m-%d %H:%M:%S')}[/]"
+        return f"[dim]{now.strftime('%H:%M:%S')}[/]"
 
     def handle_esc_press(self) -> bool:
         """Handle ESC key press with double-press (<= 0.4s) abort for in-flight LLM call."""
@@ -1341,7 +1350,7 @@ class SchengenTUIApp(App):
         self._processing_chat = True
         try:
             safe_user_msg = rich_escape(user_msg)
-            self._write(f"\n[bold yellow]👤 You:[/] {safe_user_msg}")
+            self._write(f"\n{self._timestamp()} [bold yellow]👤 You:[/] {safe_user_msg}")
 
             if user_msg.strip() in ("/start", "/stop", "/toggle"):
                 msg = self.toggle_guard_daemon()
@@ -1354,7 +1363,7 @@ class SchengenTUIApp(App):
                 esc_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 reason = parts[2] if len(parts) > 2 else "Approved via TUI"
                 resp = await self.agent.send_message(f"Approve escalation #{esc_id} with English note: '{reason}'")
-                self._write("🤖 [bold cyan]Gatekeeper[/]:")
+                self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper[/]:")
                 self._write_markdown(resp)
                 self.update_radar_data(force=True)
                 return
@@ -1364,7 +1373,7 @@ class SchengenTUIApp(App):
                 esc_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 reason = parts[2] if len(parts) > 2 else "Rejected via TUI"
                 resp = await self.agent.send_message(f"Reject escalation #{esc_id} with English reason: '{reason}'")
-                self._write("🤖 [bold cyan]Gatekeeper[/]:")
+                self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper[/]:")
                 self._write_markdown(resp)
                 self.update_radar_data(force=True)
                 return
@@ -1373,7 +1382,7 @@ class SchengenTUIApp(App):
                 self._write_markdown(chunk)
 
             resp = await self.agent.send_message(user_msg, on_chunk=on_tool)
-            self._write("🤖 [bold cyan]Gatekeeper[/]:")
+            self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper[/]:")
             self._write_markdown(resp)
             self._write(f"[dim]{'─'*70}[/]")
             self.update_radar_data(force=True)
