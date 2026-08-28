@@ -6,6 +6,7 @@ import sys
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # Add scripts directory to path
 SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
@@ -413,13 +414,18 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
-        safe, reason, layer = audit_shell_command("unhandled_dialog Glob /tmp/**")
-        self.assertFalse(safe)
-        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+        # Mock the cloud judge so the unhandled-dialog path is deterministic:
+        # the real LLM judge may classify a read-only glob as safe (correct in
+        # isolation, but it makes this assertion flaky). A mocked "defer to
+        # human" verdict is what the test actually cares about.
+        with patch("core.security_evaluator.audit_with_cloud_judge", return_value=(False, "mocked: deferred to human")):
+            safe, reason, layer = audit_shell_command("unhandled_dialog Glob /tmp/**")
+            self.assertFalse(safe)
+            self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
-        safe, reason, layer = audit_shell_command("unhandled_dialog WebSearch foo")
-        self.assertFalse(safe)
-        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+            safe, reason, layer = audit_shell_command("unhandled_dialog WebSearch foo")
+            self.assertFalse(safe)
+            self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
     def test_managed_git_guard_layer(self):
         # 1. Forgejo GET is allowed, DELETE is blocked
