@@ -135,6 +135,25 @@ function channelFilePath(paneId) {
   return path.join(CHANNEL_DIR, `${safe}.json`);
 }
 
+// Decision channel (issue #57 full closure): the watcher daemon writes an
+// approve/reject decision (permission_id + response) to a per-pane JSON file;
+// this plugin polls it and programmatically replies via client.permission.
+const DECISION_DIR = path.join(
+  os.homedir(),
+  ".local",
+  "state",
+  "herdr-schengen",
+  "opencode_decisions",
+);
+
+function decisionFilePath(paneId) {
+  const safe = String(paneId || "unknown").replace(/[^A-Za-z0-9._-]/g, "_");
+  return path.join(DECISION_DIR, `${safe}.json`);
+}
+
+// permission_ids this session has asked and is awaiting a guard decision for.
+const pendingPermissions = new Set();
+
 function emitPermissionAsked(event) {
   // Only emit for guarded panes: an OpenCode session running inside a Herdr pane.
   if (!inRuntime()) return;
@@ -152,6 +171,7 @@ function emitPermissionAsked(event) {
     };
     // Single-writer per pane, so overwrite (not append) bounds file growth.
     fs.writeFileSync(channelFilePath(process.env.HERDR_PANE_ID), JSON.stringify(record) + "\n");
+    if (p.id) pendingPermissions.add(p.id);
   } catch (err) {
     try {
       fs.appendFileSync(LOG_PATH, `[schengen-host] emit permission failed: ${err}\n`);
@@ -230,6 +250,8 @@ export default async ({ client }) => {
   let sessionID = null;
   const surfacedEscalationIds = new Set();
   let escPollTimer = null;
+  let decisionTimer = null;
+  const DECISION_POLL_MS = parseInt(process.env.SCHENGEN_DECISION_POLL_MS || "1000", 10);
 
   function runHistoryPending() {
     return new Promise((resolve) => {
@@ -302,8 +324,42 @@ export default async ({ client }) => {
     }
   }
 
+  async function pollDecisions() {
+    // Programmatic approve/reject (issue #57 full closure): the watcher daemon
+    // writes a decision (permission_id + response) to this pane's decision file;
+    // reply via client.permission so approval is bound to the exact
+    // permission_id — no bare enter on the live dialog.
+    if (!inRuntime()) return;
+    if (!sessionID) return;
+    let decision;
+    try {
+      decision = JSON.parse(fs.readFileSync(decisionFilePath(process.env.HERDR_PANE_ID), "utf8"));
+    } catch {
+      return; // no decision yet
+    }
+    if (!decision || !decision.permission_id) return;
+    if (!pendingPermissions.has(decision.permission_id)) return;
+    const response = decision.response === "reject" ? "reject" : "once";
+    try {
+      await client.permission.postSessionIdPermissionsPermissionId({
+        path: { id: sessionID, permissionID: decision.permission_id },
+        body: { response },
+      });
+      pendingPermissions.delete(decision.permission_id);
+      try {
+        fs.unlinkSync(decisionFilePath(process.env.HERDR_PANE_ID));
+      } catch {}
+    } catch (err) {
+      try {
+        fs.appendFileSync(LOG_PATH, `[schengen-host] permission reply failed: ${err}\n`);
+      } catch {}
+    }
+  }
+
   // Server plugin body runs on load; start the escalation surfacing poller now.
   escPollTimer = setInterval(surfaceEscalations, ESC_POLL_MS);
+  decisionTimer = setInterval(pollDecisions, DECISION_POLL_MS);
+  if (typeof decisionTimer.unref === "function") decisionTimer.unref();
 
   return {
     tool: {
@@ -349,7 +405,9 @@ export default async ({ client }) => {
     dispose: async () => {
       stop();
       if (escPollTimer) clearInterval(escPollTimer);
+      if (decisionTimer) clearInterval(decisionTimer);
       escPollTimer = null;
+      decisionTimer = null;
     },
   };
 };

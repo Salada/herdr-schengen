@@ -508,5 +508,51 @@ class TestStructuredPermissionChannel(unittest.TestCase):
             self.assertIsNone(self.adapter.get_pending_request("w1D:p1", "random terminal output"))
 
 
+class TestChannelApproval(unittest.TestCase):
+    """Test channel-based approval (issue #57 full closure)."""
+
+    def setUp(self):
+        self.adapter = get_adapter("opencode")
+
+    def test_channel_approve_writes_decision(self):
+        ev = {"permission_id": "per_123", "permission": "bash", "patterns": ["echo ok"], "metadata": {"command": "echo ok"}}
+        with patch("adapters.agent_adapters.opencode.read_channel_event", return_value=ev), \
+             patch("adapters.agent_adapters.opencode.write_decision") as wd:
+            approved, reason = self.adapter.channel_approve("w1D:p1", "echo ok")
+            self.assertTrue(approved)
+            self.assertIn("permission.reply", reason)
+            wd.assert_called_once_with("w1D:p1", "per_123", "once")
+
+    def test_channel_approve_skips_when_command_changed(self):
+        ev = {"permission_id": "per_123", "permission": "bash", "patterns": ["rm -rf /"], "metadata": {"command": "rm -rf /"}}
+        with patch("adapters.agent_adapters.opencode.read_channel_event", return_value=ev):
+            approved, reason = self.adapter.channel_approve("w1D:p1", "echo ok")
+            self.assertFalse(approved)
+            self.assertEqual(reason, INJECT_SKIP_CHANGED)
+
+    def test_channel_approve_falls_back_without_channel(self):
+        with patch("adapters.agent_adapters.opencode.read_channel_event", return_value=None):
+            approved, reason = self.adapter.channel_approve("w1D:p1", "echo ok")
+            self.assertFalse(approved)
+            self.assertEqual(reason, "no channel permission")
+
+    def test_base_channel_approve_not_supported(self):
+        from adapters.agent_adapters.base import AgentAdapter
+        approved, reason = AgentAdapter().channel_approve("w1D:p1", "echo ok")
+        self.assertFalse(approved)
+        self.assertEqual(reason, "not supported")
+
+    def test_write_decision_writes_file(self):
+        import tempfile
+        from adapters.agent_adapters.opencode import _decision_file, write_decision
+        with tempfile.TemporaryDirectory() as td:
+            with patch("adapters.agent_adapters.opencode.DECISION_DIR", Path(td)):
+                write_decision("w1D:p1", "per_456", "once")
+                content = json.loads(_decision_file("w1D:p1").read_text())
+                self.assertEqual(content["permission_id"], "per_456")
+                self.assertEqual(content["response"], "once")
+                self.assertEqual(content["pane_id"], "w1D:p1")
+
+
 if __name__ == "__main__":
     unittest.main()

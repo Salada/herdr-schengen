@@ -946,6 +946,31 @@ def main():
                 # 3. Action
                 if is_safe:
                     if not args.dry_run:
+                        # Channel-based approve (opencode): approval bound to an exact
+                        # permission_id; the host plugin replies via client.permission.
+                        ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
+                        if ch_approved:
+                            print(
+                                f"🚀 Auto-approving {agent_kind} via permission.reply for {pane_id}...",
+                                flush=True,
+                            )
+                            last_processed_prompt[pane_id] = {
+                                "cmd": req_cmd,
+                                "seq": state_seq,
+                                "status": agent_status,
+                                "is_safe": True,
+                                "last_alert_time": now,
+                            }
+                            resolve_escalation(pane_id=pane_id)
+                            continue
+                        if ch_reason == INJECT_SKIP_CHANGED:
+                            print(
+                                f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.",
+                                flush=True,
+                            )
+                            continue
+
+                        # Fallback: keystroke injection (agy, or no channel event).
                         # P0 TOCTOU Guard: Re-read pane immediately before sending enter to ensure prompt has not changed
                         current_text = get_pane_text(pane_id, lines=80)
                         current_req = adapter.get_pending_request(pane_id, current_text)

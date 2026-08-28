@@ -225,6 +225,33 @@ def channel_event_to_req_cmd(event):
     return None
 
 
+# Decision channel (issue #57 full closure): the watcher writes an approve/reject
+# decision (permission_id + response) to a per-pane JSON file; the opencode host
+# plugin polls it and replies programmatically via client.permission — approval
+# is bound to the exact permission_id (no bare `send-keys enter` on the dialog).
+DECISION_DIR = Path.home() / ".local" / "state" / "herdr-schengen" / "opencode_decisions"
+
+
+def _decision_file(pane_id: str) -> Path:
+    return DECISION_DIR / f"{_sanitize_pane_id(pane_id)}.json"
+
+
+def write_decision(pane_id: str, permission_id: str, response: str = "once") -> None:
+    """Write an approve/reject decision for a permission_id to the pane's decision file."""
+    try:
+        DECISION_DIR.mkdir(parents=True, exist_ok=True)
+        _decision_file(pane_id).write_text(
+            json.dumps({
+                "pane_id": pane_id,
+                "permission_id": permission_id,
+                "response": response,
+                "ts": time.time(),
+            })
+        )
+    except OSError:
+        pass
+
+
 @register
 class OpenCodeAdapter(AgentAdapter):
     kind = "opencode"
@@ -380,6 +407,19 @@ class OpenCodeAdapter(AgentAdapter):
                 if cmd:
                     return cmd
         return self.parse_permission_request(visible_text)
+
+    def channel_approve(self, pane_id, req_cmd):
+        """Channel-based approve (issue #57 full closure): write a decision bound
+        to the exact permission_id; the host plugin replies via client.permission.
+        No bare `send-keys enter` on the live dialog.
+        """
+        event = read_channel_event(pane_id)
+        if not event or not event.get("permission_id"):
+            return False, "no channel permission"
+        if channel_event_to_req_cmd(event) != req_cmd:
+            return False, INJECT_SKIP_CHANGED
+        write_decision(pane_id, event["permission_id"], "once")
+        return True, "permission.reply decision written (permission_id bound)"
 
     def inject_approval(self, pane_id, req_cmd):
         """Inject 'enter' via the Q3 fail-safe ladder with bounded re-poll and retry.

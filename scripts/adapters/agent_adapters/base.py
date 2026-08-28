@@ -38,6 +38,16 @@ class AgentAdapter:
         source override this."""
         return self.parse_permission_request(visible_text)
 
+    def channel_approve(self, pane_id: str, req_cmd: str):
+        """Try a structured-channel approval bound to an exact permission_id.
+
+        Returns (approved: bool, reason: str). Adapters without a structured
+        channel return (False, ...) so the caller falls back to keystroke
+        injection. A reason of INJECT_SKIP_CHANGED means the channel request
+        changed mid-evaluation and the caller must skip (defer to the next poll).
+        """
+        return False, "not supported"
+
     def inject_approval(self, pane_id: str, req_cmd: str):
         """Inject the approval keystroke(s).
 
