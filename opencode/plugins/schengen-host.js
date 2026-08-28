@@ -117,6 +117,48 @@ function inRuntime() {
   return process.env.HERDR_ENV === "1" && process.env.OPENCODE === "1";
 }
 
+// Structured permission channel (issue #57, extraction-reliability improvement).
+// Each guarded OpenCode pane's plugin observes `permission.asked` events on the
+// internal bus and overwrites a per-pane JSON file with the CLEAN request — no
+// terminal-text scraping. The watcher daemon reads this file as the primary
+// command source (pane-text scraping remains the fallback).
+const CHANNEL_DIR = path.join(
+  os.homedir(),
+  ".local",
+  "state",
+  "herdr-schengen",
+  "opencode_permissions",
+);
+
+function channelFilePath(paneId) {
+  const safe = String(paneId || "unknown").replace(/[^A-Za-z0-9._-]/g, "_");
+  return path.join(CHANNEL_DIR, `${safe}.json`);
+}
+
+function emitPermissionAsked(event) {
+  // Only emit for guarded panes: an OpenCode session running inside a Herdr pane.
+  if (!inRuntime()) return;
+  try {
+    const p = (event && event.properties) || event || {};
+    if (!p || !p.permission) return;
+    fs.mkdirSync(CHANNEL_DIR, { recursive: true });
+    const record = {
+      pane_id: process.env.HERDR_PANE_ID || null,
+      permission_id: p.id || null,
+      permission: p.permission,
+      patterns: Array.isArray(p.patterns) ? p.patterns : [],
+      metadata: p.metadata || {},
+      ts: Date.now() / 1000,
+    };
+    // Single-writer per pane, so overwrite (not append) bounds file growth.
+    fs.writeFileSync(channelFilePath(process.env.HERDR_PANE_ID), JSON.stringify(record) + "\n");
+  } catch (err) {
+    try {
+      fs.appendFileSync(LOG_PATH, `[schengen-host] emit permission failed: ${err}\n`);
+    } catch {}
+  }
+}
+
 function start() {
   if (!inRuntime()) {
     return "refusing to start: not running inside Herdr + OpenCode";
@@ -273,6 +315,11 @@ export default async ({ client }) => {
           return (await runHistoryPending()) || "[]";
         },
       },
+    },
+    event: ({ event }) => {
+      if (event && event.type === "permission.asked") {
+        emitPermissionAsked(event);
+      }
     },
     "chat.message": (input) => {
       sessionID = input.sessionID;

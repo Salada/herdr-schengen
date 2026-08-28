@@ -7,9 +7,11 @@ alternate-screen Bubble Tea TUI, with 'once' pre-selected on fresh mount
 selects 'once'; arrows/numbers are NOT supported and MUST NOT be sent.
 """
 
+import json
 import os
 import re
 import time
+from pathlib import Path
 
 from adapters.herdr_client import get_pane_text, run_cmd
 
@@ -129,6 +131,98 @@ def resolve_opencode_injection(stages):
     if len(stages) >= 2 and stages[-1] == "unknown" and stages[-2] == "unknown":
         return "success", "once approved (dialog cleared for 2 consecutive polls, no always/reject confirm)"
     return "not_registered", "post-inject: dialog not confirmed cleared after bounded re-poll; enter not registered"
+
+
+# ---- Structured permission channel (issue #57, extraction-reliability) ----
+# Each guarded OpenCode pane's plugin (schengen-host.js) observes opencode's
+# `permission.asked` event and writes the CLEAN request (no terminal-text leak)
+# to a per-pane JSON file. This adapter reads that file as the primary command
+# source, falling back to pane-text scraping when no fresh event exists (fail
+# closed — never silently trust a missing/garbled channel).
+
+CHANNEL_DIR = Path.home() / ".local" / "state" / "herdr-schengen" / "opencode_permissions"
+CHANNEL_TTL_SECONDS = float(os.environ.get("SCHENGEN_OPENCODE_CHANNEL_TTL", "30"))
+
+
+def _sanitize_pane_id(pane_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", pane_id or "unknown")
+
+
+def _channel_file(pane_id: str) -> Path:
+    return CHANNEL_DIR / f"{_sanitize_pane_id(pane_id)}.json"
+
+
+def read_channel_event(pane_id: str):
+    """Return the latest `permission.asked` event for a pane, or None if missing/stale.
+
+    The plugin overwrites the file on each ask, so the file holds the single
+    latest event. A parse error (mid-write) or a stale timestamp yields None so
+    the caller falls back to pane-text scraping.
+    """
+    try:
+        data = json.loads(_channel_file(pane_id).read_text())
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not data.get("permission"):
+        return None
+    if time.time() - float(data.get("ts", 0)) > CHANNEL_TTL_SECONDS:
+        return None
+    return data
+
+
+def channel_event_to_req_cmd(event):
+    """Map a structured `permission.asked` event to the adapter's req_cmd format.
+
+    Field mapping is source-verified against opencode (packages/opencode/src/tool/):
+    - bash: the FULL command string is `metadata.command` (patterns are per-AST-node
+      substrings and can split `a && b` into separate entries).
+    - external_directory: the path is `metadata.filepath`/`parentDir` (patterns is a
+      `dir/*` glob, not the path).
+    - edit/read/webfetch: path/url in `patterns[0]` (edit full path in metadata.filepath).
+    """
+    permission = event.get("permission", "")
+    metadata = event.get("metadata") or {}
+    patterns = event.get("patterns") or []
+    if not isinstance(patterns, list):
+        patterns = []
+
+    if permission == "bash":
+        cmd = metadata.get("command") or " ".join(str(p) for p in patterns).strip()
+        return cmd or None
+
+    if permission == "external_directory":
+        dirs = metadata.get("directories") or []
+        path = (
+            metadata.get("filepath")
+            or metadata.get("parentDir")
+            or (dirs[0] if dirs else None)
+            or (patterns[0] if patterns else None)
+        )
+        if path:
+            return f"access_directory {path}"
+        return None
+
+    if permission in ("edit", "write"):
+        path = metadata.get("filepath") or (patterns[0] if patterns else None)
+        if path:
+            return f"edit_file {path}"
+        return None
+
+    if permission == "read":
+        path = patterns[0] if patterns else None
+        if path:
+            return f"read_file {path}"
+        return None
+
+    if permission == "webfetch":
+        url = patterns[0] if patterns else None
+        if url:
+            return f"webfetch {url}"
+        return None
+
+    if permission:
+        return f"unhandled_dialog {permission}"
+    return None
 
 
 @register
@@ -270,6 +364,23 @@ class OpenCodeAdapter(AgentAdapter):
             return None
         return f"unhandled_dialog {title}"
 
+    def get_pending_request(self, pane_id, visible_text):
+        """Return the pending command/action using the structured channel when a
+        live permission dialog is up, falling back to pane-text parsing.
+
+        The channel is gated on the dialog STAGE (classify_dialog_stage ==
+        "permission") so a resolved/cleared dialog (stage != permission) never
+        re-uses a stale channel event — it falls through to the pane-text parser
+        (which returns None when the dialog is gone).
+        """
+        if self.classify_dialog_stage(visible_text) == "permission":
+            event = read_channel_event(pane_id)
+            if event:
+                cmd = channel_event_to_req_cmd(event)
+                if cmd:
+                    return cmd
+        return self.parse_permission_request(visible_text)
+
     def inject_approval(self, pane_id, req_cmd):
         """Inject 'enter' via the Q3 fail-safe ladder with bounded re-poll and retry.
 
@@ -306,7 +417,7 @@ class OpenCodeAdapter(AgentAdapter):
                     print(f"🚀 Auto-approving opencode 'once' for {pane_id}...", flush=True)
                     return True, "once approved (dialog cleared)"
                 return False, f"post-inject: dialog moved to '{live_stage}' before inject; aborted"
-            if self.parse_permission_request(visible) != req_cmd:
+            if self.get_pending_request(pane_id, visible) != req_cmd:
                 # The dialog trampolined to a DIFFERENT permission request while we
                 # were evaluating (e.g. "Access external directory" -> "Shell command").
                 # The stale req_cmd is gone; skip so the next poll re-parses the new

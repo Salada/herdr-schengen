@@ -845,7 +845,7 @@ def main():
                 agent_status = pane_info.get("agent_status", "")
 
                 visible_text = get_pane_text(pane_id, lines=80)
-                req_cmd = adapter.parse_permission_request(visible_text)
+                req_cmd = adapter.get_pending_request(pane_id, visible_text)
 
                 if not req_cmd:
                     # Prompt is no longer active; reset last_processed_prompt for this pane
@@ -940,7 +940,7 @@ def main():
                     if not args.dry_run:
                         # P0 TOCTOU Guard: Re-read pane immediately before sending enter to ensure prompt has not changed
                         current_text = get_pane_text(pane_id, lines=80)
-                        current_req = adapter.parse_permission_request(current_text)
+                        current_req = adapter.get_pending_request(pane_id, current_text)
                         if current_req != req_cmd:
                             print(
                                 f"⚠️  [TOCTOU_ABORT] Pane {pane_id} prompt modified during safety evaluation. Aborting key injection.",

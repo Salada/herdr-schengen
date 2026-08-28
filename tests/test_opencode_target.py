@@ -1,6 +1,8 @@
 """Unit tests for multi-agent target support (agy + opencode)."""
 
+import json
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -9,7 +11,15 @@ SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
-from adapters.agent_adapters.opencode import decide_opencode_injection, resolve_opencode_injection, strip_ansi, strip_leaked_text, strip_tui
+from adapters.agent_adapters.opencode import (
+    channel_event_to_req_cmd,
+    decide_opencode_injection,
+    read_channel_event,
+    resolve_opencode_injection,
+    strip_ansi,
+    strip_leaked_text,
+    strip_tui,
+)
 from cmd.schengen_watcher import agent_matches
 
 
@@ -399,6 +409,103 @@ class TestOpenCodeInjectSkip(unittest.TestCase):
             approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory /tmp")
         self.assertTrue(approved)
         self.assertIn("dialog cleared", reason)
+
+
+class TestStructuredPermissionChannel(unittest.TestCase):
+    """Test the structured permission channel (issue #57) mapping + gating."""
+
+    def setUp(self):
+        self.adapter = get_adapter("opencode")
+
+    # --- channel_event_to_req_cmd ---
+
+    def test_channel_bash_uses_metadata_command(self):
+        ev = {"permission": "bash", "patterns": ["git push", "rm x"], "metadata": {"command": "git push && rm x"}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "git push && rm x")
+
+    def test_channel_bash_falls_back_to_joined_patterns(self):
+        ev = {"permission": "bash", "patterns": ["git status"], "metadata": {}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "git status")
+
+    def test_channel_external_directory_prefers_filepath(self):
+        ev = {"permission": "external_directory", "patterns": ["/tmp/*"], "metadata": {"filepath": "/tmp", "parentDir": "/"}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "access_directory /tmp")
+
+    def test_channel_external_directory_uses_parentdir(self):
+        ev = {"permission": "external_directory", "patterns": ["/tmp/*"], "metadata": {"parentDir": "/tmp"}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "access_directory /tmp")
+
+    def test_channel_external_directory_shell_directories(self):
+        ev = {"permission": "external_directory", "patterns": ["/tmp/*"], "metadata": {"command": "mkdir -p /tmp/x", "directories": ["/tmp/outside"]}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "access_directory /tmp/outside")
+
+    def test_channel_edit_prefers_filepath(self):
+        ev = {"permission": "edit", "patterns": ["rel/path.py"], "metadata": {"filepath": "/abs/path.py"}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "edit_file /abs/path.py")
+
+    def test_channel_read_uses_patterns(self):
+        ev = {"permission": "read", "patterns": ["/etc/passwd"], "metadata": {}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "read_file /etc/passwd")
+
+    def test_channel_webfetch(self):
+        ev = {"permission": "webfetch", "patterns": ["https://example.com"], "metadata": {}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "webfetch https://example.com")
+
+    def test_channel_unhandled_permission(self):
+        ev = {"permission": "mcp:foo", "patterns": ["mcp:foo:bar"], "metadata": {}}
+        self.assertEqual(channel_event_to_req_cmd(ev), "unhandled_dialog mcp:foo")
+
+    def test_channel_empty_permission_returns_none(self):
+        self.assertIsNone(channel_event_to_req_cmd({"permission": "", "metadata": {}, "patterns": []}))
+
+    # --- read_channel_event ---
+
+    def test_read_channel_event_missing_file_returns_none(self):
+        with patch("adapters.agent_adapters.opencode._channel_file") as cf:
+            cf.return_value = Path("/nonexistent/schengen_chan_missing.json")
+            self.assertIsNone(read_channel_event("w1D:p1"))
+
+    def test_read_channel_event_stale_returns_none(self):
+        tmp = Path("/tmp/schengen_chan_test_stale.json")
+        tmp.write_text(json.dumps({"permission": "bash", "ts": 0}))
+        with patch("adapters.agent_adapters.opencode._channel_file", return_value=tmp):
+            self.assertIsNone(read_channel_event("w1D:p1"))
+        tmp.unlink(missing_ok=True)
+
+    def test_read_channel_event_fresh_returns_event(self):
+        tmp = Path("/tmp/schengen_chan_test_fresh.json")
+        tmp.write_text(json.dumps({"permission": "bash", "metadata": {"command": "ls"}, "ts": time.time()}))
+        with patch("adapters.agent_adapters.opencode._channel_file", return_value=tmp):
+            ev = read_channel_event("w1D:p1")
+            self.assertIsNotNone(ev)
+            self.assertEqual(ev["permission"], "bash")
+        tmp.unlink(missing_ok=True)
+
+    def test_read_channel_event_parse_error_returns_none(self):
+        tmp = Path("/tmp/schengen_chan_test_bad.json")
+        tmp.write_text("{not valid json")
+        with patch("adapters.agent_adapters.opencode._channel_file", return_value=tmp):
+            self.assertIsNone(read_channel_event("w1D:p1"))
+        tmp.unlink(missing_ok=True)
+
+    # --- get_pending_request ---
+
+    def test_get_pending_request_uses_channel_when_permission_stage(self):
+        ev = {"permission": "bash", "patterns": ["echo clean"], "metadata": {"command": "echo clean"}}
+        with patch("adapters.agent_adapters.opencode.read_channel_event", return_value=ev):
+            text = "Permission required\n$ echo clean\nAllow once  Allow always  Reject"
+            self.assertEqual(self.adapter.get_pending_request("w1D:p1", text), "echo clean")
+
+    def test_get_pending_request_falls_back_when_no_channel_event(self):
+        with patch("adapters.agent_adapters.opencode.read_channel_event", return_value=None):
+            text = "Permission required\n$ git status --porcelain\nAllow once  Allow always  Reject"
+            self.assertEqual(self.adapter.get_pending_request("w1D:p1", text), "git status --porcelain")
+
+    def test_get_pending_request_ignores_channel_without_live_dialog(self):
+        ev = {"permission": "bash", "patterns": ["stale cmd"], "metadata": {"command": "stale cmd"}}
+        with patch("adapters.agent_adapters.opencode.read_channel_event", return_value=ev):
+            # No "Permission required" marker -> stage unknown -> channel ignored -> fallback None
+            self.assertIsNone(self.adapter.get_pending_request("w1D:p1", "random terminal output"))
 
 
 if __name__ == "__main__":
