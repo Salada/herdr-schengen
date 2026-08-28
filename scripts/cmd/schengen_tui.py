@@ -628,14 +628,23 @@ class NoPixelMouseDriver(LinuxDriver):
     """LinuxDriver that never enables SGR pixel mouse (1016) or in-band resize (2048).
 
     The Herdr terminal emulator reports in-band window resize (2048) as supported
-    but does NOT implement SGR pixel mouse (1016). Textual responds by sending
-    2048h + 1016h; the terminal then sends a resize report with pixel dimensions,
-    which makes Textual's parser set mouse_pixels=True and divide the (cell)
-    SGR coordinates as pixels — collapsing every click to the top-left. Disabling
-    both requests keeps the parser in cell mode.
+    but does NOT implement SGR pixel mouse (1016). If Textual enables 2048, the
+    terminal sends a resize report with pixel dimensions; Textual's parser then
+    sets mouse_pixels=True and divides the (cell) SGR coordinates as pixels —
+    collapsing every click to the top-left.
+
+    So we disable the whole 2048 handshake — the capability query (2048$p), the
+    enable request (2048h), and pixel-mouse (1016) — and rely on Textual's
+    SIGWINCH fallback for resize events instead. Querying alone is not enough:
+    the terminal's "supported" reply flips the driver's internal
+    ``_in_band_window_resize`` flag to True, which then silences the SIGWINCH
+    resize handler and leaves the app stuck at its original size.
     """
 
     def _enable_mouse_pixels(self) -> None:
+        pass
+
+    def _query_in_band_window_resize(self) -> None:
         pass
 
     def _enable_in_band_window_resize(self) -> None:

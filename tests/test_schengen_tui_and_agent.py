@@ -690,6 +690,7 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
         d._mouse_pixels = False
         d._in_band_window_resize = False
         d._enable_mouse_pixels()
+        d._query_in_band_window_resize()
         d._enable_in_band_window_resize()
         self.assertFalse(getattr(d, "_mouse_pixels", True))
         self.assertFalse(getattr(d, "_in_band_window_resize", True))
