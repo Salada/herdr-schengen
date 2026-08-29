@@ -19,6 +19,7 @@ import ast
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -910,6 +911,12 @@ def main():
                 active_adapter = get_adapter(active_info.get("agent", "")) if active_info else None
                 active_live = active_adapter.get_pending_request(active_pane, get_pane_text(active_pane, lines=80)) if active_adapter else None
                 if active_live != active_cmd:
+                    resolve_escalation(
+                        pane_id=active_pane,
+                        command_hash=hashlib.sha256(active_cmd.encode("utf-8")).hexdigest()[:16],
+                        resolution_status="CANCELLED",
+                        approver="other",
+                    )
                     inspector.release(active_pane)
                     inspector.active_human = None
             kept = deque()
