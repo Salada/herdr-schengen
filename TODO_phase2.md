@@ -14,6 +14,13 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
 [x] #57 full closure (PR #105): `client.permission.reply(permission_id)` 승인 바인딩 + 결정 채널 + plugin decision poller.
     pane-text를 opencode 승인 임계경로에서 제거 (bare enter fail-open 해소). AGY pane-text는 별도.
 [x] escalation poller JSON parse error (PR #100): `runHistoryPending()`이 빈 출력/실패 시 `[]` 반환 + 실패 원인 로깅.
+[] Codex `edit_file` 실제 승인(Pane 직접 입력 'y' 또는 TUI /approve) 완료 후에도 Pending에 잔류하는 현상 수정:
+  - 현상 및 원인:
+    • Codex 모달에서 `Would you like to make the following edits?` 파싱 후 승인(`y` 전송 또는 TUI 승인)이 실행되어 파일 편집이 완료되었음에도, 터미널 뷰포트/스크롤백에 과거 프롬프트 문구가 잔류하거나 다이얼로그 종료 상태가 감지되지 않아 `pending_escalations` 큐에서 RESOLVED로 처리되지 않고 잔류.
+  - 해결 방향:
+    • `codex_adapter`의 프롬프트 활성 상태 검사 강화: "Would you like..." 문구뿐 아니라 실제 하단 활성 선택지(`› 1. Yes, proceed` 또는 `Confirm: y/n`) 존재 여부를 앵커링하여 이미 완료된 과거 스크롤백 텍스트 오인식 방지.
+    • TUI `/approve` 및 pane 직접 `y` 키 입력 후 다이얼로그 해제 감지 시 `resolve_escalation(pane_id, approver=...)` 호출 즉시 보장.
+
 
 Small task?
 [x] Full screen 에서 item클릭했을때 한 record만 focus해서 더 자세히 볼수있는 뷰
