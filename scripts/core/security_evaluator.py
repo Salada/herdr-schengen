@@ -1116,9 +1116,10 @@ def classify_package_command(cmd_str: str) -> Optional[tuple[str, str, list[str]
     """
     # Metacharacter / redirection / command-substitution guard: any command
     # containing these MUST NOT auto-approve via the READ_ONLY path (e.g.
-    # `brew list | bash`, `npm view react > /tmp/out`, `pip list >> ~/.zshrc`).
+    # `brew list | bash`, `npm view react > /tmp/out`, `pip list >> ~/.zshrc`,
+    # `brew list\nbash -c id` — newline/carriage-return are shell separators too).
     # Returning None falls through to the fail-closed default for BOTH paths.
-    if re.search(r"[|&;<>]|\$\(|`", cmd_str):
+    if re.search(r"[|&;<>\n\r]|\$\(|`", cmd_str):
         return None  # metacharacter / redirection / substitution -> fail-closed default
     tokens = cmd_str.split()
     if not tokens or tokens[0] not in PACKAGE_MANAGERS:

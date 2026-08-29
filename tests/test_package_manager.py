@@ -107,6 +107,19 @@ class TestPackageManagerClassifier(unittest.TestCase):
             self.assertFalse(safe, f"Expected '{cmd}' to escalate, got safe=True: {reason}")
             self.assertNotEqual(layer, DecisionLayer.PACKAGE_GUARD)
 
+    def test_readonly_newline_compound_escalates(self):
+        # Reviewer finding (round 2): newline/carriage-return is a shell command
+        # separator — a compound command runs arbitrary trailing code behind a
+        # read-only head and must NOT auto-approve via the READ_ONLY fast-track.
+        for cmd in (
+            "brew list\nbash -c id",
+            "brew list\nsh -c id",
+            "pip show requests\nenv",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd!r}' to escalate, got safe=True: {reason}")
+            self.assertNotEqual(layer, DecisionLayer.PACKAGE_GUARD)
+
     def test_taxonomy_mechanism(self):
         from core.security_evaluator import Consequence, audit_shell_command_with_taxonomy
 
