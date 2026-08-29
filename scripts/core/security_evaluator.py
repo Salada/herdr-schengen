@@ -936,6 +936,73 @@ class DecisionLayer(str, Enum):
     )
     GRAY_ZONE_MATRIX = "GRAY_ZONE_MATRIX"  # Layer 7: Non-VCS Irreversible Mutation Matrix (ADR-004 / SOP-12)
     FAST_TRACK_AST = "FAST_TRACK_AST"  # Layer 8: Fast-track static safe development operations
+    NOT_ALLOWLISTED = "NOT_ALLOWLISTED"  # Fail-closed default: not in fast-track allowlist, requires human review
+
+
+# INV-6: shell metacharacters disqualify a command from fast-track auto-approve
+_SHELL_METACHAR_RE = re.compile(r"[|&;<>]|\$\(|`")
+
+# INV-6: forensic / network primitives must NEVER fast-track (binary inspection / egress)
+_FORENSIC_NETWORK_BIN_RE = re.compile(
+    r"\b(strings|xxd|hexdump|od|base64|objdump|otool|curl|wget|ssh|scp|sftp|rsync|nc|ncat|socat|npx)\b",
+    re.IGNORECASE,
+)
+
+# INV-5: explicit closed enumeration of provably-benign read-only commands
+FAST_TRACK_SAFE_COMMANDS = {
+    "pwd", "echo", "date", "uname", "whoami", "id", "env", "printenv",
+    "which", "type", "true", "false", "hostname", "uptime",
+    "ls", "tree", "du", "df", "stat", "file", "readlink", "realpath",
+    "dirname", "basename", "wc", "sort", "uniq",
+    "cat", "head", "tail", "less", "more", "grep", "rg", "find",
+}
+
+# INV-5: safe (read-only) git subcommands, matched as anchored patterns
+FAST_TRACK_SAFE_GIT_PATTERNS = (
+    r"^git\s+status(?:\s|$)",
+    r"^git\s+log(?:\s|$)",
+    r"^git\s+diff(?:\s|$)",
+    r"^git\s+show(?:\s|$)",
+    r"^git\s+rev-parse(?:\s|$)",
+    r"^git\s+rev-list(?:\s|$)",
+    r"^git\s+describe(?:\s|$)",
+    r"^git\s+ls-files(?:\s|$)",
+    r"^git\s+blame(?:\s|$)",
+    r"^git\s+shortlog(?:\s|$)",
+    r"^git\s+grep(?:\s|$)",
+    r"^git\s+remote(?:\s+(-v|--verbose))?(?:\s|$)",
+    r"^git\s+stash\s+list(?:\s|$)",
+    r"^git\s+branch(?:\s+(-a|-r|--all|--remote|--list|-l))?(?:\s|$)",
+    r"^git\s+tag(?:\s+(-l|--list))?(?:\s|$)",
+    r"^git\s+config\s+(--get|--list|--get-regexp)(?:\s|$)",
+)
+
+
+def _is_fast_track_allowlisted(cmd_str: str) -> bool:
+    """INV-5/6: True only if cmd_str is provably-benign per the closed allowlist.
+
+    Rejects any command with shell metacharacters (pipe/redirect/background/
+    command-substitution) or forensic/network binaries, then matches the command
+    name (or a read-only git subcommand) against the explicit allowlist.
+    """
+    if _SHELL_METACHAR_RE.search(cmd_str):
+        return False
+    if _FORENSIC_NETWORK_BIN_RE.search(cmd_str):
+        return False
+    for pat in FAST_TRACK_SAFE_GIT_PATTERNS:
+        m = re.match(pat, cmd_str)
+        if not m:
+            continue
+        # Fail-closed guard: `re.match` is prefix-anchored, so a destructive flag
+        # AFTER the matched prefix (e.g. `git branch -d foo`, `git branch -D x`,
+        # `git branch -m x`) must disqualify the command even though the pattern's
+        # optional flag group did not consume it (INV-5 closed enumeration).
+        rest = cmd_str[m.end():]
+        if re.search(r"(^|\s)-[dDfFmM]{1,2}(\s|$)|--(delete|force|set|add|unset|move|copy|tag)\b", rest):
+            return False
+        return True
+    tokens = cmd_str.split()
+    return tokens[0] in FAST_TRACK_SAFE_COMMANDS if tokens else False
 
 
 def _audit_static_shell_command(
@@ -1157,10 +1224,18 @@ def _audit_static_shell_command(
     is_degraded = (isinstance(sc_details, dict) and sc_details.get("degraded")) or (
         isinstance(sem_details, dict) and sem_details.get("degraded")
     )
-    if is_degraded:
-        return True, "Safe [DEGRADED_UNAVAILABLE: SAST tools absent]", DecisionLayer.FAST_TRACK_AST
 
-    return True, "Safe", DecisionLayer.FAST_TRACK_AST
+    # INV-5/6: fast-track auto-approve is now an explicit closed allowlist of
+    # provably-benign commands (no metacharacters, no forensic/network binaries).
+    if _is_fast_track_allowlisted(cmd_str):
+        return True, f"Fast-track verified safe: '{cmd_str}'", DecisionLayer.FAST_TRACK_AST
+
+    # INV-2: degraded SAST can no longer auto-approve — fail-closed.
+    if is_degraded:
+        return False, "SAST tools unavailable; requires human review (fail-closed)", DecisionLayer.NOT_ALLOWLISTED
+
+    # INV-1: the fail-open catch-all is REMOVED. Default is escalate (fail-closed).
+    return False, "Not in fast-track allowlist; requires human review (fail-closed)", DecisionLayer.NOT_ALLOWLISTED
 
 
 def audit_shell_command(
@@ -1348,6 +1423,9 @@ def derive_taxonomy(
         else:
             consequence = Consequence.DESTRUCTION
             mechanism = "rm-rf"
+    elif layer == DecisionLayer.NOT_ALLOWLISTED:
+        consequence = Consequence.NONE
+        mechanism = "fail-closed-not-allowlisted"
     elif layer == DecisionLayer.CLOUD_JUDGE:
         consequence = Consequence.DESTRUCTION
         mechanism = "cloud-judge-defer"

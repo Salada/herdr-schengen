@@ -65,13 +65,16 @@ class TestSemgrepSASTAndHardening(unittest.TestCase):
         self.assertEqual(tax_stat["gate_state"], GateState.ENFORCE.value)
         self.assertEqual(tax_stat["mechanism"], "fast-track-verified")
 
-        # 2. Script command requiring SAST tool reports DEGRADED when binary is absent
+        # 2. Script command requiring SAST tool when binary is absent: INV-2 —
+        #    degraded SAST can no longer auto-approve. Fails closed to
+        #    NOT_ALLOWLISTED (python3 not on the closed allowlist) instead of
+        #    the old "Safe [DEGRADED_UNAVAILABLE]" auto-approve.
         safe_script, reason_script, layer_script, tax_script = audit_shell_command_with_taxonomy(
             "python3 -c \"print('test')\""
         )
-        self.assertTrue(safe_script)
-        self.assertEqual(tax_script["gate_state"], GateState.DEGRADED.value)
-        self.assertEqual(tax_script["mechanism"], "sast-degraded")
+        self.assertFalse(safe_script)
+        self.assertEqual(layer_script, DecisionLayer.NOT_ALLOWLISTED)
+        self.assertEqual(tax_script["mechanism"], "fail-closed-not-allowlisted")
 
     def test_all_9_decision_layers_present(self):
         """All 9 decision layers are defined and distinct in the DecisionLayer enum."""

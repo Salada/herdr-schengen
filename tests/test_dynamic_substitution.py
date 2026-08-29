@@ -67,15 +67,19 @@ class TestDynamicSubstitution(unittest.TestCase):
             self.assertTrue(safe, f"Expected safe $(cat ...) resolution, got: {reason}")
             self.assertEqual(layer, "FAST_TRACK_AST")
 
-            # Test $(< ...)
-            safe, reason, layer = audit_shell_command(f"cat $(< {manifest_path})")
-            self.assertTrue(safe, f"Expected safe $(< ...) resolution, got: {reason}")
-            self.assertEqual(layer, "FAST_TRACK_AST")
-
             # Test `cat ...`
             safe, reason, layer = audit_shell_command(f"cat `cat {manifest_path}`")
             self.assertTrue(safe, f"Expected safe `cat ...` resolution, got: {reason}")
             self.assertEqual(layer, "FAST_TRACK_AST")
+
+            # Test $(< ...): the `<` form never routes into the deterministic
+            # resolver (DYNAMIC_SUBSTITUTION_PATTERN's `\b` after `<` does not
+            # match `< ` — pre-existing gap), so it remains an unresolved
+            # command-substitution metachar command and escalates fail-closed
+            # (INV-6) instead of being auto-approved via the removed catch-all.
+            safe, reason, layer = audit_shell_command(f"cat $(< {manifest_path})")
+            self.assertFalse(safe, f"Expected $(< ...) to escalate (fail-closed), got safe=True: {reason}")
+            self.assertEqual(layer, "NOT_ALLOWLISTED")
         finally:
             if os.path.exists(target_path):
                 os.unlink(target_path)
