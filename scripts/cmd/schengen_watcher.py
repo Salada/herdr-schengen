@@ -946,48 +946,49 @@ def main():
                 # 3. Action
                 if is_safe:
                     if not args.dry_run:
-                        # Channel-based approve (opencode): approval bound to an exact
-                        # permission_id; the host plugin replies via client.permission.
-                        ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
-                        if ch_approved:
-                            # Verify the host plugin actually replied (dialog cleared).
-                            # If the plugin is stale (not restarted) or the reply fails,
-                            # the decision is never acted on — fall back to keystroke
-                            # injection instead of leaving the dialog stuck forever.
-                            cleared = False
-                            deadline = time.monotonic() + 2.5
-                            while time.monotonic() < deadline:
-                                time.sleep(0.5)
-                                if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
-                                    cleared = True
-                                    break
-                            if cleared:
+                        # Channel-based approve (opencode): OPT-IN via
+                        # SCHENGEN_CHANNEL_APPROVE=1. It requires the opencode host
+                        # plugin to be restarted with the decision poller (PR #105)
+                        # loaded — until then keystroke injection is the primary path.
+                        if os.environ.get("SCHENGEN_CHANNEL_APPROVE") == "1":
+                            ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
+                            if ch_approved:
+                                # Verify the host plugin actually replied (dialog cleared).
+                                cleared = False
+                                deadline = time.monotonic() + 2.5
+                                while time.monotonic() < deadline:
+                                    time.sleep(0.5)
+                                    if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                                        cleared = True
+                                        break
+                                if cleared:
+                                    print(
+                                        f"🚀 Auto-approving {agent_kind} via permission.reply for {pane_id}...",
+                                        flush=True,
+                                    )
+                                    last_processed_prompt[pane_id] = {
+                                        "cmd": req_cmd,
+                                        "seq": state_seq,
+                                        "status": agent_status,
+                                        "is_safe": True,
+                                        "last_alert_time": now,
+                                    }
+                                    resolve_escalation(pane_id=pane_id)
+                                    continue
                                 print(
-                                    f"🚀 Auto-approving {agent_kind} via permission.reply for {pane_id}...",
+                                    f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
                                     flush=True,
                                 )
-                                last_processed_prompt[pane_id] = {
-                                    "cmd": req_cmd,
-                                    "seq": state_seq,
-                                    "status": agent_status,
-                                    "is_safe": True,
-                                    "last_alert_time": now,
-                                }
-                                resolve_escalation(pane_id=pane_id)
+                                # fall through to the send-keys fallback below
+                            if ch_reason == INJECT_SKIP_CHANGED:
+                                print(
+                                    f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.",
+                                    flush=True,
+                                )
                                 continue
-                            print(
-                                f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
-                                flush=True,
-                            )
-                            # fall through to the send-keys fallback below
-                        if ch_reason == INJECT_SKIP_CHANGED:
-                            print(
-                                f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.",
-                                flush=True,
-                            )
-                            continue
 
-                        # Fallback: keystroke injection (agy, or no channel event).
+                        # Keystroke injection (primary path: agy, and opencode until
+                        # the channel approve is opted in).
                         # P0 TOCTOU Guard: Re-read pane immediately before sending enter to ensure prompt has not changed
                         current_text = get_pane_text(pane_id, lines=80)
                         current_req = adapter.get_pending_request(pane_id, current_text)
