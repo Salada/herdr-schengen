@@ -109,10 +109,18 @@ class CodexAdapter(AgentAdapter):
         # its path-based secret, sandbox, and gray-zone checks.  Deletions,
         # multiple files, and pathless dialogs deliberately remain fail-closed.
         if "Would you like to make the following edits?" in visible_text:
+            # Legacy Codex patch header: `*** Add/Update/Delete File: <path>`
             edits = re.findall(r"^\*\*\* (Add|Update|Delete) File: (.+)$", visible_text, re.MULTILINE)
-            if len(edits) == 1 and edits[0][0] in ("Add", "Update"):
-                return f"edit_file {edits[0][1].strip()}"
-            return "edit_file"
+            if edits:
+                if len(edits) == 1 and edits[0][0] in ("Add", "Update"):
+                    return f"edit_file {edits[0][1].strip()}"
+                return "edit_file"  # delete or multi-file -> fail-closed
+
+            # Current Codex CLI format: `Destination: <path>` / `File: <path>`
+            dests = re.findall(r"^(?:Destination|File):\s*(.+?)\s*$", visible_text, re.MULTILINE)
+            if len(dests) == 1:
+                return f"edit_file {dests[0].strip()}"
+            return "edit_file"  # multi-file or pathless -> fail-closed
 
         # Permissions: Would you like to grant these permissions?
         if "Would you like to grant these permissions?" in visible_text:
