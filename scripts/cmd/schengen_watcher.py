@@ -24,6 +24,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -80,6 +81,12 @@ WATCHER_LIMITS = {"max_workers": (1, 10), "interval_seconds": (1, 3600), "auto_e
 
 # Global reload trigger flag
 _RELOAD_REQUESTED = False
+
+# Host binary dirs that may be missing from the daemon's inherited PATH (e.g.
+# launched from a bare shell) but are required for SAST tools (shellcheck /
+# semgrep) to be discoverable. Issue #45: without them shutil.which() returns
+# None -> SAST degraded -> fail-closed escalates every non-allowlist command.
+_RUNTIME_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"))
 
 
 def load_watcher_config(path=WATCHER_CONFIG_PATH):
@@ -589,6 +596,19 @@ def execute_graceful_reload():
         return False
 
 
+def _inject_runtime_path() -> None:
+    """Prepend common host binary dirs to PATH so shellcheck/semgrep are discoverable.
+
+    Idempotent: only prepends a dir that EXISTS on disk and is not already in PATH.
+    """
+    path = os.environ.get("PATH", "")
+    parts = [p for p in path.split(os.pathsep) if p]
+    for d in _RUNTIME_BIN_DIRS:
+        if os.path.isdir(d) and d not in parts:
+            parts.insert(0, d)
+    os.environ["PATH"] = os.pathsep.join(parts)
+
+
 def verify_host_runtime_environment():
     """Ensure the watcher runs within a supported agent runtime (Antigravity or OpenCode) under Herdr.
 
@@ -596,6 +616,18 @@ def verify_host_runtime_environment():
     an alternative host. The watcher must never run detached/orphaned, and must
     run under the Herdr multiplexer (HERDR_ENV=1) — it is meaningless without it.
     """
+    # Issue #45: make SAST tools (shellcheck/semgrep) discoverable before the
+    # evaluator probes them, so the daemon does not run SAST-degraded merely
+    # because /opt/homebrew/bin etc. are absent from the inherited PATH.
+    _inject_runtime_path()
+
+    # SAST availability telemetry — surfaced at daemon startup for visibility.
+    _missing = [b for b in ("shellcheck", "semgrep") if shutil.which(b) is None]
+    if _missing:
+        print(f"⚠️  [SAST] DEGRADED — missing binaries: {', '.join(_missing)}", flush=True)
+    else:
+        print("✅ [SAST] READY (shellcheck + semgrep)", flush=True)
+
     is_host = (
         os.environ.get("ANTIGRAVITY_AGENT") == "1"
         or os.environ.get("AI_AGENT") == "antigravity"
