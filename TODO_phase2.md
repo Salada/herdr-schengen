@@ -128,6 +128,19 @@ Idea / Research:
         - INV-PL-2 (Revocation Immediacy): REVOKED 처리된 룰은 모든 캐시/메모리에서 즉시 무효화되어 fallback fail-closed 경로로 진입.
         - INV-PL-3 (Audit Trail): 모든 CUD 변경 이력은 `audit_log` 및 `adjudication_log`에 영구 기록.
 
+[] [Idea/Audit] System Auto-Approval의 스코프 맥락(Session-Specific vs Global/Stateless) 감사 메타데이터 명시화
+   - Context & Objective:
+     - 시스템에 의해 자동 승인(`AUTO_APPROVED`)될 때, 해당 승인이 '세션 한정 일시적 기억/이력(Session-Specific / TTL Memory)'에 의한 것인지, '전역 불변 룰(Global Invariant / Fast-Track AST / User Allowlist)'에 의한 것인지 구분하기 어려워 사후 감사(Audit) 시 판단 근거 추적이 모호함.
+   - Design & Scope Taxonomy:
+     1. `scope_context` (또는 `approval_scope`) 메타데이터 분류:
+        - `GLOBAL_RULE` (또는 `global`): 세션과 무관하게 언제나 안전한 AST Fast-Track 닫힌 집합(ls, pwd, git status 등) 또는 영속 user_allowlist에 의한 승인.
+        - `SESSION_TRANSIENT` (또는 `session`): 해당 세션/Pane에서 인간의 선행 승인 이력, 세션 메모리 캐시(1h TTL), 또는 작업 스코프 내 학습된 안전 패턴에 의한 승인.
+        - `REPO_LOCAL` (또는 `repo`): 특정 워크스페이스/저장소 내부로 스코프가 제한된 로컬 정책 기반 승인.
+     2. DB Schema & TUI Audit Ledger 반영:
+        - `audit_logs` 테이블에 `scope_context` 컬럼 추가 (또는 `mechanism` 컬럼 값 표준화: `fast-track:global`, `session-memory:pane_id`, `allowlist:repo`).
+        - TUI Audit Table 및 Detail Modal에 스코프 태그/배지 노출 (예: `[🤖 AUTO: Session]` vs `[🤖 AUTO: Global]`).
+
+
 [x] [Task/Feature] 에스컬레이션 로그(#1800~) 기반 Fast-Track 후보군 발굴 (PR #129: sub-task 1·2 완료 — 읽기전용 파이프라인 fast-track + 민감 Denylist)
    - 잔여: sub-task 3 (TUI Slash Command / Tool Call: /allow, /allow-last, /revoke) → Persistent Allowlist CUD(#91)와 통합 추진
    - Context:
