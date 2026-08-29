@@ -55,6 +55,15 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
     • 경로가 누락된 bare `edit_file`로 축소되어 `security_evaluator.py`에서 Pathless 파일 편집으로 판정, 정상 파일 수정이 모두 fail-closed로 거부/에스컬레이션됨.
   - 해결 방안:
     • `codex_adapter`에 `Destination:\s*(\S+)`, `File:\s*(\S+)`, `*** (Add|Update|Delete) File:` 다중 템플릿 정규식 지원 및 대상 파일 경로 추출 안정화.
+[] [Prerequisite/Host] 호스트 머신 semgrep 바이너리 미설치로 인한 SAST DEGRADED 해소 (중요):
+  - 현상: #45 PATH 주입 수정 후에도 호스트 자체에 `semgrep` 바이너리가 미설치되어 SAST가 `DEGRADED (missing semgrep)`로 유지됨.
+  - 조치: 호스트 환경에 semgrep 설치 (`brew install semgrep` 또는 venv 내 `pip install semgrep`) 및 `docs/setup.md` 요구사항 반영.
+[] [Refactor/SAST] `_inject_runtime_path()` 및 Host Runtime Gate 안정화 4종 (#45 피어리뷰 후속):
+  1) `_inject_runtime_path()` 선행순서 버그 수정: `parts.insert(0, d)` 반복으로 `~/.local/bin`이 최우선순위가 되어 Homebrew 바이너리를 섀도잉(shadow)할 위험 해소 (reverse iteration 또는 시스템/Homebrew 우선순위 보존).
+  2) 빈 PATH 항목(`.`) 처리: `os.environ["PATH"].split(":")` 필터 시 빈 항목 drop 동작 정리 및 명시적 문서화.
+  3) 플랫폼 가드: `_RUNTIME_BIN_DIRS`에 macOS 전용(`/opt/homebrew`, `/usr/local`) 외 `sys.platform` 분기 및 Linux 경로 지원.
+  4) 실행 순서 최적화: `SAST telemetry print`가 host-runtime gate 검증 완료 후 출력되도록 순서 조정.
+
 
 
 
