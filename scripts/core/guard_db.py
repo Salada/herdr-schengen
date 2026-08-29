@@ -11,6 +11,7 @@ Database location: ~/.local/state/herdr-schengen/schengen_history.db (XDG compli
 import os
 import re
 import sqlite3
+import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -348,12 +349,18 @@ def purge_expired_cache_entries() -> int:
         return 0
 
 
+# INV-7: fold version specifiers to a canonical <VER> token (npm/cargo/gem `@ver`, pip `==ver`)
+_VERSION_AT_RE = re.compile(r"@(?:[0-9][0-9A-Za-z.+-]*|latest|next|beta|alpha|rc[0-9]*|canary|dev|stable)\b")
+_VERSION_EQ_RE = re.compile(r"(==|>=|<=|~=|!=)\s*[0-9][0-9A-Za-z.+-]*")
+
+
 def normalize_command(cmd_str: str) -> str:
     """Normalize specific arguments (hashes, commit msgs, file names) into reusable patterns.
 
     Example:
     'git commit -m "feat: add doc"' -> 'git commit -m <STRING>'
     '/Users/kyjbusan/foo/bar.py'    -> '<PATH>'
+    'pkg@2.45.0' / 'pkg==2.45.0'    -> 'pkg@<VER>' / 'pkg==<VER>' (INV-7)
     """
     norm = cmd_str.strip()
     # Normalize quoted strings
@@ -362,6 +369,12 @@ def normalize_command(cmd_str: str) -> str:
     norm = re.sub(r"/(Users|home)/[a-zA-Z0-9_-]+(/[a-zA-Z0-9_.-]+)+", "<PATH>", norm)
     # Normalize hex hashes
     norm = re.sub(r"\b[0-9a-f]{7,40}\b", "<HASH>", norm)
+    # INV-7: fold version specifiers to a canonical <VER> token (npm/cargo/gem `@ver`,
+    # pip `==ver`). Bare `@main` (git branch) is NOT folded: not in the tag list and
+    # does not start with a digit. Applied BEFORE the final whitespace collapse so
+    # `pkg== 2.31.0` and `pkg==2.31.1` both become `pkg==<VER>`.
+    norm = _VERSION_AT_RE.sub("@<VER>", norm)
+    norm = _VERSION_EQ_RE.sub(r"\1<VER>", norm)
     # Collapse multiple whitespaces
     norm = re.sub(r"\s+", " ", norm)
     return norm
@@ -574,6 +587,60 @@ def get_escalation_approver(pane_id: str, raw_command: str) -> Optional[str]:
     return row["approver"] if row else None
 
 
+def record_human_approval_pattern(canonical_pattern: str, scope: str = "default", cwd: str = "") -> None:
+    """Record a canonical command pattern that a HUMAN explicitly approved (INV-3).
+
+    Stores a row in `evaluation_cache` keyed by `human_approved:{scope}:{cwd_hash}:{pattern}`
+    with a TTL (default 3600s). INV-4 is satisfied by construction: the `human_approved:`
+    prefix has no legacy rows, so the learned-safe set starts EMPTY.
+    """
+    import hashlib
+
+    init_db()
+    norm_scope = str(scope).strip() or "default"
+    cwd_hash = hashlib.sha256(str(cwd or "").encode("utf-8")).hexdigest()[:12]
+    cache_key = f"human_approved:{norm_scope}:{cwd_hash}:{canonical_pattern}"
+    ttl = 3600
+    now = time.time()
+    expires_at = int(now + ttl)
+
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO evaluation_cache (
+                cache_key, raw_command, is_safe, safety_reason, decision_layer,
+                taxonomy_json, cwd, scope, agent_id, origin, ruleset_version,
+                created_at, expires_at
+            ) VALUES (?, ?, 1, 'human-approved-pattern', 'HUMAN_APPROVED', '{}', ?, ?, 'default', 'H', 'novelty-gate', datetime('now'), datetime(?, 'unixepoch'))
+            ON CONFLICT(cache_key) DO UPDATE SET
+                is_safe=1,
+                expires_at=excluded.expires_at
+            """,
+            (cache_key, canonical_pattern, cwd, norm_scope, expires_at),
+        )
+        conn.commit()
+
+
+def has_human_approval_pattern(canonical_pattern: str, scope: str = "default", cwd: str = "") -> bool:
+    """Return True if the canonical pattern has a valid (unexpired) human approval in scope."""
+    import hashlib
+
+    init_db()
+    norm_scope = str(scope).strip() or "default"
+    cwd_hash = hashlib.sha256(str(cwd or "").encode("utf-8")).hexdigest()[:12]
+    cache_key = f"human_approved:{norm_scope}:{cwd_hash}:{canonical_pattern}"
+    now = time.time()
+
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT strftime('%s', expires_at) AS exp FROM evaluation_cache WHERE cache_key = ? AND is_safe = 1",
+            (cache_key,),
+        ).fetchone()
+    if row is None or row["exp"] is None:
+        return False
+    return int(row["exp"]) > now
+
+
 def get_adjudications_for_audit(
     pane_id: str,
     raw_command: str,
@@ -747,10 +814,17 @@ def record_adjudication(
     action: str,
     feedback: str,
 ) -> None:
-    """Persist an approve/deny adjudication and its instruction for auditability."""
+    """Persist an approve/deny adjudication and its instruction for auditability.
+
+    A human APPROVE also seeds the novelty gate (INV-3): the escalation's canonical
+    pattern is recorded with a TTL so subsequent identical commands (same pane scope)
+    auto-approve via the HUMAN_APPROVED fast path instead of re-escalating.
+    REJECT never seeds the gate.
+    """
     init_db()
     now_iso = datetime.now(timezone.utc).isoformat()
     resolution = "APPROVED" if action == "APPROVE" else "REJECTED"
+    raw_command = None
     with get_db_connection() as conn:
         conn.execute(
             """
@@ -764,7 +838,14 @@ def record_adjudication(
                 "UPDATE pending_escalations SET resolution = ?, approver = 'human-tui' WHERE id = ?",
                 (resolution, escalation_id),
             )
+            row = conn.execute(
+                "SELECT raw_command FROM pending_escalations WHERE id = ?", (escalation_id,)
+            ).fetchone()
+            raw_command = row["raw_command"] if row else None
         conn.commit()
+
+    if action == "APPROVE" and raw_command:
+        record_human_approval_pattern(normalize_command(raw_command), scope=pane_id, cwd="")
 
 
 def enqueue_pending_escalation(
