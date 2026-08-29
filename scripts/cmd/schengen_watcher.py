@@ -144,6 +144,23 @@ class InspectorCoordinator:
         if owned and (request is None or owned[0] == request):
             self.owned.pop(pane_id, None)
 
+    def evict_stale_human_requests(self, is_live):
+        """Drop stale active/queued requests and return the cancelled active slot."""
+        cancelled = None
+        if self.active_human and not is_live(*self.active_human):
+            cancelled = self.active_human
+            self.release(cancelled[0])
+            self.active_human = None
+        kept = deque()
+        while self.human_queue:
+            queued = self.human_queue.popleft()
+            if is_live(queued[0], queued[2]):
+                kept.append(queued)
+            else:
+                self.release(queued[0])
+        self.human_queue = kept
+        return cancelled
+
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
 
@@ -946,32 +963,15 @@ def main():
 
             # INV-CONC-3: publish exactly one unsafe result at a time. The rest
             # remain silent in memory until its dialog clears.
-            if inspector.active_human:
-                active_pane, active_cmd = inspector.active_human
-                active_info = get_pane_info(active_pane)
-                active_adapter = get_adapter(active_info.get("agent", "")) if active_info else None
-                active_live = active_adapter.get_pending_request(active_pane, get_pane_text(active_pane, lines=80)) if active_adapter else None
-                if active_live != active_cmd:
-                    resolve_escalation(
-                        pane_id=active_pane,
-                        command_hash=hashlib.sha256(active_cmd.encode("utf-8")).hexdigest()[:16],
-                        resolution_status="CANCELLED",
-                        approver="other",
-                    )
-                    inspector.release(active_pane)
-                    inspector.active_human = None
-            kept = deque()
-            while inspector.human_queue:
-                queued = inspector.human_queue.popleft()
-                q_pane, _, q_cmd = queued[:3]
-                q_info = get_pane_info(q_pane)
-                q_adapter = get_adapter(q_info.get("agent", "")) if q_info else None
-                q_live = q_adapter.get_pending_request(q_pane, get_pane_text(q_pane, lines=80)) if q_adapter else None
-                if q_live == q_cmd:
-                    kept.append(queued)
-                else:
-                    inspector.release(q_pane)
-            inspector.human_queue = kept
+            def human_request_is_live(pane_id, command):
+                info = get_pane_info(pane_id)
+                adapter = get_adapter(info.get("agent", "")) if info else None
+                return bool(adapter and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == command)
+
+            cancelled = inspector.evict_stale_human_requests(human_request_is_live)
+            if cancelled:
+                active_pane, active_cmd = cancelled
+                resolve_escalation(pane_id=active_pane, command_hash=hashlib.sha256(active_cmd.encode("utf-8")).hexdigest()[:16], resolution_status="CANCELLED", approver="other")
             if inspector.active_human is None and inspector.human_queue:
                 queued = inspector.human_queue.popleft()
                 pane_id, pane_info, req_cmd, reason, layer, visible_text, state_seq, agent_status = queued

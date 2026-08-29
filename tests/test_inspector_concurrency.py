@@ -49,7 +49,7 @@ class TestInspectorConcurrency(unittest.TestCase):
         finally:
             coordinator.close()
 
-    def test_fifo_single_slot_and_stale_queue_eviction_model(self):
+    def test_fifo_single_slot_and_stale_queue_eviction(self):
         coordinator = InspectorCoordinator()
         try:
             coordinator.owned["pane-a"] = (("a",), "active")
@@ -58,14 +58,9 @@ class TestInspectorConcurrency(unittest.TestCase):
             first = coordinator.human_queue.popleft()
             coordinator.active_human = first[:3:2]
             self.assertEqual(coordinator.active_human, ("pane-a", "a"))
-            # The watcher retains only live requests before dispatching the next slot.
             live = {("pane-b", "b")}
-            stale_active = (coordinator.active_human[0], coordinator.active_human[1]) not in live
-            if stale_active:
-                coordinator.release(coordinator.active_human[0])
-                coordinator.active_human = None
-            coordinator.human_queue = type(coordinator.human_queue)(q for q in coordinator.human_queue if (q[0], q[2]) in live)
-            self.assertTrue(stale_active)
+            cancelled = coordinator.evict_stale_human_requests(lambda pane, command: (pane, command) in live)
+            self.assertEqual(cancelled, ("pane-a", "a"))
             self.assertNotIn("pane-a", coordinator.owned)
             self.assertEqual(coordinator.human_queue[0][0], "pane-b")
         finally:
