@@ -105,8 +105,13 @@ class CodexAdapter(AgentAdapter):
         if m:
             return f"stdin_terminal {m.group(1)}"
 
-        # File edit: Would you like to make the following edits?
+        # File edit: preserve a single patch target so the evaluator can apply
+        # its path-based secret, sandbox, and gray-zone checks.  Deletions,
+        # multiple files, and pathless dialogs deliberately remain fail-closed.
         if "Would you like to make the following edits?" in visible_text:
+            edits = re.findall(r"^\*\*\* (Add|Update|Delete) File: (.+)$", visible_text, re.MULTILINE)
+            if len(edits) == 1 and edits[0][0] in ("Add", "Update"):
+                return f"edit_file {edits[0][1].strip()}"
             return "edit_file"
 
         # Permissions: Would you like to grant these permissions?
