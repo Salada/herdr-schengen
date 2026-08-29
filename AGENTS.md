@@ -46,6 +46,12 @@
 9. **Mandatory PR Review Commenting & History Persistence**:
    - ❌ **Never** leave reviewer persona opinions ephemeral in transient Herdr terminal panes.
    - ✅ **Always** persist and post the consolidated persona review evaluations directly to the corresponding Forgejo Pull Request via Forgejo API (`/api/v1/repos/.../issues/<id>/comments`) to guarantee immutable, version-controlled audit history.
+
+10. **Question-Dialog Non-Adjudication Invariant**:
+    - A target agent's human **question dialog** (opencode `esc dismiss`, codex `enter to submit answer`, AGY `Question N/M:`) is a *subjective request for the human*, NOT a command to approve.
+    - ❌ **Never** send a question through the Schengen gatekeeper LLM (`process_user_chat`) or any adjudication path — that path can `approve`/`reject` and would silently auto-resolve the question, which is forbidden.
+    - ❌ **Never** auto-approve, auto-reject, or deliver a question as a Schengen message.
+    - ✅ **Always** surface it as a `QUESTION` escalation (guidance only) and leave it **pending until the user answers directly in the agent pane**; the escalation auto-resolves solely when the dialog clears.
 ---
 
 ## 🗺️ 2. Architecture & Decision Records (ADR SSOT)
