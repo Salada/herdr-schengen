@@ -87,6 +87,65 @@ def _looks_like_cost_metadata(cmd: str) -> bool:
     return bool(_COST_METADATA_RE.match(cmd.strip()))
 
 
+# Numbered option row ("1. Production", "3. Type your own answer") in the question
+# dialog. Option rows are the only numbered content in the dialog body.
+_OPTION_NUM_RE = re.compile(r"^\d+\.\s")
+
+
+def _extract_question_text(text: str):
+    """Extract the human question text from an opencode question dialog.
+
+    Source-verified layout (packages/tui/src/routes/session/question.tsx): the
+    dialog body is a left-bordered column; after `strip_tui` removes the `┃`
+    border, the question text is the first body block (2-space indent), above the
+    numbered option rows (`N. label`, same indent) and their deeper-indented
+    description rows (5-space), above the footer keybinding row. We anchor on the
+    constant footer marker `esc dismiss`, exclude the footer row, then recover the
+    question text as the contiguous non-empty block directly above the option rows.
+
+    This is only for human-readable escalation/log summaries — the question is
+    never auto-approved regardless, so a sub-optimal extraction is fail-safe, not
+    a security issue.
+    """
+    m = re.search(r"\besc\s+dismiss\b", text)
+    if not m:
+        return None
+    lines = text[:m.start()].splitlines()
+
+    # Option rows are all at the same indent; use it to distinguish the question
+    # text (same indent, non-numbered) from indented description rows (deeper).
+    option_indent = None
+    for ln in lines:
+        st = ln.strip()
+        if _OPTION_NUM_RE.match(st):
+            option_indent = len(ln) - len(ln.lstrip(" \t"))
+            break
+
+    qlines = []
+    for ln in reversed(lines):
+        st = ln.strip()
+        if not st:
+            if qlines:
+                break  # blank line above the question text -> done
+            continue
+        if "↑↓" in st or "⇆" in st or st.startswith("enter "):
+            continue  # footer keybinding row (truncated at the `esc dismiss` anchor)
+        if _OPTION_NUM_RE.match(st):
+            continue  # numbered option row / "N. Type your own answer"
+        if option_indent is not None:
+            indent = len(ln) - len(ln.lstrip(" \t"))
+            if indent > option_indent:
+                continue  # indented description row under an option
+            if indent < option_indent:
+                break  # less-indented transcript content above the dialog
+        qlines.append(st)
+    qlines.reverse()
+    q = re.sub(r"\s+", " ", " ".join(qlines)).strip()
+    if not q:
+        return None
+    return q[:160]
+
+
 def decide_opencode_injection(stage: str) -> str:
     """Pure per-poll classification of an opencode post-inject dialog stage.
 
@@ -300,10 +359,15 @@ class OpenCodeAdapter(AgentAdapter):
 
         # 0. Human question dialog ("↑↓ select  enter submit  esc dismiss"): the
         #    agent is asking the user a question. Never auto-approve; return a
-        #    sentinel so the watcher escalates it to the human instead of silently
-        #    skipping it.
-        if re.search(r"enter\s+submit|esc\s+dismiss", text):
-            return "question"
+        #    sentinel so the watcher leaves it for the human instead of silently
+        #    skipping it. `esc dismiss` is the constant, question-dialog-unique
+        #    footer marker (the permission dialog footer is `esc cancel`), so it
+        #    anchors detection across all question states (single, multi-select,
+        #    multi-question, confirm tab). The question text is extracted so the
+        #    escalation/log message shows what was actually asked.
+        if re.search(r"\besc\s+dismiss\b", text):
+            q = _extract_question_text(text)
+            return f"question: {q}" if q else "question"
 
         if self.classify_dialog_stage(text) != "permission":
             return None
