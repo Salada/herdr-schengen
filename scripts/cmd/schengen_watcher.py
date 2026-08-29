@@ -777,6 +777,15 @@ def main():
     excluded = set(args.exclude_pane)
     if self_pane:
         excluded.add(self_pane)
+
+    # Resolve stale PENDING/DELIVERED escalations for excluded panes. These are
+    # leftover false-positives from a previous daemon run (e.g. the host pane's
+    # conversation text that mentioned a question marker). The pane is now
+    # excluded and will never be processed, so without this startup cleanup the
+    # stale escalations would linger in the pending queue after a restart.
+    for exc_pane in excluded:
+        resolve_escalation(pane_id=exc_pane, resolution_status="CANCELLED")
+
     print(
         f"🛡️  SmartGate / Herdr Schengen started (PID: {os.getpid()}, PPID: {initial_ppid}, target={args.target}, agent_filter=all, self_pane={self_pane or 'None'}, excluded={list(excluded)}, interval={args.interval}s, reasoning={args.reasoning}, lock={lock_file_path.name})",
         flush=True,
