@@ -84,6 +84,22 @@ class TestCodexAdapter(unittest.TestCase):
         text = "Would you like to make the following edits?\n\n› 1. Yes, proceed (y)"
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
 
+    def test_parse_file_edit_preserves_single_patch_target(self):
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "*** Add File: TODO_codex.md\n+draft\n"
+            "*** End Patch\n\n› 1. Yes, proceed (y)"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file TODO_codex.md")
+
+    def test_parse_file_edit_with_delete_stays_fail_closed(self):
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "*** Delete File: TODO_codex.md\n"
+            "*** End Patch\n\n› 1. Yes, proceed (y)"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
+
     def test_parse_none_when_no_dialog(self):
         self.assertIsNone(self.adapter.parse_permission_request("random terminal output"))
 

@@ -11,7 +11,7 @@ future regression test is worth adding.
 | exec (`$ <command>`) | raw command | ✅ `test_parse_exec_command{,_wrapped}` | ✅ 2026-08-29 | `curl` → `MANAGED_GIT_GUARD` auto-approve; ~180-char `echo` wrapped and fully captured |
 | network access | `network_access <host>` | ✅ `test_parse_network_access` | ⚠️ not triggered | codex prefers its pre-approved web-search tool (see edge cases) |
 | stdin | `stdin_terminal <id>` | ❌ none | ❌ none | gap — add a unit test if a sample dialog becomes available |
-| edit | `edit_file` | ✅ `test_parse_file_edit` | ✅ 2026-08-29 | `edit_file` → `FAST_TRACK_AST` auto-approve |
+| edit | `edit_file <path>` when a single add/update patch target is visible | ✅ `test_parse_file_edit*` | ✅ 2026-08-29 | Path-based security checks fast-track safe edits; deletes, multiple targets, and pathless dialogs stay fail-closed |
 | permissions | `grant_permissions` | ❌ none | ❌ none | gap — add a unit test if a sample dialog becomes available |
 | question (input-request) | `question: <text>` | ✅ `test_parse_question_dialog` | ✅ 2026-08-29 | surfaced as a pending QUESTION escalation; interpreted read-only (no approve/reject tools), user answers in the pane (AGENTS.md rule 10) |
 

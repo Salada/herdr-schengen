@@ -999,7 +999,7 @@ class SchengenTUIApp(App):
                 with Vertical(id="instruction-control"):
                     yield Button("📤 Approve Instr: OFF", id="btn-toggle-approve-instr")
                     yield Button("📤 Reject Instr: ON", id="btn-toggle-reject-instr")
-                    yield Button("🔑 Channel Approve: OFF", id="btn-toggle-channel-approve")
+                    yield Button("🔑 OpenCode Channel Approve: OFF", id="btn-toggle-channel-approve")
                 yield Label("🗣️ Answer Language", classes="section-title")
                 with RadioSet(id="answer-language-set"):
                     yield RadioButton("English", id="lang-english")
@@ -1140,7 +1140,7 @@ class SchengenTUIApp(App):
             new_val = not get_channel_approve_config()
             set_channel_approve_config(new_val)
             self._write(
-                f"[bold yellow]🔑 [Channel Approve]:[/] permission.reply approval {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
+                f"[bold yellow]🔑 [OpenCode Channel Approve]:[/] permission.reply approval {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
             )
             self._refresh_instruction_buttons()
         elif event.button.id == "btn-go-to-pane":
@@ -1195,7 +1195,7 @@ class SchengenTUIApp(App):
             pass
         try:
             ch_btn = self.query_one("#btn-toggle-channel-approve", Button)
-            ch_btn.label = "🔑 Channel Approve: ON" if get_channel_approve_config() else "🔑 Channel Approve: OFF"
+            ch_btn.label = "🔑 OpenCode Channel Approve: ON" if get_channel_approve_config() else "🔑 OpenCode Channel Approve: OFF"
         except Exception:
             pass
 
