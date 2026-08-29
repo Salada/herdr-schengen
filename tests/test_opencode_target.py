@@ -411,6 +411,22 @@ class TestAgentDispatch(unittest.TestCase):
         agy_text = "Requesting permission for:\ngit status\nDo you want to proceed?"
         self.assertEqual(get_adapter("agy").parse_permission_request(agy_text), "git status")
 
+    def test_agy_question_dialog(self):
+        q_text = (
+            "? 진행 방식을 선택해 주세요.\n\n"
+            "Question\n"
+            "──────────────────────────\n"
+            "Question 1/1: 진행 방식을 선택해 주세요.\n\n"
+            "> 1. 첫 번째 선택지: 빠른 처리 (Standard Mode)\n"
+            "  2. 두 번째 선택지: 정밀 분석 및 검증 (Deep Mode)\n"
+            "  4. Write-in...\n\n"
+            "  ↑/↓ Navigate · enter Select · esc Skip"
+        )
+        self.assertEqual(
+            get_adapter("agy").parse_permission_request(q_text),
+            "question: 진행 방식을 선택해 주세요.",
+        )
+
     def test_opencode_adapter_parses_opencode_dialog(self):
         oc_text = "Permission required\n\n$ ls -la\n\nAllow once"
         self.assertEqual(get_adapter("opencode").parse_permission_request(oc_text), "ls -la")
