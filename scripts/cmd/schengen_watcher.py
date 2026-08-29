@@ -16,6 +16,8 @@ Key Architecture:
 
 import argparse
 import ast
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import json
 import os
@@ -24,6 +26,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,9 +73,70 @@ from core.security_evaluator import (
 
 LOCK_FILE = DB_DIR / "schengen.lock"
 LOG_FILE = LOG_DIR / "schengen.log"
+WATCHER_CONFIG_PATH = SCRIPTS_ROOT.parent / "config" / "schengen_watcher.json"
+WATCHER_DEFAULTS = {"max_workers": 10, "interval_seconds": 3, "auto_exit_idle_cycles": 10}
 
 # Global reload trigger flag
 _RELOAD_REQUESTED = False
+
+
+def load_watcher_config(path=WATCHER_CONFIG_PATH):
+    """Load watcher tunables; malformed or missing config fails safely to defaults."""
+    try:
+        with Path(path).open(encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError("top-level value must be an object")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return dict(WATCHER_DEFAULTS)
+    config = dict(WATCHER_DEFAULTS)
+    for key, default in WATCHER_DEFAULTS.items():
+        value = loaded.get(key, default)
+        if isinstance(value, int) and value > 0:
+            config[key] = value
+    return config
+
+
+class InspectorCoordinator:
+    """Bounded silent inspection with per-pane in-flight ownership.
+
+    The evaluator is deliberately serialized: its module-level caches and cloud
+    judge clients have no documented thread-safety contract. Pane polling and
+    future completion still proceed concurrently, while all UI/key actions stay
+    on the watcher thread.
+    """
+
+    def __init__(self, max_workers=10):
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="schengen-inspector")
+        self.evaluator_lock = threading.Lock()
+        self.in_flight = {}
+        self.human_queue = deque()
+        self.active_human = None
+
+    def submit(self, pane_id, request, evaluate):
+        if pane_id in self.in_flight:  # INV-CONC-1
+            return False
+        self.in_flight[pane_id] = (request, self.executor.submit(self._evaluate, evaluate))
+        return True
+
+    def _evaluate(self, evaluate):
+        # ponytail: global evaluator lock; remove only after evaluator/cache and
+        # cloud-client thread safety are explicitly guaranteed.
+        with self.evaluator_lock:
+            return evaluate()
+
+    def completed(self):
+        for pane_id, (request, future) in list(self.in_flight.items()):
+            if not future.done():
+                continue
+            del self.in_flight[pane_id]
+            try:
+                yield pane_id, request, future.result()
+            except Exception as exc:
+                yield pane_id, request, (False, f"Inspector failed closed: {exc}", DecisionLayer.SHELL_CRITICAL, {})
+
+    def close(self):
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def sanitize_target_name(target: str) -> str:
@@ -630,6 +694,7 @@ def find_blocked_panes(agent_filter=frozenset(), exclude_panes=None):
 
 def main():
     global _RELOAD_REQUESTED
+    config = load_watcher_config()
     parser = argparse.ArgumentParser(description="Herdr SmartGate / Schengen Trusted Clearance Watcher (AGY Exclusive)")
     parser.add_argument(
         "--target",
@@ -637,7 +702,7 @@ def main():
         help="Target pane ID (e.g. wP:p2) or 'auto' (default: auto - monitors all active & future panes)",
     )
     parser.add_argument("--exclude-pane", action="append", default=[], help="Pane ID to exclude from auto-approval")
-    parser.add_argument("--interval", type=int, default=3, help="Polling interval in seconds (default: 3)")
+    parser.add_argument("--interval", type=int, default=config["interval_seconds"], help="Polling interval in seconds")
     parser.add_argument(
         "--auto-exit",
         action="store_true",
@@ -792,10 +857,46 @@ def main():
     )
 
     last_processed_prompt = {}
+    inspector = InspectorCoordinator(max_workers=config["max_workers"])
     idle_count = 0
 
     try:
         while True:
+            # Completed inspections are applied only after the live dialog is
+            # re-read (INV-CONC-4); worker threads never touch panes, SQLite, or UI.
+            for pane_id, request, result in inspector.completed():
+                req_cmd, state_seq, agent_status, pane_info, visible_text = request
+                live_info = get_pane_info(pane_id)
+                adapter = get_adapter(live_info.get("agent", "")) if live_info else None
+                live_cmd = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) if adapter else None
+                if not live_info or live_cmd != req_cmd:
+                    continue
+                is_safe, reason, layer, tax = result
+                decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
+                record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision=decision,
+                    safety_reason=reason or "", agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
+                    origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
+                    mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
+                    shadow_mode=tax.get("shadow_mode", False))
+                if is_safe:
+                    if not args.dry_run and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == req_cmd:
+                        adapter.inject_approval(pane_id, req_cmd)
+                    last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": True, "last_alert_time": time.time()}
+                    resolve_escalation(pane_id=pane_id, approver="machine")
+                else:
+                    inspector.human_queue.append((pane_id, live_info, req_cmd, reason, layer, visible_text, state_seq, agent_status))
+
+            # INV-CONC-3: publish exactly one unsafe result at a time. The rest
+            # remain silent in memory until its dialog clears.
+            if inspector.active_human is None and inspector.human_queue:
+                queued = inspector.human_queue.popleft()
+                pane_id, pane_info, req_cmd, reason, layer, visible_text, state_seq, agent_status = queued
+                adapter = get_adapter(pane_info.get("agent", ""))
+                if adapter and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == req_cmd:
+                    escalate_request(pane_id, pane_info, req_cmd, reason, layer, pane_info.get("agent", "unknown"), visible_text)
+                    inspector.active_human = (pane_id, req_cmd)
+                    last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
+
             # Check for dynamic reload trigger (SIGHUP)
             if _RELOAD_REQUESTED:
                 _RELOAD_REQUESTED = False
@@ -837,7 +938,7 @@ def main():
 
             if not target_panes:
                 idle_count += 1
-                if args.auto_exit and idle_count > 10:
+                if args.auto_exit and idle_count > config["auto_exit_idle_cycles"]:
                     print("🏁 No active target AGY agent found. SmartGate exiting gracefully.", flush=True)
                     break
                 time.sleep(args.interval)
@@ -869,6 +970,8 @@ def main():
                     if pane_id in last_processed_prompt:
                         resolve_escalation(pane_id=pane_id, approver="other")
                         last_processed_prompt.pop(pane_id, None)
+                    if inspector.active_human and inspector.active_human[0] == pane_id:
+                        inspector.active_human = None
                     continue
 
                 if req_cmd.startswith("question"):
@@ -939,6 +1042,19 @@ def main():
                 )
 
                 target_cwd = pane_info.get("foreground_cwd") or pane_info.get("cwd") or os.getcwd()
+
+                # INV-CONC-1/2: submit silently; approval/escalation is handled
+                # only from the completion drain at the next poll.
+                def evaluate(req=req_cmd, cwd=target_cwd, kind=agent_kind, scope=pane_id):
+                    is_whitelisted, wl_reason = check_persisted_allowlist(req)
+                    if is_whitelisted:
+                        tax = derive_taxonomy(req, DecisionLayer.ALLOWLIST, True, wl_reason or "", origin=Origin.HUMAN)
+                        return True, wl_reason, DecisionLayer.ALLOWLIST, tax
+                    return audit_shell_command_with_taxonomy(req, use_llm_judge=args.use_gpt_oss,
+                        reasoning_effort=args.reasoning, origin=Origin.AGENT if kind != "human" else Origin.HUMAN,
+                        cwd=cwd, scope=scope, agent_id=kind)
+                inspector.submit(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), evaluate)
+                continue
 
                 # 1. Check user persisted allowlist
                 is_whitelisted, wl_reason = check_persisted_allowlist(req_cmd)
@@ -1092,6 +1208,7 @@ def main():
 
             time.sleep(args.interval)
     finally:
+        inspector.close()
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()

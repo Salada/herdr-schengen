@@ -1,0 +1,5 @@
+{
+  "max_workers": 10,
+  "interval_seconds": 3,
+  "auto_exit_idle_cycles": 10
+}
