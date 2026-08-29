@@ -15,6 +15,20 @@ schengen_watcher.py (Open/Closed Principle).
 INJECT_SKIP_CHANGED = "SKIP_DIALOG_CHANGED"
 
 
+def footer_is_live(text: str, marker: str, tail_lines: int = 8) -> bool:
+    """True if `marker` appears within the last `tail_lines` lines of `text`.
+
+    The pane read returns a scrollback window (the last ~80 lines); the live
+    permission/question dialog sits at the BOTTOM. Requiring the dialog's footer
+    marker to appear in the tail prevents matching stale/lingering scrollback or
+    conversation text that merely mentions the marker (false positives that cause
+    the escalation to "keep queueing" after the user already resolved it).
+    """
+    lines = text.splitlines()
+    tail = lines[-tail_lines:] if len(lines) > tail_lines else lines
+    return any(marker in ln for ln in tail)
+
+
 class AgentAdapter:
     """Common interface implemented by each target agent adapter.
 

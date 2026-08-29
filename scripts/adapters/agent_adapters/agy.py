@@ -4,7 +4,7 @@ import re
 
 from adapters.herdr_client import run_cmd
 
-from adapters.agent_adapters.base import AgentAdapter, register
+from adapters.agent_adapters.base import AgentAdapter, footer_is_live, register
 
 # AGY (Antigravity CLI) human-question dialog (live-verified): a "Question N/M:
 # <text>" header + numbered option rows + "↑/↓ Navigate · enter Select · esc Skip"
@@ -39,10 +39,11 @@ class AgyAdapter(AgentAdapter):
 
     def parse_permission_request(self, visible_text):
         """Extract command/script/file-edit/survey from diverse AGY approval dialogs."""
-        # 0. Human question dialog (Antigravity CLI): "Question N/M: <text>".
-        #    Never auto-approve; surface as pending (parity with opencode/codex).
+        # 0. Human question dialog (Antigravity CLI): "Question N/M: <text>" header
+        #    + "esc Skip" footer. Never auto-approve; surface as pending. The footer
+        #    live-check prevents matching lingering scrollback (false positives).
         m_q = _QUESTION_RE.search(visible_text)
-        if m_q:
+        if m_q and footer_is_live(visible_text, "esc Skip"):
             q = m_q.group(1).strip()
             return f"question: {q}" if q else "question"
 

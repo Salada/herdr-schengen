@@ -18,7 +18,7 @@ import re
 
 from adapters.herdr_client import run_cmd
 
-from adapters.agent_adapters.base import AgentAdapter, register
+from adapters.agent_adapters.base import AgentAdapter, footer_is_live, register
 
 # Codex input-request (question) dialog, Plan mode (live-verified): a
 # "Question N/M (K unanswered)" header, the free-text question body, numbered
@@ -84,7 +84,7 @@ class CodexAdapter(AgentAdapter):
         # 0. Human question / input-request dialog (Plan mode). Never
         #    auto-approve; return a sentinel so the watcher leaves it for the
         #    human (parity with the opencode `question` sentinel, issue #56).
-        if _QUESTION_FOOTER_RE.search(visible_text):
+        if footer_is_live(visible_text, "enter to submit answer"):
             q = _extract_codex_question_text(visible_text)
             return f"question: {q}" if q else "question"
 
