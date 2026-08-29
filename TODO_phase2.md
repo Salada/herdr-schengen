@@ -188,5 +188,22 @@ Idea / Research:
         - 원격/로컬 컨테이너(Synology Docker / 로컬 서비스) 자동 재시작 스크립트/Webhook 연계 가능성 검토.
         - LLM 서버 다운 시 무한 대기 방지 및 안전한 Fail-Closed 에스컬레이션 보장.
 
+[] [Task/UX] TUI 토글/설정 옵션 통합 관리 전용 윈도우(Settings Modal) 분리 및 메인 화면 상태 요약(Status Badges) 간소화
+   - Context & Problem:
+     - 기능 확장(Guard 토글, Controller/Observer 모드, 승인/거절 지침 토글, 다국어 선택, Approval Bias, Fast-Track 모드 등)에 따라 메인 TUI 화면에 토글 버튼이 과도하게 증식하여 화면이 복잡해지고 시인성이 저하됨.
+   - Solution & Architecture:
+     1. 메인 화면 상태 요약 바(Compact Status Badges) 전환:
+        - 메인 화면의 개별 토글 버튼들을 제거하고, 현재 활성화된 상태를 한 줄의 간결한 읽기 전용 상태 배지/요약바로 표시:
+          예: `[🛡️ Guard: ON | 👑 Leader | ⚖️ Bias: Cons | 🌐 KO | 📝 Instr: A:off, R:on | ⚡ Conc: 10]`
+     2. 전용 설정 모달 서브 윈도우(SettingsModal) 도입:
+        - 진입 방법: 단축키 `^s` (Settings), `F2`, 설정 버튼 클릭, 또는 Slash Command `/config`, `/settings`
+        - 모달 내부 카테고리별 정돈된 편집 UI 제공:
+          • [운영 모드]: Guard Daemon ON/OFF, Controller vs Observer Leader 선택
+          • [지침 주입]: 승인(Approve) 시 지침 전달 ON/OFF, 거절(Reject) 시 지침 전달 ON/OFF
+          • [로컬라이제이션]: Gatekeeper 응답 언어 선택 (한국어 / English / 日本語)
+          • [보안 정책]: Approval Bias (Conservative / Balanced / Permissive), Fast-Track 모드 토글
+        - 변경 사항 즉시 SQLite `guard_config` 영속화 및 메인 화면 배지 동기화.
+
+
 
 
