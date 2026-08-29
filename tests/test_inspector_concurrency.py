@@ -20,19 +20,25 @@ from core.session_memory import PaneSessionMemory
 class TestInspectorConcurrency(unittest.TestCase):
     def test_per_pane_dedup_and_parallel_completion(self):
         coordinator = InspectorCoordinator(max_workers=2)
-        started = threading.Event()
+        both_started = threading.Event()
         release = threading.Event()
+        start_count = 0
+        start_lock = threading.Lock()
 
         def evaluate():
-            started.set()
+            nonlocal start_count
+            with start_lock:
+                start_count += 1
+                if start_count == 2:
+                    both_started.set()
             release.wait(1)
             return True, "safe", "FAST_TRACK_AST", {}
 
         try:
             self.assertTrue(coordinator.submit("pane-a", ("a",), evaluate))
-            self.assertTrue(started.wait(1))
             self.assertFalse(coordinator.submit("pane-a", ("new",), evaluate))
             self.assertTrue(coordinator.submit("pane-b", ("b",), evaluate))
+            self.assertTrue(both_started.wait(1), "both evaluations must start before either can finish")
             release.set()
             for _ in range(100):
                 completed = list(coordinator.completed())
@@ -46,12 +52,21 @@ class TestInspectorConcurrency(unittest.TestCase):
     def test_fifo_single_slot_and_stale_queue_eviction_model(self):
         coordinator = InspectorCoordinator()
         try:
+            coordinator.owned["pane-a"] = (("a",), "active")
+            coordinator.owned["pane-b"] = (("b",), "queued")
             coordinator.human_queue.extend([("pane-a", None, "a"), ("pane-b", None, "b")])
             first = coordinator.human_queue.popleft()
             coordinator.active_human = first[:3:2]
             self.assertEqual(coordinator.active_human, ("pane-a", "a"))
             # The watcher retains only live requests before dispatching the next slot.
-            coordinator.human_queue = type(coordinator.human_queue)(q for q in coordinator.human_queue if q[2] == "b")
+            live = {("pane-b", "b")}
+            stale_active = (coordinator.active_human[0], coordinator.active_human[1]) not in live
+            if stale_active:
+                coordinator.release(coordinator.active_human[0])
+                coordinator.active_human = None
+            coordinator.human_queue = type(coordinator.human_queue)(q for q in coordinator.human_queue if (q[0], q[2]) in live)
+            self.assertTrue(stale_active)
+            self.assertNotIn("pane-a", coordinator.owned)
             self.assertEqual(coordinator.human_queue[0][0], "pane-b")
         finally:
             coordinator.close()
@@ -61,6 +76,8 @@ class TestInspectorConcurrency(unittest.TestCase):
             path = Path(directory) / "watcher.json"
             self.assertEqual(load_watcher_config(path), WATCHER_DEFAULTS)
             path.write_text(json.dumps({"max_workers": 11}), encoding="utf-8")
+            self.assertEqual(load_watcher_config(path)["max_workers"], 10)
+            path.write_text(json.dumps({"max_workers": True}), encoding="utf-8")
             self.assertEqual(load_watcher_config(path)["max_workers"], 10)
             path.write_text(json.dumps({"max_workers": 3}), encoding="utf-8")
             self.assertEqual(load_watcher_config(path)["max_workers"], 3)
