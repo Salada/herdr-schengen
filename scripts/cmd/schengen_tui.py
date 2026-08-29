@@ -74,12 +74,14 @@ from core.guard_db import (
     get_adjudications_for_audit,
     get_answer_language,
     get_audit_log_by_id,
+    get_channel_approve_config,
     get_escalation_resolution,
     get_instruction_delivery_config,
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
     set_answer_language,
+    set_channel_approve_config,
     set_instruction_delivery_config,
 )
 from tools.schengen_agent_llm import SchengenAgentChat, get_current_active_escalation
@@ -976,6 +978,7 @@ class SchengenTUIApp(App):
                 with Vertical(id="instruction-control"):
                     yield Button("📤 Approve Instr: OFF", id="btn-toggle-approve-instr")
                     yield Button("📤 Reject Instr: ON", id="btn-toggle-reject-instr")
+                    yield Button("🔑 Channel Approve: OFF", id="btn-toggle-channel-approve")
                 yield Label("🗣️ Answer Language", classes="section-title")
                 with RadioSet(id="answer-language-set"):
                     yield RadioButton("English", id="lang-english")
@@ -1076,8 +1079,11 @@ class SchengenTUIApp(App):
             env = dict(os.environ)
             env["HERDR_ENV"] = "1"
             env["ANTIGRAVITY_AGENT"] = "1"
-            env.pop("SCHENGEN_STRICT_PARENT", None)
-            
+            # die-with-parent (ADR-003/ADR-008): the daemon must exit when the TUI
+            # (single lifecycle owner) closes — never orphan. The daemon's
+            # is_parent_alive poller self-terminates it when this process exits.
+            env["SCHENGEN_STRICT_PARENT"] = "1"
+
             p = subprocess.Popen(
                 [python_bin, str(watcher_script), "--target", "auto"],
                 stdout=subprocess.DEVNULL,
@@ -1109,6 +1115,13 @@ class SchengenTUIApp(App):
                 f"[bold yellow]📤 [Instruction Delivery]:[/] Reject instruction {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
             )
             self._refresh_instruction_buttons()
+        elif event.button.id == "btn-toggle-channel-approve":
+            new_val = not get_channel_approve_config()
+            set_channel_approve_config(new_val)
+            self._write(
+                f"[bold yellow]🔑 [Channel Approve]:[/] permission.reply approval {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
+            )
+            self._refresh_instruction_buttons()
 
     def _refresh_instruction_buttons(self) -> None:
         """Sync the instruction-delivery toggle button labels to the current config."""
@@ -1121,6 +1134,11 @@ class SchengenTUIApp(App):
         try:
             reject_btn = self.query_one("#btn-toggle-reject-instr", Button)
             reject_btn.label = "📤 Reject Instr: ON" if cfg.get("send_reject_instruction") else "📤 Reject Instr: OFF"
+        except Exception:
+            pass
+        try:
+            ch_btn = self.query_one("#btn-toggle-channel-approve", Button)
+            ch_btn.label = "🔑 Channel Approve: ON" if get_channel_approve_config() else "🔑 Channel Approve: OFF"
         except Exception:
             pass
 

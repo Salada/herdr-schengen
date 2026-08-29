@@ -74,8 +74,8 @@ scripts/
 ## Running
 
 ```bash
-python3 scripts/cmd/schengen_watcher.py --target auto   # guard daemon
-python3 scripts/cmd/schengen_tui.py                     # interactive TUI
+python3 scripts/cmd/schengen_tui.py                     # interactive TUI (single daemon lifecycle owner)
+python3 scripts/cmd/schengen_watcher.py --status        # read-only diagnostics (spawn is deprecated, issue #114)
 python3 scripts/cmd/schengen_history.py --pending       # escalation queue
 python3 scripts/cmd/schengen_feature.py --list          # feature backlog
 ```

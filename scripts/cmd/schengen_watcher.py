@@ -948,11 +948,12 @@ def main():
                 # 3. Action
                 if is_safe:
                     if not args.dry_run:
-                        # Channel-based approve (opencode): OPT-IN via
-                        # SCHENGEN_CHANNEL_APPROVE=1. It requires the opencode host
-                        # plugin to be restarted with the decision poller (PR #105)
-                        # loaded — until then keystroke injection is the primary path.
-                        if os.environ.get("SCHENGEN_CHANNEL_APPROVE") == "1":
+                        # Channel-based approve (opencode): OPT-IN via the
+                        # persistent `channel_approve` guard_config setting (TUI
+                        # toggle, issue #114). It requires the opencode host plugin
+                        # to be loaded with the decision poller (PR #105) — until
+                        # then keystroke injection is the primary path.
+                        if guard_db.get_channel_approve_config():
                             ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
                             if ch_approved:
                                 # Verify the host plugin actually replied (dialog cleared).
