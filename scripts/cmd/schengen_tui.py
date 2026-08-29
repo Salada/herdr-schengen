@@ -816,6 +816,13 @@ class SchengenTUIApp(App):
         border: solid $surface-lighten-1;
         color: $text-muted;
     }
+    /* "Go to agent pane" helper: hidden until a question escalation is active. */
+    #btn-go-to-pane {
+        display: none;
+        height: 3;
+        dock: bottom;
+        margin-bottom: 1;
+    }
     #status-container {
         height: 4;
         layout: horizontal;
@@ -967,6 +974,7 @@ class SchengenTUIApp(App):
                 yield UnselectableLabel("[bold cyan]🤖 Schengen Security Gatekeeper (GPT)[/]")
                 yield FocusableRichLog(id="chat-log", highlight=True, markup=True, wrap=True, auto_scroll=True)
                 yield Static(id="active-target-banner")
+                yield Button("↩ Go to agent pane", id="btn-go-to-pane", variant="primary")
                 yield CommandTextArea(placeholder="Ask Gatekeeper or type command (Enter to submit, Shift+Enter for newline)...", id="input-box")
 
             # Right: Compact Radar with Token Meter
@@ -1122,6 +1130,42 @@ class SchengenTUIApp(App):
                 f"[bold yellow]🔑 [Channel Approve]:[/] permission.reply approval {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
             )
             self._refresh_instruction_buttons()
+        elif event.button.id == "btn-go-to-pane":
+            active_esc = get_current_active_escalation()
+            if active_esc:
+                target = active_esc["pane_id"]
+                subprocess.Popen(
+                    ["herdr", "agent", "focus", target],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._write(f"[bold cyan]↩ Focusing agent pane {target} ({active_esc.get('agent_kind','agent')})...[/]")
+            else:
+                self._write("[dim]No active question to focus.[/]")
+
+    def _set_question_ui(self, question_esc=None) -> None:
+        """Show/hide the "Go to agent pane" helper and disable/enable the input.
+
+        When a question escalation is active, disable the command input (the user
+        answers in the agent pane, not the TUI) and surface a button that focuses
+        the agent pane. Restore the input otherwise.
+        """
+        try:
+            go_btn = self.query_one("#btn-go-to-pane", Button)
+            input_widget = self.query_one("#input-box", CommandTextArea)
+            if question_esc:
+                go_btn.display = True
+                go_btn.label = f"↩ Go to {question_esc['pane_id']} ({question_esc.get('agent_kind','agent')})"
+                if self.is_controller:
+                    input_widget.disabled = True
+                    input_widget.placeholder = "🔒 Question pending — answer in the agent pane (use ↩ Go to agent pane)"
+            else:
+                go_btn.display = False
+                if self.is_controller:
+                    input_widget.disabled = False
+                    input_widget.placeholder = "Ask Gatekeeper or type command (Enter to submit, Shift+Enter for newline)..."
+        except Exception:
+            pass
 
     def _refresh_instruction_buttons(self) -> None:
         """Sync the instruction-delivery toggle button labels to the current config."""
@@ -1240,6 +1284,7 @@ class SchengenTUIApp(App):
                     f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
                 )
             _update_static_if_changed(banner, banner_text)
+            self._set_question_ui(active_esc if is_question else None)
 
             # STRICT SEQUENTIAL FIFO: Only CONTROLLER awakens/delivers chat for active escalation
             if self.is_controller and active_id not in self._notified_escalation_ids and not self._processing_chat:
@@ -1265,6 +1310,12 @@ class SchengenTUIApp(App):
                     self._write(f"  [dim]Pane:[/]     {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
                     self._write(f"  [dim]Question:[/] [white]{safe_cmd}[/]")
                     self._write(f"[dim]  ↩ Answer directly in the pane — resolves automatically.[/]\n")
+                    # LLM interpretation: interpret the question + context to help the
+                    # user answer (parity with the dangerous-command inspector).
+                    self.process_user_chat(
+                        "New question intercepted. Interpret the question and its surrounding context, "
+                        "and suggest how the user should answer it in the agent pane."
+                    )
                 else:
                     self._write(f"\n[yellow]{'─'*20} ▶ Escalation #{active_id} Intercepted {'─'*20}[/]")
                     self._write(f"  [dim]Pane:[/]   {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
@@ -1275,6 +1326,7 @@ class SchengenTUIApp(App):
                     self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
 
         else:
+            self._set_question_ui(None)
             _update_static_if_changed(
                 banner,
                 "\n[bold green]✔ No active escalations  —  Queue clear[/]\n"
