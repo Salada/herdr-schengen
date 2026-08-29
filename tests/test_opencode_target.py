@@ -427,6 +427,19 @@ class TestAgentDispatch(unittest.TestCase):
             "question: 진행 방식을 선택해 주세요.",
         )
 
+    def test_question_marker_in_scrollback_not_live(self):
+        # A question marker lingering in OLD scrollback (not in the live bottom
+        # region) must NOT be detected as a live question dialog — this is the
+        # false-positive that made pending questions "keep queueing".
+        opencode_text = "esc dismiss (mentioned in prose)\n" + "plain line\n" * 10
+        self.assertIsNone(get_adapter("opencode").parse_permission_request(opencode_text))
+
+        codex_text = "enter to submit answer (mentioned in prose)\n" + "plain line\n" * 10
+        self.assertIsNone(get_adapter("codex").parse_permission_request(codex_text))
+
+        agy_text = "Question 1/1: 어떤 선택을 할까요?\n" + "plain line\n" * 10
+        self.assertIsNone(get_adapter("agy").parse_permission_request(agy_text))
+
     def test_opencode_adapter_parses_opencode_dialog(self):
         oc_text = "Permission required\n\n$ ls -la\n\nAllow once"
         self.assertEqual(get_adapter("opencode").parse_permission_request(oc_text), "ls -la")

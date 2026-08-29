@@ -15,7 +15,7 @@ from pathlib import Path
 
 from adapters.herdr_client import get_pane_text, run_cmd
 
-from adapters.agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, register
+from adapters.agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, footer_is_live, register
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 
@@ -365,7 +365,7 @@ class OpenCodeAdapter(AgentAdapter):
         #    anchors detection across all question states (single, multi-select,
         #    multi-question, confirm tab). The question text is extracted so the
         #    escalation/log message shows what was actually asked.
-        if re.search(r"\besc\s+dismiss\b", text):
+        if footer_is_live(text, "esc dismiss"):
             q = _extract_question_text(text)
             return f"question: {q}" if q else "question"
 
