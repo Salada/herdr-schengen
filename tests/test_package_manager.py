@@ -73,6 +73,40 @@ class TestPackageManagerClassifier(unittest.TestCase):
         safe, reason, layer = audit_shell_command("brew foo")
         self.assertFalse(safe, f"Expected unknown action 'brew foo' to escalate, got safe=True: {reason}")
 
+    def test_config_subcommand_escalates(self):
+        # Reviewer finding 1: `config` is MUTATING (writes config files, can
+        # redirect the registry — supply-chain vector). ALL config subcommands
+        # escalate, conservatively (set/get/list/debug/delete/edit).
+        for cmd in (
+            "npm config set registry https://evil.example.com",
+            "pip config set global.index-url https://evil.example.com",
+            "cargo config set build.jobs 1",
+            "brew config",
+            "npm config get registry",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' to escalate, got safe=True: {reason}")
+            self.assertEqual(layer, DecisionLayer.PACKAGE_GUARD)
+
+    def test_readonly_metachar_pipeline_escalates(self):
+        # Reviewer finding 2: READ_ONLY fast-track must not apply when the command
+        # contains shell metacharacters (pipe) — falls through to fail-closed.
+        for cmd in ("brew list | bash", "brew list | sh"):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' to escalate, got safe=True: {reason}")
+            self.assertNotEqual(layer, DecisionLayer.PACKAGE_GUARD)
+
+    def test_readonly_redirection_escalates(self):
+        # Reviewer finding 2: redirection on a READ_ONLY query must not auto-approve.
+        for cmd in (
+            "brew list >> ~/.bash_profile",
+            "pip list >> ~/.zshrc",
+            "npm view react > /tmp/out",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' to escalate, got safe=True: {reason}")
+            self.assertNotEqual(layer, DecisionLayer.PACKAGE_GUARD)
+
     def test_taxonomy_mechanism(self):
         from core.security_evaluator import Consequence, audit_shell_command_with_taxonomy
 

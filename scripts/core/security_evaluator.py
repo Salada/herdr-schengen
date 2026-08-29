@@ -1099,12 +1099,12 @@ PACKAGE_MANAGERS = {"brew", "npm", "pip", "pip3", "cargo", "apt", "apt-get", "pn
 PACKAGE_MUTATING_ACTIONS = {
     "install", "i", "uninstall", "remove", "rm", "upgrade", "update",
     "reinstall", "ci", "bundle", "add", "purge", "clean", "cleanup", "autoclean",
-    "link", "unlink", "pin", "unpin",
+    "link", "unlink", "pin", "unpin", "config",
 }
 
 PACKAGE_READONLY_ACTIONS = {
     "list", "ls", "info", "search", "view", "show", "outdated", "leaves",
-    "doctor", "config", "desc", "deps", "why",
+    "doctor", "desc", "deps", "why",
 }
 
 
@@ -1114,6 +1114,12 @@ def classify_package_command(cmd_str: str) -> Optional[tuple[str, str, list[str]
     action_class is 'MUTATING' or 'READ_ONLY'. Returns None for non-package commands
     or unknown actions (so they fall through to the fail-closed default).
     """
+    # Metacharacter / redirection / command-substitution guard: any command
+    # containing these MUST NOT auto-approve via the READ_ONLY path (e.g.
+    # `brew list | bash`, `npm view react > /tmp/out`, `pip list >> ~/.zshrc`).
+    # Returning None falls through to the fail-closed default for BOTH paths.
+    if re.search(r"[|&;<>]|\$\(|`", cmd_str):
+        return None  # metacharacter / redirection / substitution -> fail-closed default
     tokens = cmd_str.split()
     if not tokens or tokens[0] not in PACKAGE_MANAGERS:
         return None
