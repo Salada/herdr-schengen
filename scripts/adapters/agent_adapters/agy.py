@@ -6,6 +6,12 @@ from adapters.herdr_client import run_cmd
 
 from adapters.agent_adapters.base import AgentAdapter, register
 
+# AGY (Antigravity CLI) human-question dialog (live-verified): a "Question N/M:
+# <text>" header + numbered option rows + "↑/↓ Navigate · enter Select · esc Skip"
+# footer. This is a HUMAN question — never auto-approve; return a sentinel so the
+# watcher surfaces it as a pending escalation (parity with opencode/codex #56).
+_QUESTION_RE = re.compile(r"Question\s+\d+/\d+:\s*(.+)")
+
 
 @register
 class AgyAdapter(AgentAdapter):
@@ -28,10 +34,18 @@ class AgyAdapter(AgentAdapter):
         "Press enter to continue",
         "[y/N]",
         "[Y/n]",
+        "↑/↓ Navigate",
     )
 
     def parse_permission_request(self, visible_text):
         """Extract command/script/file-edit/survey from diverse AGY approval dialogs."""
+        # 0. Human question dialog (Antigravity CLI): "Question N/M: <text>".
+        #    Never auto-approve; surface as pending (parity with opencode/codex).
+        m_q = _QUESTION_RE.search(visible_text)
+        if m_q:
+            q = m_q.group(1).strip()
+            return f"question: {q}" if q else "question"
+
         # Pattern 1: Standard AGY Requesting permission dialog
         m1 = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", visible_text)
         if m1:
