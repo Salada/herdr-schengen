@@ -1217,6 +1217,7 @@ class SchengenTUIApp(App):
 
         if active_esc:
             active_id = active_esc["id"]
+            is_question = active_esc.get('decision_layer') == "QUESTION"
             raw_cmd = active_esc['raw_command'].strip()
             cmd_lines = raw_cmd.splitlines()
             if len(cmd_lines) > 5:
@@ -1225,12 +1226,19 @@ class SchengenTUIApp(App):
                 cmd_display = "\n".join(cmd_lines)
             
             reason_short = active_esc['safety_reason'][:72]
-            banner_text = (
-                f"[bold yellow]▶ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
-                f"[bold white]{rich_escape(cmd_display)}[/]\n"
-                f"[dim]⚠ {rich_escape(reason_short)}[/]\n"
-                f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
-            )
+            if is_question:
+                banner_text = (
+                    f"[bold cyan]❓ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                    f"[bold white]{rich_escape(cmd_display)}[/]\n"
+                    f"[dim]   ↩ Answer this question directly in the pane — resolves automatically.[/]"
+                )
+            else:
+                banner_text = (
+                    f"[bold yellow]▶ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                    f"[bold white]{rich_escape(cmd_display)}[/]\n"
+                    f"[dim]⚠ {rich_escape(reason_short)}[/]\n"
+                    f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
+                )
             _update_static_if_changed(banner, banner_text)
 
             # STRICT SEQUENTIAL FIFO: Only CONTROLLER awakens/delivers chat for active escalation
@@ -1252,13 +1260,19 @@ class SchengenTUIApp(App):
                 safe_cmd = rich_escape(active_esc['raw_command'])
                 safe_reason = rich_escape(active_esc['safety_reason'])
 
-                self._write(f"\n[yellow]{'─'*20} ▶ Escalation #{active_id} Intercepted {'─'*20}[/]")
-                self._write(f"  [dim]Pane:[/]   {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
-                self._write(f"  [dim]Cmd:[/]    [white]{safe_cmd}[/]")
-                self._write(f"  [dim]Reason:[/] {safe_reason}")
-                self._write(f"[dim]  ⚡ Autonomous inspector awakening...[/]\n")
+                if is_question:
+                    self._write(f"\n[cyan]{'─'*20} ❓ Question #{active_id} {'─'*20}[/]")
+                    self._write(f"  [dim]Pane:[/]     {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
+                    self._write(f"  [dim]Question:[/] [white]{safe_cmd}[/]")
+                    self._write(f"[dim]  ↩ Answer directly in the pane — resolves automatically.[/]\n")
+                else:
+                    self._write(f"\n[yellow]{'─'*20} ▶ Escalation #{active_id} Intercepted {'─'*20}[/]")
+                    self._write(f"  [dim]Pane:[/]   {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
+                    self._write(f"  [dim]Cmd:[/]    [white]{safe_cmd}[/]")
+                    self._write(f"  [dim]Reason:[/] {safe_reason}")
+                    self._write(f"[dim]  ⚡ Autonomous inspector awakening...[/]\n")
 
-                self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
+                    self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
 
         else:
             _update_static_if_changed(

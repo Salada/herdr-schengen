@@ -864,13 +864,43 @@ def main():
 
                 if req_cmd.startswith("question"):
                     # Human question dialog (subjective). Never send a keystroke,
-                    # never approve/reject, and never escalate — leave it for the
-                    # user to answer manually in the pane. Skipping avoids polluting
-                    # the escalation queue with an un-answerable prompt.
+                    # never approve/reject. Surface it as a PENDING escalation so
+                    # the user is guided to answer it in the pane; it stays pending
+                    # until the dialog clears (the user answers), at which point the
+                    # `not req_cmd` branch above auto-resolves it.
                     question_text = req_cmd[len("question:"):].strip() if req_cmd.startswith("question:") else ""
                     summary = question_text or "(no text extracted)"
+                    cached = last_processed_prompt.get(pane_id)
+                    if (
+                        cached
+                        and cached.get("cmd") == req_cmd
+                        and cached.get("seq") == state_seq
+                        and cached.get("status") == agent_status
+                    ):
+                        continue  # already surfaced; wait for the dialog to clear
+                    session_uuid = (
+                        pane_info.get("agent_session", {}).get("value")
+                        if isinstance(pane_info.get("agent_session"), dict)
+                        else None
+                    )
+                    esc_id = enqueue_pending_escalation(
+                        pane_id=pane_id,
+                        raw_command=req_cmd,
+                        safety_reason=f"Agent asked the user a question: {summary}",
+                        decision_layer="QUESTION",
+                        agent_kind=agent_kind,
+                        session_id=session_uuid,
+                        dialog_snapshot=visible_text,
+                    )
+                    last_processed_prompt[pane_id] = {
+                        "cmd": req_cmd,
+                        "seq": state_seq,
+                        "status": agent_status,
+                        "is_safe": True,
+                        "last_alert_time": 0,
+                    }
                     print(
-                        f"❓ [QUESTION] Pane {pane_id} ({agent_kind}) asked the user: {summary} — leaving it for manual response.",
+                        f"❓ [QUESTION] Pane {pane_id} ({agent_kind}) asked: {summary} — surfaced as pending (Escalation #{esc_id}); awaiting manual answer.",
                         flush=True,
                     )
                     continue
