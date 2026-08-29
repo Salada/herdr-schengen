@@ -75,6 +75,7 @@ LOCK_FILE = DB_DIR / "schengen.lock"
 LOG_FILE = LOG_DIR / "schengen.log"
 WATCHER_CONFIG_PATH = SCRIPTS_ROOT.parent / "config" / "schengen_watcher.json"
 WATCHER_DEFAULTS = {"max_workers": 10, "interval_seconds": 3, "auto_exit_idle_cycles": 10}
+WATCHER_LIMITS = {"max_workers": (1, 10), "interval_seconds": (1, 3600), "auto_exit_idle_cycles": (1, 10000)}
 
 # Global reload trigger flag
 _RELOAD_REQUESTED = False
@@ -92,7 +93,8 @@ def load_watcher_config(path=WATCHER_CONFIG_PATH):
     config = dict(WATCHER_DEFAULTS)
     for key, default in WATCHER_DEFAULTS.items():
         value = loaded.get(key, default)
-        if isinstance(value, int) and value > 0:
+        low, high = WATCHER_LIMITS[key]
+        if type(value) is int and low <= value <= high:
             config[key] = value
     return config
 
@@ -110,12 +112,14 @@ class InspectorCoordinator:
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="schengen-inspector")
         self.evaluator_lock = threading.Lock()
         self.in_flight = {}
+        self.owned = {}
         self.human_queue = deque()
         self.active_human = None
 
     def submit(self, pane_id, request, evaluate):
-        if pane_id in self.in_flight:  # INV-CONC-1
+        if pane_id in self.owned:  # INV-CONC-1: ownership survives completion
             return False
+        self.owned[pane_id] = (request, "in_flight")
         self.in_flight[pane_id] = (request, self.executor.submit(self._evaluate, evaluate))
         return True
 
@@ -134,6 +138,15 @@ class InspectorCoordinator:
                 yield pane_id, request, future.result()
             except Exception as exc:
                 yield pane_id, request, (False, f"Inspector failed closed: {exc}", DecisionLayer.SHELL_CRITICAL, {})
+
+    def set_state(self, pane_id, request, state):
+        if self.owned.get(pane_id, (None,))[0] == request:
+            self.owned[pane_id] = (request, state)
+
+    def release(self, pane_id, request=None):
+        owned = self.owned.get(pane_id)
+        if owned and (request is None or owned[0] == request):
+            self.owned.pop(pane_id, None)
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
@@ -870,6 +883,7 @@ def main():
                 adapter = get_adapter(live_info.get("agent", "")) if live_info else None
                 live_cmd = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) if adapter else None
                 if not live_info or live_cmd != req_cmd:
+                    inspector.release(pane_id, request)
                     continue
                 is_safe, reason, layer, tax = result
                 decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
@@ -883,11 +897,33 @@ def main():
                         adapter.inject_approval(pane_id, req_cmd)
                     last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": True, "last_alert_time": time.time()}
                     resolve_escalation(pane_id=pane_id, approver="machine")
+                    inspector.release(pane_id, request)
                 else:
                     inspector.human_queue.append((pane_id, live_info, req_cmd, reason, layer, visible_text, state_seq, agent_status))
+                    inspector.set_state(pane_id, request, "queued")
 
             # INV-CONC-3: publish exactly one unsafe result at a time. The rest
             # remain silent in memory until its dialog clears.
+            if inspector.active_human:
+                active_pane, active_cmd = inspector.active_human
+                active_info = get_pane_info(active_pane)
+                active_adapter = get_adapter(active_info.get("agent", "")) if active_info else None
+                active_live = active_adapter.get_pending_request(active_pane, get_pane_text(active_pane, lines=80)) if active_adapter else None
+                if active_live != active_cmd:
+                    inspector.release(active_pane)
+                    inspector.active_human = None
+            kept = deque()
+            while inspector.human_queue:
+                queued = inspector.human_queue.popleft()
+                q_pane, _, q_cmd = queued[:3]
+                q_info = get_pane_info(q_pane)
+                q_adapter = get_adapter(q_info.get("agent", "")) if q_info else None
+                q_live = q_adapter.get_pending_request(q_pane, get_pane_text(q_pane, lines=80)) if q_adapter else None
+                if q_live == q_cmd:
+                    kept.append(queued)
+                else:
+                    inspector.release(q_pane)
+            inspector.human_queue = kept
             if inspector.active_human is None and inspector.human_queue:
                 queued = inspector.human_queue.popleft()
                 pane_id, pane_info, req_cmd, reason, layer, visible_text, state_seq, agent_status = queued
@@ -895,6 +931,7 @@ def main():
                 if adapter and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == req_cmd:
                     escalate_request(pane_id, pane_info, req_cmd, reason, layer, pane_info.get("agent", "unknown"), visible_text)
                     inspector.active_human = (pane_id, req_cmd)
+                    inspector.set_state(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), "active")
                     last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
 
             # Check for dynamic reload trigger (SIGHUP)
@@ -972,6 +1009,7 @@ def main():
                         last_processed_prompt.pop(pane_id, None)
                     if inspector.active_human and inspector.active_human[0] == pane_id:
                         inspector.active_human = None
+                    inspector.release(pane_id)
                     continue
 
                 if req_cmd.startswith("question"):
