@@ -65,10 +65,13 @@ class TestDecisionLayers(unittest.TestCase):
             safe, reason, layer = audit_shell_command(ps_cmd)
             self.assertFalse(safe, f"Expected '{ps_cmd}' to be blocked (env var leakage)")
             self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
-        # Safe process listing (no env flag)
+        # Safe process listing (no env flag) — provably benign, but NOT in the
+        # closed fast-track allowlist -> escalates (fail-closed) instead of
+        # auto-approving via the removed catch-all (INV-1).
         for ps_cmd in ("ps -e", "ps aux", "ps auxww"):
             safe, reason, layer = audit_shell_command(ps_cmd)
-            self.assertTrue(safe, f"Expected '{ps_cmd}' to be allowed")
+            self.assertFalse(safe, f"Expected '{ps_cmd}' to escalate (fail-closed), got safe=True")
+            self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
         # Process environment file reads (Linux) and launchd env read
         for env_cmd in ("cat /proc/1234/environ", "strings /proc/*/environ", "launchctl getenv"):
             safe, reason, layer = audit_shell_command(env_cmd)
@@ -97,26 +100,43 @@ class TestDecisionLayers(unittest.TestCase):
             self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL, f"Expected SHELL_CRITICAL for '{cmd}'")
 
     def test_process_env_dump_no_false_positive(self):
-        # Literal mentions of `ps eww` in non-command contexts must NOT be flagged.
-        allowed = [
+        # Literal mentions of `ps eww` in non-command contexts must NOT trigger
+        # the env-dump denylist (SHELL_CRITICAL). Commands that are still
+        # provably benign (allowlisted) stay fast-tracked; everything else
+        # escalates via NOT_ALLOWLISTED (fail-closed) instead of auto-approving
+        # via the removed catch-all — but never via a denylist false positive.
+        fast_track_allowed = [
+            'echo "use ps eww to dump env vars"',
+        ]
+        escalated_not_denylisted = [
             "ps -e",
             "ps aux",
             "ps auxww",
             "ps -ef",
+            # The `|` inside the quoted grep pattern is a literal alternation, not a
+            # pipe; the naive INV-6 metachar check still escalates it (fail-closed,
+            # conservative) — but never as an env-dump denylist false positive.
             "grep -rn 'auxe|eww|wwE|axeww|launchctl|/proc/|getenv|ps e' tests/",
             "git commit -m 'fix ps eww false positive in heredoc'",
-            'echo "use ps eww to dump env vars"',
             "cat > /tmp/handoff.txt <<'EOF'\n## Issue #51 — ps eww 프로세스 env 키 노출 수정\nEOF",
         ]
-        for cmd in allowed:
+        for cmd in fast_track_allowed:
             safe, reason, layer = audit_shell_command(cmd)
             self.assertTrue(safe, f"Expected '{cmd}' to be allowed (false positive), got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+        for cmd in escalated_not_denylisted:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' to escalate (fail-closed), got safe=True: {reason}")
+            self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED, f"Expected NOT_ALLOWLISTED for '{cmd}', got {layer}")
 
     def test_gpt_model_name_not_disk_command(self):
         # Regression: "gpt-4o-mini" (OpenAI model name) must not match the `gpt`
-        # disk-partitioning tool. `gpt destroy`/`gpt create` must still be blocked.
+        # disk-partitioning tool. `git commit` is a write op, so it is no longer
+        # auto-approved — it escalates via NOT_ALLOWLISTED (fail-closed), but
+        # must NOT be flagged as SHELL_CRITICAL (no disk-tool false positive).
         safe, reason, layer = audit_shell_command('git commit -m "use gpt-4o-mini model"')
-        self.assertTrue(safe, f"Expected model-name commit to be allowed: {reason}")
+        self.assertFalse(safe, f"Expected git commit to escalate (fail-closed): {reason}")
+        self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
         safe, reason, layer = audit_shell_command("gpt destroy /dev/disk0")
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
@@ -191,10 +211,19 @@ class TestDecisionLayers(unittest.TestCase):
             "bw unlock",
             "bw delete item-attachment 12345",
         ]
+        # Under the fail-closed bias shift (INV-1/5), only commands on the
+        # explicit closed allowlist are auto-approved (FAST_TRACK_AST). The
+        # remaining commands are NOT denylisted (no false positive from the
+        # critical/secret/sandbox guards) but escalate via NOT_ALLOWLISTED
+        # instead of the removed fail-open catch-all.
         for cmd in safe_macos_cmds:
             safe, reason, layer = audit_shell_command(cmd)
-            self.assertTrue(safe, f"Expected '{cmd}' to be allowed, but got blocked: {reason}")
-            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+            self.assertIn(
+                layer,
+                (DecisionLayer.FAST_TRACK_AST, DecisionLayer.NOT_ALLOWLISTED),
+                f"Expected no denylist false positive for '{cmd}', got layer={layer}: {reason}",
+            )
+            self.assertEqual(safe, layer == DecisionLayer.FAST_TRACK_AST, f"Safe flag mismatch for '{cmd}': {reason}")
 
     def test_git_push_safeguards(self):
         # 1. Safe Feature branch pushes -> FAST_TRACK_AST
@@ -211,10 +240,13 @@ class TestDecisionLayers(unittest.TestCase):
             # the `:branch` remote-delete refspec, so a normal push stays safe.
             "cd ~/x && git push -u origin fix/27-28-cloud-judge-config-cache 2>&1 | tail -15 ~/code/herdr-schengen:main",
         ]
+        # 1. Safe Feature branch pushes: NOT blocked by the push denylist, but
+        #    `git push` is a write op absent from the read-only closed allowlist
+        #    -> escalates via NOT_ALLOWLISTED (fail-closed), never SHELL_CRITICAL.
         for cmd in safe_pushes:
             safe, reason, layer = audit_shell_command(cmd)
-            self.assertTrue(safe, f"Expected safe feature push for '{cmd}', but got: {reason}")
-            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+            self.assertFalse(safe, f"Expected '{cmd}' to escalate (fail-closed), got safe=True: {reason}")
+            self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED, f"Expected NOT_ALLOWLISTED for '{cmd}', got {layer}")
 
         # 2. Blocked Dangerous Git Push scenarios -> SHELL_CRITICAL
         blocked_pushes = [
@@ -305,10 +337,12 @@ class TestDecisionLayers(unittest.TestCase):
 
     def test_python_dash_c_escaped_quote_not_truncated(self):
         # python3 -c "print(\"hi\")" previously truncated the capture at the escaped
-        # quote (fail-closed SyntaxError); safe code must now be allowed.
+        # quote (fail-closed SyntaxError); the AST guard must NOT block it. Under
+        # the fail-closed bias shift it escalates via NOT_ALLOWLISTED (python3 not
+        # on the closed allowlist) instead of auto-approving via the catch-all.
         safe, reason, layer = audit_shell_command('python3 -c "print(\\"hi\\")"')
-        self.assertTrue(safe, f"Expected escaped-quote python allowed, got blocked: {reason}")
-        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+        self.assertFalse(safe, f"Expected escaped-quote python to escalate (fail-closed), got safe=True: {reason}")
+        self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
 
     def test_python_split_token_normalization_fail_closed(self):
         # Split-token evasions: a dangerous identifier fragmented across a newline
@@ -328,6 +362,9 @@ class TestDecisionLayers(unittest.TestCase):
         # The whitespace-insensitive dangerous-token guard must NOT block benign
         # code: string/comment literals mentioning dangerous terms, and module
         # names with a dangerous prefix (socketio, urllib3, httpclient).
+        # `python3` is not in the closed fast-track allowlist, so benign inline
+        # python now escalates via NOT_ALLOWLISTED (fail-closed) — but never as
+        # a PYTHON_AST false positive.
         for cmd in (
             'python3 -c "print(\\"import socket\\")"',
             'python3 -c "s = \\"exec(\\""',
@@ -336,7 +373,8 @@ class TestDecisionLayers(unittest.TestCase):
             'python3 -c "import httpclient"',
         ):
             safe, reason, layer = audit_shell_command(cmd)
-            self.assertTrue(safe, f"Expected benign '{cmd}' allowed, got blocked: {reason}")
+            self.assertFalse(safe, f"Expected benign '{cmd}' to escalate (fail-closed), got safe=True: {reason}")
+            self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
 
     def test_dialog_leading_whitespace_normalized(self):
         # Cross-layer: leading whitespace on dialog commands must still dispatch.
@@ -594,13 +632,15 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
         self.assertEqual(rel_path, "scripts/core/security_evaluator.py")
 
     def test_new_file_creation_in_git_repo_fast_track(self):
-        """Verify that creating a new file in a git repo via redirection (cat << 'EOF' > new_file) is classified as T2 Fast-Track."""
+        """File creation via redirection (cat << 'EOF' > new_file) is no longer auto-approved:
+        the `>` metacharacter disqualifies it from the closed fast-track allowlist (INV-6),
+        so it escalates via NOT_ALLOWLISTED instead of the removed catch-all."""
         repo_root = Path(__file__).resolve().parent.parent
         target_file = repo_root / "docs" / "adr-999-unit-test-creation.md"
         cmd = f"cat << 'EOF' > {target_file}\n# Test ADR\nEOF"
         safe, reason, layer = audit_shell_command(cmd)
-        self.assertTrue(safe, f"Expected safe for git repo file creation, got: {reason}")
-        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+        self.assertFalse(safe, f"Expected redirection file creation to escalate (fail-closed), got safe=True: {reason}")
+        self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
 
     def test_escalation_queue_lifecycle_and_cleanup(self):
         from core.guard_db import (

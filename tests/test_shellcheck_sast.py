@@ -60,13 +60,17 @@ class TestShellCheckSAST(unittest.TestCase):
         self.assertTrue(safe)
 
     def test_assigned_variable_passes_sast(self):
-        """Variables defined and assigned within the same script block pass SAST."""
+        """Variables defined and assigned within the same script block pass SAST
+        (no SAST false positive), but the `&&` metacharacter disqualifies the
+        command from the closed fast-track allowlist (INV-6) -> escalates
+        fail-closed via NOT_ALLOWLISTED instead of auto-approving."""
         if not is_shellcheck_available():
             self.skipTest("shellcheck binary not installed on runner")
 
         cmd = 'BUILD_DIR=/tmp/my_test_build && echo "Building in $BUILD_DIR"'
         safe, reason, layer, tax = audit_shell_command_with_taxonomy(cmd)
-        self.assertTrue(safe)
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
 
     def test_secret_variables_are_not_whitelisted_from_scrutiny(self):
         """Secret tokens (FORGEJO_TOKEN, BW_SESSION) are not in whitelist and are scrutinized."""
