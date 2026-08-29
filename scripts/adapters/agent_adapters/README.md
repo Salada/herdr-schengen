@@ -13,7 +13,7 @@ future regression test is worth adding.
 | stdin | `stdin_terminal <id>` | ❌ none | ❌ none | gap — add a unit test if a sample dialog becomes available |
 | edit | `edit_file` | ✅ `test_parse_file_edit` | ✅ 2026-08-29 | `edit_file` → `FAST_TRACK_AST` auto-approve |
 | permissions | `grant_permissions` | ❌ none | ❌ none | gap — add a unit test if a sample dialog becomes available |
-| question (input-request) | `question: <text>` | ✅ `test_parse_question_dialog` | ✅ 2026-08-29 | surfaced as a pending QUESTION escalation; **never adjudicated** — the user answers in the pane (see AGENTS.md rule 10) |
+| question (input-request) | `question: <text>` | ✅ `test_parse_question_dialog` | ✅ 2026-08-29 | surfaced as a pending QUESTION escalation; interpreted read-only (no approve/reject tools), user answers in the pane (AGENTS.md rule 10) |
 
 ## Live verification — reproducible runbook (manual)
 

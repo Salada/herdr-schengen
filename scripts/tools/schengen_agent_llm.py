@@ -557,7 +557,7 @@ _ANSWER_LANGUAGE_MAP = {
 }
 
 
-def build_system_prompt(language: Optional[str] = None) -> str:
+def build_system_prompt(language: Optional[str] = None, allow_adjudication: bool = True) -> str:
     lang = language or get_answer_language()
     lang_instruction = _ANSWER_LANGUAGE_MAP.get(lang, _ANSWER_LANGUAGE_MAP["korean"])
 
@@ -571,20 +571,8 @@ All previous tasks are finished. If the user asks questions, answer them in {lan
     op_type, detected_target = classify_operation(active_esc['raw_command'])
     target_candidate = detected_target or "unknown"
 
-    return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
-
-[🗣️ ANSWER LANGUAGE]:
-- Render your FINAL verdict, risk report, and any explanation to the human user in {lang_instruction}.
-- The `english_feedback` argument for `approve_escalation` / `reject_escalation` MUST ALWAYS be concise professional English (it is injected into the worker agent via Herdr to conserve tokens), regardless of the answer language.
-
-[🎯 CURRENT ACTIVE ESCALATION TARGET]:
-- Escalation ID: #{active_esc['id']}
-- Target Pane: {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})
-- Raw Command: `{active_esc['raw_command']}`
-- Intercepted Reason: {active_esc['safety_reason']}
-- Detected Target: `{target_candidate}`
-
-[🔬 AUTONOMOUS INVESTIGATION & ADJUDICATION PROTOCOL]:
+    if allow_adjudication:
+        protocol = f"""[🔬 AUTONOMOUS INVESTIGATION & ADJUDICATION PROTOCOL]:
 1. **Autonomous Triaging & Session Pattern Recognition**:
    - Assess the intercepted command.
    - **Session Pattern Memory**: If the command is a repetition or slight variation of a previously approved benign operation in this session (e.g. search keyword query, repetitive git query, pytest runner, or temporary file redirection), recognize this pattern and proceed directly to approval without redundant tool loops.
@@ -601,7 +589,26 @@ All previous tasks are finished. If the user asks questions, answer them in {lan
 
 3. **Feedback Format**:
    - `english_feedback` MUST be in professional English: `Approved. <Direct Verified Fact>. <Actionable Note/Warning>.`
-   - Example when target doesn't exist: `Approved. Target path does not exist (0B). Zero data loss risk. Note: Avoid habituated -rf flags on non-existent targets and verify path spelling.`
+   - Example when target doesn't exist: `Approved. Target path does not exist (0B). Zero data loss risk. Note: Avoid habituated -rf flags on non-existent targets and verify path spelling.`"""
+    else:
+        protocol = f"""[🔬 READ-ONLY INTERPRETATION MODE (NO ADJUDICATION)]:
+- The current escalation is a HUMAN QUESTION dialog, not a command to approve.
+- You have NO approve/reject capability this turn — do NOT attempt to adjudicate.
+- Interpret the question and its surrounding context, and suggest how the human should answer it in the agent pane, in {lang_instruction}."""
+
+    return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
+
+[🗣️ ANSWER LANGUAGE]:
+- Render your FINAL response, risk report, and any explanation to the human user in {lang_instruction}.
+
+[🎯 CURRENT ACTIVE ESCALATION TARGET]:
+- Escalation ID: #{active_esc['id']}
+- Target Pane: {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})
+- Raw Command: `{active_esc['raw_command']}`
+- Intercepted Reason: {active_esc['safety_reason']}
+- Detected Target: `{target_candidate}`
+
+{protocol}
 """
 
 
@@ -671,7 +678,7 @@ class SchengenAgentChat:
         except Exception:
             pass
 
-    async def send_message(self, user_text: str, on_chunk: Optional[Callable[[str], None]] = None) -> str:
+    async def send_message(self, user_text: str, on_chunk: Optional[Callable[[str], None]] = None, allow_adjudication: bool = True) -> str:
         if not self.inspector_api_key:
             return "⚠️ No API key found. Set OPENAI_API_KEY or SCHENGEN_INSPECTOR_API_KEY."
 
@@ -685,7 +692,7 @@ class SchengenAgentChat:
 
         self._append_transcript(role="user", content=user_text)
 
-        messages = [{"role": "system", "content": build_system_prompt()}]
+        messages = [{"role": "system", "content": build_system_prompt(allow_adjudication=allow_adjudication)}]
         messages.extend(self.history)
         messages.append({"role": "user", "content": user_text})
 
@@ -745,10 +752,14 @@ class SchengenAgentChat:
                     "Content-Type": "application/json",
                 }
 
+                tools = [
+                    t for t in GUARD_TOOLS
+                    if allow_adjudication or t["function"]["name"] not in ("approve_escalation", "reject_escalation")
+                ]
                 payload = {
                     "model": self.inspector_model,
                     "messages": messages,
-                    "tools": GUARD_TOOLS,
+                    "tools": tools,
                     "temperature": 0.0,
                     "stream": False,
                 }
