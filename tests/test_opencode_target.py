@@ -100,6 +100,59 @@ class TestCodexAdapter(unittest.TestCase):
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
 
+    def test_parse_file_edit_destination_line_preserves_target(self):
+        # Issue #52: current Codex CLI emits `Destination: <path>` (no legacy
+        # `*** Add/Update/Delete File:` header) — the path must be preserved so
+        # the evaluator's secret/sandbox/gray-zone checks apply.
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "Description: Apply proposed file edits\n"
+            "Destination: /repo/scripts/core/session_memory.py\n\n"
+            "› 1. Yes, proceed (y)"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text), "edit_file /repo/scripts/core/session_memory.py"
+        )
+
+    def test_parse_file_edit_file_line_preserves_target(self):
+        # `File: <path>` label form (same current-CLI family as Destination:).
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "File: /repo/scripts/core/session_memory.py\n\n"
+            "› 1. Yes, proceed (y)"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text), "edit_file /repo/scripts/core/session_memory.py"
+        )
+
+    def test_parse_file_edit_pathless_stays_fail_closed(self):
+        # No Destination/File line -> pathless -> bare edit_file (fail-closed).
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "Description: Apply proposed file edits\n\n"
+            "› 1. Yes, proceed (y)"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
+
+    def test_parse_file_edit_multi_destination_stays_fail_closed(self):
+        # Multiple Destination lines (multi-file edit) -> bare edit_file (fail-closed).
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "Destination: /repo/a.py\n"
+            "Destination: /repo/b.py\n\n"
+            "› 1. Yes, proceed (y)"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
+
+    def test_parse_file_edit_legacy_update_still_works(self):
+        # Legacy `*** Update File:` header must keep working (single Update -> path).
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "*** Update File: TODO_codex.md\n-foo\n+bar\n"
+            "*** End Patch\n\n› 1. Yes, proceed (y)"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file TODO_codex.md")
+
     def test_parse_none_when_no_dialog(self):
         self.assertIsNone(self.adapter.parse_permission_request("random terminal output"))
 
