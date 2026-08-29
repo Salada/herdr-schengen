@@ -20,6 +20,48 @@ from adapters.herdr_client import run_cmd
 
 from adapters.agent_adapters.base import AgentAdapter, register
 
+# Codex input-request (question) dialog, Plan mode (live-verified): a
+# "Question N/M (K unanswered)" header, the free-text question body, numbered
+# option rows, then the footer "enter to submit answer". This is a HUMAN question
+# — never auto-approve; recognize it so the watcher leaves it for manual response
+# (parity with the opencode `question` sentinel, issue #56).
+_QUESTION_FOOTER_RE = re.compile(r"enter\s+to\s+submit\s+answer", re.IGNORECASE)
+_QUESTION_HEADER_RE = re.compile(r"Question\s+\d+\s*/\s*\d+\s*\([^)]*\)")
+_OPTION_ROW_RE = re.compile(r"^›?\s*\d+\.\s")
+
+
+def _extract_codex_question_text(text: str):
+    """Extract the free-text question body from a codex input-request dialog.
+
+    Layout (live-verified):
+        Question 1/1 (1 unanswered)
+        <question text>
+        › 1. <option>       <description>
+          2. <option>
+        tab to add notes | enter to submit answer | esc to interrupt
+
+    Returns the question body (the contiguous non-empty, non-option lines after
+    the header), truncated for log summaries. Only for human readability — the
+    question is never auto-approved regardless.
+    """
+    m = _QUESTION_HEADER_RE.search(text)
+    if not m:
+        return None
+    qlines = []
+    for ln in text[m.end():].splitlines():
+        st = ln.strip()
+        if not st:
+            if qlines:
+                break
+            continue
+        if _OPTION_ROW_RE.match(st) or "enter to submit answer" in st or "esc to interrupt" in st:
+            break
+        qlines.append(st)
+    q = re.sub(r"\s+", " ", " ".join(qlines)).strip()
+    if not q:
+        return None
+    return q[:160]
+
 
 @register
 class CodexAdapter(AgentAdapter):
@@ -34,10 +76,18 @@ class CodexAdapter(AgentAdapter):
         "needs your approval.",
         "Yes, proceed",
         "Press enter to confirm or esc to cancel",
+        "enter to submit answer",
     )
 
     def parse_permission_request(self, visible_text):
         """Extract the command/action from a Codex approval modal."""
+        # 0. Human question / input-request dialog (Plan mode). Never
+        #    auto-approve; return a sentinel so the watcher leaves it for the
+        #    human (parity with the opencode `question` sentinel, issue #56).
+        if _QUESTION_FOOTER_RE.search(visible_text):
+            q = _extract_codex_question_text(visible_text)
+            return f"question: {q}" if q else "question"
+
         # Exec (shell): the "$ <command>" body before the "1. Yes" option row.
         m = re.search(r"\$\s+([\s\S]*?)\n\s*[›>]?\s*1\.\s*Yes", visible_text)
         if m:
