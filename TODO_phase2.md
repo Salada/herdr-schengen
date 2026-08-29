@@ -42,6 +42,20 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
        - 이미 Pane에서 처리되어 사라진 경우, 사용자 화면에 알림을 띄우지 않고 큐에서 즉시 자동 퇴출(Silent Eviction).
     3. Event-Driven State Channel (선택):
        - Herdr 에이전트 상태 이벤트(Status Change Notification)를 리스닝하여 폴링 타이머 대기 없이 즉각적인 큐 클리어 트리거.
+[] [Bug/SAST] Daemon 실행 환경 PATH 누락으로 인한 SAST(shellcheck/semgrep) Degraded 과에스컬레이션(Over-escalation) 버그 (#2289 등):
+  - 현상 및 원인:
+    • TUI 또는 서브셸에서 Daemon(`schengen_watcher.py`) 기동 시 `/opt/homebrew/bin` 및 시스템 `PATH` 상속이 누락되어 `shellcheck`/`semgrep` 바이너리를 탐색하지 못함.
+    • `INV-2` 불변식(SAST 부재 시 Fail-Closed)에 의해, 단순 진단 스크립트(`herdr agent get ... | python3 -c ...`) 등 안전한 명령까지 `SAST tools unavailable` 사유로 무차별 에스컬레이션되는 장애 발생.
+  - 해결 방안:
+    1) Daemon 시작 스크립트 및 `verify_host_runtime_environment()`에서 `PATH`에 `/opt/homebrew/bin`, `~/.local/bin`, `/usr/local/bin` 자동 주입 및 사전 검증.
+    2) TUI 시스템 상태 카드/사이드바에 `SAST: READY` vs `SAST: DEGRADED` 인디케이터 시각화.
+[] [Bug/Adapter] Codex Adapter edit-dialog 포맷 불일치(`Destination:` vs `*** Update File:`)로 인한 Fail-closed 오차단 버그:
+  - 현상 및 원인:
+    • `scripts/adapters/agent_adapters/codex.py:112`의 정규식이 `*** (Add|Update|Delete) File:`만 기대하여, 실제 Codex CLI가 출력하는 `Destination: <path>` 또는 `File: <path>` 형태의 파일 편집 다이얼로그에서 대상 경로를 추출하지 못함.
+    • 경로가 누락된 bare `edit_file`로 축소되어 `security_evaluator.py`에서 Pathless 파일 편집으로 판정, 정상 파일 수정이 모두 fail-closed로 거부/에스컬레이션됨.
+  - 해결 방안:
+    • `codex_adapter`에 `Destination:\s*(\S+)`, `File:\s*(\S+)`, `*** (Add|Update|Delete) File:` 다중 템플릿 정규식 지원 및 대상 파일 경로 추출 안정화.
+
 
 
 
