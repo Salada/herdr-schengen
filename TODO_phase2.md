@@ -8,6 +8,12 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   - 해결: capability query(2048$p)도 no-op 처리 → 플래그가 False로 유지되어
     SIGWINCH fallback이 정상 동작. 1016(pixel mouse)은 그대로 off로 mouse cell-mode 유지.
   - 검증: live — pane 154→30cols 축소 시 narrow re-render, 30→180cols 확장 시 wide re-render 확인.
+[x] opencode 텍스트 누출 잔여(#57) half-measure (PR #95): 플러그인 `event` 훅으로 `permission.asked`를
+    per-pane JSON 채널(~/.local/state/herdr-schengen/opencode_permissions/)에 기록, 어댑터가 clean 커맨드를
+    1차 소스로 읽고 pane-text 파싱은 fail-closed fallback. (명령 추출 신뢰성 개선, 완료)
+[x] #57 full closure (PR #105): `client.permission.reply(permission_id)` 승인 바인딩 + 결정 채널 + plugin decision poller.
+    pane-text를 opencode 승인 임계경로에서 제거 (bare enter fail-open 해소). AGY pane-text는 별도.
+[x] escalation poller JSON parse error (PR #100): `runHistoryPending()`이 빈 출력/실패 시 `[]` 반환 + 실패 원인 로깅.
 
 Small task?
 [x] Full screen 에서 item클릭했을때 한 record만 focus해서 더 자세히 볼수있는 뷰
@@ -17,4 +23,170 @@ Small task?
 [x] 내부 답변을 위한 언어에 English/한국어/日本語 를 표시하여 셋중에 하나를 선택할수있는 버튼그룹을 만들고, 선택된 버튼그룹의 언어가 chat화면의 답변으로 렌더링이 "유도"될수있게 prompt를 구성해줘. 단 여기서 주의할점은, 지침이 agent에게 herdr를 통해 전달될때는 반드시 토큰을 아끼기 위해 영어여야된다는 전제를 지켜야 된다는 것이다. (default: 한국어, guard_config.answer_language, herdr english_feedback은 영어 유지)
 
 Epic: 
-[] codex 지원
+[x] codex adapter 지원 (PR #106): Codex CLI 승인 모달 파싱(exec/network/edit/stdin/permissions) + 'y' key auto-approve. live 검증 완료. (codex는 untrusted 모드 필요)
+[] codex 지원 잔여: network/edit 등 템플릿 live 검증, reject 경로, Ctrl+A fullscreen long-command 경로.
+[] 비가역적 상태의 위험성이 있는 command에 대한 research
+- make
+- kubectl
+- 그외에 이런 ruleset을 잘 관리할수있는 별도 파일 포맷으로 체계를 가지고 조사하는게 좋을지 조사- make
+
+[] [EPIC] Fail-open → fail-closed 편향 전환 + 패키지 매니저 인식 (@oracle 검토 verdict: MODIFY)
+   - 근본 원인: security_evaluator.py:1163 종료형 `return True, "Safe", FAST_TRACK_AST` catch-all = "denylist만 아니면 허용".
+     #1825(단순 read-only `strings|grep`)가 auto-approve된 원인.
+   - 방향: "escalate unless proven-safe"로 기본값 역전. 결정 레이어 순서:
+     ALLOWLIST(human-persisted) → narrow FAST_TRACK → novelty/history → package 3-tuple → gray-zone → complexity tax → origin-weighted cloud judge → human.
+   [non-negotiable 불변식]
+   - INV-1: :1163 fail-open catch-all 삭제. 모든 approval_bias 값(permissive 포함)에서 재도입 금지.
+   - INV-2: degraded-SAST(:1160-1161)는 narrow allowlist 통과분 외 auto-approve 금지 → escalate/cloud judge.
+   [핵심 불변식]
+   - INV-3/4: novelty gate의 "승인 이력"은 (a)human APPROVED escalation (b)user_allowlist (c)고신뢰 cloud judge만.
+     legacy pattern_stats.auto_approved_count(FAST_TRACK_AST) 상속 금지. 마이그레이션 시 learned-safe 셋 empty.
+   - INV-5/6: fast-track auto-approve는 명시적 closed enum(ls/pwd/cat/head/tail/git status·log·diff…) +
+     셸 메타문자(| & ; $() backtick <() > >> && ||) 및 forensic/네트워크 primitive(strings xxd base64 curl ssh …) 거부.
+     #1825가 fast-track set에 절대 미포함되도록 단위테스트.
+   - INV-7: normalize_command canonical화(순서안정 토큰, 버전→<VER> 폴딩, 플래그 정규화) + 순수함수 테스트표:
+     foo==2.31.0 ≡ foo==2.31.1(동일키), brew install foo ≠ brew install bar(상이키), bare brew upgrade는 별개키.
+   - INV-8..11: 패키지 classifier가 (manager, action_class, package_list) 반환. action_class ∈ {MUTATING, READ_ONLY}.
+     MUTATING은 기본 escalate(정확 (action,package,version) + human승인 + 세션TTL + 스코프 내에서만 auto-approve).
+     무패키지 변이(brew upgrade/npm ci/brew bundle/apt upgrade)는 무조건 escalate.
+     npm ci·pip uninstall·brew uninstall·apt purge는 MUTATING(파괴). 미등록 매니저는 escalate(fail-closed).
+     gray_zone_evaluator.py:379-380에서 brew/pip/apt가 HEAVY_EXEC 누락으로 READ→ALLOW 되는 갭도 수정.
+   - INV-12: origin 임계값은 watcher가 생산한 단일 Origin enum만 사용. INJECTED/EMERGENT는 hard-escalate.
+     Origin.HUMAN은 agent_kind=="human"일 때만 부여(테스트 보장). origin weighting은 마지막 안전 레버로 구현(스푸핑 위험).
+   - INV-13: anti-fatigue(배치 집계 + scope+TTL 캐싱 + one-key approve)는 novelty gate와 동시 ship. 필수 전제.
+   [configurability]
+   - guard_config에 approval_bias ∈ {conservative(default), balanced, permissive} (TUI 버튼, human-only write).
+     각 레이어 override(novelty_gate_enabled, cloud_judge_min_confidence, package_approve_ttl_seconds, fast_track_mode)가 진실공급원.
+   - guardrail: (1)catch-all 제거 unconditional (2)활성 bias를 audit row+배너 기록 (3)human-only 쓰기+변경 audit
+     (4)fail-open tripwire: permissive에서 human승인 0건 fast-track auto-approve 비율 임계 초과 시 경고 (5)default conservative.
+   [edge cases (§6) — 구현 전 스펙 필요]
+   - npm install(무패키지)·pip install -r/-e .·--cask 네임스페이스 충돌·multi-package·brew bundle·npm ci·
+     버전 문법(@latest/^/>=)·sudo-prefixed install(스트립 금지)·brew update/cleanup·npm audit vs audit fix·
+     미등록 매니저(yarn/pnpm/bun/nix/go install)·READ 쿼리 네트워크(brew search/npm view) 라우팅.
+    [milestone 순서]
+    1) [x] narrow AST + catch-all 제거 (PR #126) 2) [x] novelty/history gate + scope/TTL (PR #128) 3) [ ] complexity
+    4) [ ] package manager 5) [ ] origin weighting(마지막) 6) [ ] cloud judge confidence 상향
+    7) [ ] anti-fatigue batch 집계 (INV-13 잔여, 2b)
+
+TASKS:
+[] context compact 구현
+[] test code를 source code와 동일한 folder구조를 가지거나, (Most recommanded) Python 관례상 가장 best practice가 되도록 테스트 코드 위치가 수정되도록 refactor
+[x] Fullscreen 및 detail item 화면에서 마우스만으로 컨트롤 가능하게 X 버튼 구현 (PR #104). ModalCloseMixin + MODAL_CLOSE_CSS 공용 컨벤션으로 일반화.
+[x] Schengen gatekeeper message에 Time format 추가 (PR #103): HH:MM:SS + 날짜는 일자 변경 시에만.
+
+[x] 승인/거절 provenance(당사자) 명확화 — APPROVED/REJECTED/UNANSWERED resolution에 대해 (PR #125)
+   [정확 감지 가능]:
+     1) machine  (guard auto-approve → decision=AUTO_APPROVED)
+     2) human-tui (gatekeeper LLM / /approve /reject → adjudication_log.action)
+   [정확 감지 불가 → 나머지 버킷으로 축소]:
+     3) other/remainder (= machine/tui 외 나머지. pane 직접 입력 y/n/esc는 출처 구분 불가 —
+        send-keys든 사용자 타이핑이든 둘 다 pane PTY로 들어가 pane 텍스트에 안 남음)
+   - best-effort y/n 추론(선택, 의미 있음): dialog clear 후 command 실제 실행 여부 등으로 승인/거절 간접 추론.
+     단 조용한 실행/재프롬프트 시 오판 가능 → 신뢰도 낮음, 별도 표기.
+   - 필요 시 audit_logs/adjudication_log에 approver provenance 컬럼 추가 (machine / human-tui / other)
+   - TUI audit table/detail 모달에 approver 배지 표시 (예: 🤖 / 👤 / ❓)
+    - Reject/Unknown도 동일 적용 (reject: machine-no-autoreject / human-tui / other)
+
+Idea / Research:
+[] [Idea] TUI 런타임 핫 리로드(Hot-reloadable) Persistent Allowlist & 동적 Policy CUD 생명주기 관리
+   - Context & Problem:
+     - 현재 fail-closed 강화(INV-1/2)로 인해 안전하고 반복적인 명령/파일 작업(예: Codex `edit_file`, 워크스페이스 내 빌드·테스트 스크립트 등)도 매번 에스컬레이션되어 에이전트의 자율성(Autonomy) 및 작업 지속성이 저해됨.
+     - 특히 Codex `edit_file` 등은 세션 인메모리(transient)에서만 승인되고, 영속적(Persistent) 관점의 룰 관리가 부재함.
+     - 인간이 TUI 화면(승인 전/중) 또는 Gatekeeper Tool Call 인터페이스를 통해 영속적 allowlist를 동적으로 정의하고, 데몬 재시작 없이 런타임에 핫 리로드(Hot-reload)할 수 있는 체계가 필요함.
+     - 동시에 False Positive로 잘못 승인된 룰을 철회(Revoke)하거나 Stale 룰을 정리할 수 있는 완전한 CUD(Create, Update, Delete) 사이클이 요구됨.
+   - Architecture & Key Requirements:
+     1. Hot-Reloadable Config & Tool Call Surface:
+        - TUI UX: 승인 모달에서 "Always Allow & Persist", 전용 Policy 관리 모달, 또는 Gatekeeper LLM Tool Call(`add_allowlist_rule`, `update_allowlist_rule`, `revoke_allowlist_rule`)을 통해 동적 반영.
+        - Runtime Sync: SQLite/JSON 설정 변경 시 Inotify/Watcher 또는 config 버저닝을 통해 데몬/Watcher에 무중단 핫 리로드.
+     2. Policy Schema & CUD Lifecycle:
+        - Rule Schema: `{ id, pattern/AST, target_agent (all|codex|opencode|agy), scope (repo|cwd|pane|global), action_type (exec|edit_file|network), ttl/expiry, status (ACTIVE|REVOKED), created_by (human-tui|tool), reason, created_at }`
+        - Create: 인간 승인 또는 Gatekeeper의 타당성 검증을 거친 영속 룰 생성.
+        - Update: 적용 스코프(세션 → repo 전체 등) 확장 또는 조건 조정.
+        - Delete / Revoke: False Positive 발생 시 즉시 상태를 REVOKED로 전환하여 fail-closed 에스컬레이션으로 즉시 원복.
+     3. Codex `edit_file` & Safe File Mutations 전용 연계:
+        - 저장소 내부 안전한 파일 수정 패턴(예: `TODO_*.md`, `docs/*`, 테스트 대상 소스 경로 등)에 대해 AST/경로 검증 후 영속 allowlist 매칭 지원.
+     4. Fail-Closed 불변식 (Invariants):
+        - INV-PL-1 (Human Provenance): 오직 인간 TUI 입력 또는 인간이 승인한 Gatekeeper Tool Call에 의해서만 영속 룰 CUD 가능 (Untrusted 피감시 에이전트의 임의 룰 주입 원천 차단).
+        - INV-PL-2 (Revocation Immediacy): REVOKED 처리된 룰은 모든 캐시/메모리에서 즉시 무효화되어 fallback fail-closed 경로로 진입.
+        - INV-PL-3 (Audit Trail): 모든 CUD 변경 이력은 `audit_log` 및 `adjudication_log`에 영구 기록.
+
+[] [Task/Feature] 에스컬레이션 로그(#1800~) 기반 Fast-Track 후보군 발굴 및 TUI 명령/Tool Call 등록 체계 구현
+   - Context:
+     - fail-closed 편향 전환 이후 #1800~#1970 구간의 에스컬레이션 88건 분석 결과, 안전한 읽기 전용 파이프라인/Git 조회/테스트 실행이 복합 명령(;, &&, |) 결합으로 인해 과도하게 에스컬레이션됨.
+     - 인간이 TUI 프롬프트 창이나 Gatekeeper Tool Call(`add_fast_track_pattern`, `register_allowlist_rule`)을 통해 손쉽게 패턴을 allowlist에 등록하고 제어할 수 있는 실행 경로 필요.
+   - Key Subtasks & Requirements:
+     1. #1800~ 에스컬레이션 분석 기반 Fast-Track Allowlist 후보군 5개 범주 전면 반영:
+        - [1. Read-Only Code/File Inspection 체인] (40건 분석 반영):
+          • `sed -n '<range>p' <file>`, `rg <pattern> <path>`, `grep <pattern>`, `cat <file>`, `head -n <N>`, `tail -n <N>`, `pwd && rg --files ...`
+          • 리다이렉트(`>`, `>>`), 치환 쓰기(`sed -i`), 삭제(`rm`)가 배제된 순수 Read-only 파이프라인/복합문 체인(`|`, `&&`, `;`)의 Fast-Track Safe 처리 (아래 민감 파일 Denylist 준수 전제).
+        - [2. Git Read-Only Inspection & CWD 이동 체인] (5건 분석 반영):
+          • `git (-C <path> )?(status|log|diff|branch|worktree list)(\s+[^;&|<]+)?`
+          • `cd <repo_path> && git status --short && git log -1` 및 `git diff --check`, `git worktree list | grep ...` 등 비파괴적 저장소 상태 조회 허용.
+        - [3. Salada Forgejo CLI 읽기 전용 조회 서브커맨드] (2건 분석 반영):
+          • `.*salada-forgejo\.sh (issue list|issue view|pr list|pr view|branch list).*`
+          • 단순 이슈/PR 목록 및 내용 조회의 자율 승인 (단, `pr create`, `issue close` 등 변이성 명령은 Human Review 유지).
+        - [4. SQLite 안전 조회 및 스키마 검사] (5건 분석 반영):
+          • `sqlite3 <db> "(\.tables|\.schema.*|SELECT .*)"`
+          • 불변 쿼리 및 메타데이터 조회 허용 (단, `INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH` 등 데이터/스키마 변이 키워드는 Fail-Closed 차단).
+        - [5. Local Test Runner (단위 테스트 실행)] (5건 분석 반영):
+          • `(HERDR_ENV=1 )?(~/.local/share/[^/]+/bin/)?python3 -m unittest discover -s tests.*`
+          • `pytest tests/.*`
+          • 프로젝트 내부 격리된 테스트 스위트 실행의 세션/CWD 스코프 자동 승인.
+     2. [보안 기획 보강] 읽기 명령(sed, rg, grep, cat 등) 대상 민감 파일 Denylist 차단 체계:
+        - 원칙: `sed`, `rg` 등이 read-only fast-track 허용 대상이라도, 조회 대상 파일/디렉터리가 민감 경로에 해당하면 무조건 fail-closed 에스컬레이션.
+        - 민감 파일 패턴(Sensitive Denylist):
+          • 환경변수/설정: `.env*`, `*.env`, `local.properties`, `settings.json`(시크릿 포함 경로)
+          • 인증키/인증서: `~/.ssh/*`, `*.key`, `*.pem`, `id_rsa*`, `id_ed25519*`, `*.p12`, `*.pfx`, `known_hosts`, `authorized_keys`
+          • 클라우드/API 자격증명: `~/.aws/*`, `~/.config/gcloud/*`, `~/.kube/config`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `*token*`, `*credential*`, `*secret*`
+          • 히스토리/키체인/볼트: `~/.zsh_history`, `~/.bash_history`, `*.kdbx`, `*.keychain*`
+        - 불변식 (Invariants):
+          • INV-SENS-1 (Target Path AST Parsing): AST 파서가 명령 인자에서 파일 경로/glob을 분리 및 절대경로 canonical화 후 Sensitive Denylist 대조.
+          • INV-SENS-2 (Broad Wildcard Hard-Escalate): 광범위 탐색(예: `rg pattern ~`, `cat .*`, `grep -r /`)으로 민감 경로 침범 가능성이 있을 시 fast-track 배제 및 human 에스컬레이션.
+          • INV-SENS-3 (Redaction Linking): 민감 경로 접근 시 TUI 프롬프트/로그 상에 시크릿 누출 방지를 위한 redaction 연동.
+     3. TUI Slash Command / Tool Call 인터페이스 구현:
+        - TUI Command: `/allow <pattern>`, `/allow-last` (직전 에스컬레이션 등록), `/allow-list` (현재 등록 목록), `/revoke <id>`
+        - Gatekeeper Tool Calling: `register_allowlist(pattern, scope, reason)` tool call 지원 및 인간 확인 후 핫 리로드.
+
+[] [Task/Architecture] Inspector 비동기 평가 병렬성(Concurrency 10) 확장 & 인간 승인 순차(Sequential) 단일 큐 분리
+   - Context & User Observation:
+     - [기존 문제점]: 현재 Inspector가 평가를 시작하기만 해도 TUI에 `▶ Escalation Intercepted` 알림/사운드가 발생하여 인간의 작업 흐름을 방해함.
+     - 또한 `schengen_watcher` 메인 루프의 순차 동기 처리로 인해 여러 Pane의 평가가 직렬화(Serialization)되어 지연 병목 발생.
+   - User Expected UX & Design Requirements:
+     1. [Silent Background Inspection]:
+        - 명령 인터셉트 시 즉시 TUI에 알림을 띄우지 않고, 백그라운드에서 최대 10개까지 병렬(`ThreadPoolExecutor(max_workers=10)` / `asyncio.Semaphore(10)`)로 AST/SAST/Cloud Inspector 평가 수행.
+        - 자율 판정 결과 `AUTO_APPROVED` (Fast-Track / Allowlist / Cloud Safe)인 경우, 인간 개입 없이 즉시 승인 키 전송 및 `audit_log` 기록 (사용자 화면 방해 Zero).
+     2. [Sequential Single-Slot Human Adjudication (단일 순차 승인 큐)]:
+        - 오직 Gatekeeper/Inspector가 "자체 판정 불가 / 인간 검토 필수(Gray-Zone / Fail-Closed Denylist / Uncertain)"로 최종 결론 내린 건에 한해서만 인간 승인 대기열(`pending_escalations`)로 이관.
+        - TUI 화면에는 동시에 여러 알림이 난립하지 않고 **오직 1개의 활성 에스컬레이션 메세지/모달만 순차적(FIFO)**으로 노출.
+        - 인간이 현재 노출된 건을 승인/거절 완료하면, 백그라운드 큐/버퍼에 대기 중이던 다음 인간 검토 대상 건이 즉시 화면에 이어서 나타남.
+     3. Invariants & Guardrails:
+        - INV-CONC-1 (Per-Pane In-Flight Lock): 동일 Pane에 대해 중복/경합 평가 방지.
+        - INV-CONC-2 (Silent Autonomous Execution): 자율 승인 가능한 건은 인간 UI(채팅창, 사운드, 모달)에 일체 인터럽트 금지.
+        - INV-CONC-3 (Sequential Screen Slot): 화면 활성 승인 프롬프트는 항상 단일 슬롯(Single Slot) 유지, 후속 건은 버퍼 큐에서 대기.
+        - INV-CONC-4 (Stale Eviction): 인간이 화면에서 승인하기 전 대상 Pane에서 유저가 직접 처리하거나 상태가 해제된 경우 큐에서 자동 제거.
+
+[] [Task/UX] TUI 채팅 발화 주체 명확화: 시스템 자동 트리거(System/SmartGate)와 인간 지휘관(Commander/User) 프롬프트 분리
+   - Context & Problem:
+     - 현재 에스컬레이션 발생 시 TUI 내부에서 LLM 조사를 위해 주입하는 합성 프롬프트(`New escalation intercepted...`)가 `👤 You:`로 출력되어, 마치 인간 사용자가 직접 타이핑한 발화처럼 오인되는 UX 혼선 발생.
+   - Solution & Design:
+     1. 발화 주체(Role) 분리:
+        - [인간 입력 (Human Command)]: `21:39:24 👤 Commander:` 또는 `21:39:24 👤 User:` (실제 TUI 인풋 박스에서 엔터로 제출한 경우만)
+        - [시스템 내부 트리거 (System Event)]: `21:39:24 ⚡ [System / SmartGate Trigger]:` 또는 내부 합성 프롬프트는 채팅 텍스트로 노출하지 않고 `⚡ Investigating Escalation #XXXX with tools...` 형태의 dim status/badge로만 간결하게 표시.
+     2. Implementation Point:
+        - `process_user_chat(msg, is_system_trigger=False, origin="commander")` 인자 추가.
+        - `is_system_trigger=True`일 때는 `👤 You:` 출력 스킵 혹은 `⚡ [System]:` 전용 스타일 렌더링.
+
+[] [Research/Stability] LLM Base URL 엔드포인트 서버 상태 이상(Unhealthy/Hang) 감지 및 재시작/복구(Auto-Restart) 로직 분석 및 강화
+   - Context & Objective:
+     - SmartGate/Inspector가 호출하는 LLM Base URL(로컬 모델 서버, vLLM, Synology 컨테이너, 프록시 등)이 응답 불가(Hang/Timeout/5xx) 상태에 빠졌을 때의 현재 재시작/장애 복구 메커니즘을 점검.
+   - Investigation Checkpoints:
+     1. 현재 구현 분석:
+        - `scripts/tools/schengen_agent_llm.py` 및 `security_evaluator.py`의 retry(최대 10회), TCP timeout, fallback(Fail-Closed/Human Review) 처리 로직 현황 파악.
+        - 로컬/원격 LLM 데몬(컨테이너, 프로세스) 헬스체크 및 프로세스 재시작 트리거 연계 여부 조사.
+     2. 향후 개선 검토:
+        - Health Check 프로브(지속 실패 시 서킷 브레이커 발동).
+        - 원격/로컬 컨테이너(Synology Docker / 로컬 서비스) 자동 재시작 스크립트/Webhook 연계 가능성 검토.
+        - LLM 서버 다운 시 무한 대기 방지 및 안전한 Fail-Closed 에스컬레이션 보장.
+
+
+
