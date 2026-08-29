@@ -946,6 +946,7 @@ class DecisionLayer(str, Enum):
     FAST_TRACK_AST = "FAST_TRACK_AST"  # Layer 8: Fast-track static safe development operations
     NOT_ALLOWLISTED = "NOT_ALLOWLISTED"  # Fail-closed default: not in fast-track allowlist, requires human review
     HUMAN_APPROVED = "HUMAN_APPROVED"  # Novelty gate: canonical pattern has prior human approval (scope+TTL)
+    PACKAGE_GUARD = "PACKAGE_GUARD"  # Package-manager 3-tuple classifier (MUTATING vs READ_ONLY)
 
 
 # INV-6: forensic / network primitives must NEVER fast-track (binary inspection / egress)
@@ -1090,6 +1091,61 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     if _BROAD_WILDCARD_RE.search(cmd_str):
         return False
     return True
+
+
+# INV-8..11: package-manager 3-tuple classifier (MUTATING vs READ_ONLY)
+PACKAGE_MANAGERS = {"brew", "npm", "pip", "pip3", "cargo", "apt", "apt-get", "pnpm", "yarn"}
+
+PACKAGE_MUTATING_ACTIONS = {
+    "install", "i", "uninstall", "remove", "rm", "upgrade", "update",
+    "reinstall", "ci", "bundle", "add", "purge", "clean", "cleanup", "autoclean",
+    "link", "unlink", "pin", "unpin", "config",
+}
+
+PACKAGE_READONLY_ACTIONS = {
+    "list", "ls", "info", "search", "view", "show", "outdated", "leaves",
+    "doctor", "desc", "deps", "why",
+}
+
+
+def classify_package_command(cmd_str: str) -> Optional[tuple[str, str, list[str]]]:
+    """Classify a package-manager command as (manager, action_class, packages), or None.
+
+    action_class is 'MUTATING' or 'READ_ONLY'. Returns None for non-package commands
+    or unknown actions (so they fall through to the fail-closed default).
+    """
+    # Metacharacter / redirection / command-substitution guard: any command
+    # containing these MUST NOT auto-approve via the READ_ONLY path (e.g.
+    # `brew list | bash`, `npm view react > /tmp/out`, `pip list >> ~/.zshrc`,
+    # `brew list\nbash -c id` — newline/carriage-return are shell separators too).
+    # Returning None falls through to the fail-closed default for BOTH paths.
+    if re.search(r"[|&;<>\n\r]|\$\(|`", cmd_str):
+        return None  # metacharacter / redirection / substitution -> fail-closed default
+    tokens = cmd_str.split()
+    if not tokens or tokens[0] not in PACKAGE_MANAGERS:
+        return None
+    manager = tokens[0]
+    # find the action: first non-flag token after the manager
+    action = None
+    idx = 1
+    while idx < len(tokens):
+        t = tokens[idx]
+        if t.startswith("-"):
+            idx += 1
+            continue
+        action = t
+        idx += 1
+        break
+    if action is None:
+        return (manager, "MUTATING", [])  # bare manager (e.g. `npm`, `brew`) — treat as unsafe
+    if action in PACKAGE_MUTATING_ACTIONS:
+        action_class = "MUTATING"
+    elif action in PACKAGE_READONLY_ACTIONS:
+        action_class = "READ_ONLY"
+    else:
+        return None  # unknown action -> not classified -> fail-closed default
+    packages = [t for t in tokens[idx:] if not t.startswith("-")]
+    return (manager, action_class, packages)
 
 
 def _audit_static_shell_command(
@@ -1323,6 +1379,14 @@ def _audit_static_shell_command(
     if has_human_approval_pattern(canonical, scope=scope, cwd=cwd):
         return True, f"Human-approved pattern (session): '{canonical}'", DecisionLayer.HUMAN_APPROVED
 
+    # INV-8..11: package-manager 3-tuple classifier (READ_ONLY fast-track, MUTATING escalate)
+    pkg = classify_package_command(cmd_str)
+    if pkg is not None:
+        manager, action_class, packages = pkg
+        if action_class == "READ_ONLY":
+            return True, f"Read-only package query ({manager})", DecisionLayer.PACKAGE_GUARD
+        return False, f"Package mutation requires human review ({manager})", DecisionLayer.PACKAGE_GUARD
+
     # INV-2: degraded SAST can no longer auto-approve — fail-closed.
     if is_degraded:
         return False, "SAST tools unavailable; requires human review (fail-closed)", DecisionLayer.NOT_ALLOWLISTED
@@ -1419,6 +1483,8 @@ def derive_taxonomy(
         elif layer == DecisionLayer.HUMAN_APPROVED:
             mechanism = "human-approved-history"
             origin = Origin.HUMAN
+        elif layer == DecisionLayer.PACKAGE_GUARD:
+            mechanism = "package-read-query"
         elif layer == DecisionLayer.CLOUD_JUDGE:
             mechanism = "cloud-judge-verified"
         else:
@@ -1525,6 +1591,9 @@ def derive_taxonomy(
     elif layer == DecisionLayer.HUMAN_APPROVED:
         consequence = Consequence.NONE
         mechanism = "human-approved-history"
+    elif layer == DecisionLayer.PACKAGE_GUARD:
+        consequence = Consequence.INTEGRITY
+        mechanism = "package-mutation"
     elif layer == DecisionLayer.CLOUD_JUDGE:
         consequence = Consequence.DESTRUCTION
         mechanism = "cloud-judge-defer"
