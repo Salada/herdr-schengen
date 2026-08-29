@@ -87,6 +87,25 @@ class TestCodexAdapter(unittest.TestCase):
     def test_parse_none_when_no_dialog(self):
         self.assertIsNone(self.adapter.parse_permission_request("random terminal output"))
 
+    def test_parse_question_dialog(self):
+        text = (
+            "  Question 1/1 (1 unanswered)\n"
+            "  입력요청도구 테스트로 무엇을 선택할까요?\n\n"
+            "  › 1. 첫 번째 선택       간단한 기본 동작을 테스트합니다.\n"
+            "    2. 두 번째 선택       다른 선택지 응답을 테스트합니다.\n"
+            "    3. 직접 입력          사용자 지정 응답 흐름을 테스트합니다.\n"
+            "    4. None of the above  Optionally, add details in notes (tab).\n\n"
+            "  tab to add notes | enter to submit answer | esc to interrupt"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text),
+            "question: 입력요청도구 테스트로 무엇을 선택할까요?",
+        )
+
+    def test_parse_question_dialog_no_header_falls_back(self):
+        # Footer marker present but no "Question N/M" header -> bare sentinel.
+        self.assertEqual(self.adapter.parse_permission_request("enter to submit answer"), "question")
+
     def test_inject_approval_sends_y(self):
         with patch("adapters.agent_adapters.codex.run_cmd") as rc:
             approved, reason = self.adapter.inject_approval("w1D:p1K", "ls -la /tmp")
