@@ -20,6 +20,17 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   - 해결 방향:
     • `codex_adapter`의 프롬프트 활성 상태 검사 강화: "Would you like..." 문구뿐 아니라 실제 하단 활성 선택지(`› 1. Yes, proceed` 또는 `Confirm: y/n`) 존재 여부를 앵커링하여 이미 완료된 과거 스크롤백 텍스트 오인식 방지.
     • TUI `/approve` 및 pane 직접 `y` 키 입력 후 다이얼로그 해제 감지 시 `resolve_escalation(pane_id, approver=...)` 호출 즉시 보장.
+[] [Bug/Approval] Escalation #1910 승인 발화 성공 후 실제 Pane(OpenCode w1D:p1) 명령 미승인 현상 디버깅 및 해결:
+  - 현상 분석:
+    • DB 기록 확인: #1910(OpenCode `unittest discover ... | grep ...`)에 대해 Gatekeeper가 4차례 `APPROVE` 판정을 내리고 승인했다고 응답했으나, 실제 OpenCode 서브에이전트(Fixer) 다이얼로그(`Allow once / Allow always / Reject`)는 승인되지 않고 계속 대기 상태로 유지됨.
+  - 원인 추정 및 점검 포인트:
+    1. `opencode_adapter`의 승인 주입 방식: `client.permission.reply(permission_id)` 채널 호출 시 서브에이전트 task 내부 permission_id 누락/불일치로 RPC 무효화.
+    2. Fallback 키 주입(`herdr agent send-keys` 또는 PTY Enter): OpenCode TUI의 활성 선택자(`› Allow once`)와 포커스 상태 불일치로 엔터/단축키 미전달.
+    3. `adjudication_log`에 기록은 되었으나 `inject_approval()` 반환값 실패 처리 누락 여부 확인.
+  - 해결 방안:
+    • OpenCode 서브에이전트 권한 다이얼로그에 대한 RPC permission reply 채널 매핑 강화 및 fallback PTY 주입(Enter / Space) 보장.
+    • `inject_approval()`의 실제 전송 성공 여부를 검증하고 실패 시 Gatekeeper에게 명확한 에러 반환 및 재시도 체계 확립.
+
 
 
 Small task?
