@@ -239,6 +239,24 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
         guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved.")
         self.assertEqual(guard_db.get_escalation_resolution("w1D:p1", "rm -rf /tmp/x"), "APPROVED")
 
+    def test_question_escalation_roundtrip(self):
+        # A human question is enqueued with decision_layer="QUESTION" and stays
+        # PENDING until the pane's dialog clears (the user answers).
+        esc_id = guard_db.enqueue_pending_escalation(
+            "w1D:p1K", "question: 어떤 브랜치를 머지할까요?",
+            "Agent asked the user a question: 어떤 브랜치를 머지할까요?",
+            "QUESTION", agent_kind="codex",
+        )
+        pending = guard_db.get_pending_escalations(include_delivered=False)
+        q = next((e for e in pending if e["id"] == esc_id), None)
+        self.assertIsNotNone(q)
+        self.assertEqual(q["decision_layer"], "QUESTION")
+
+        # Resolving the pane clears the question escalation.
+        guard_db.resolve_escalation(pane_id="w1D:p1K")
+        remaining = guard_db.get_pending_escalations(include_delivered=False)
+        self.assertNotIn(esc_id, [e["id"] for e in remaining])
+
     def test_cleanup_sets_unanswered_resolution(self):
         esc_id = guard_db.enqueue_pending_escalation(
             "w1D:p1", "rm -rf /tmp/y", "destructive", "GRAY_ZONE", agent_kind="opencode"
