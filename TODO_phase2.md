@@ -42,19 +42,12 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
        - 이미 Pane에서 처리되어 사라진 경우, 사용자 화면에 알림을 띄우지 않고 큐에서 즉시 자동 퇴출(Silent Eviction).
     3. Event-Driven State Channel (선택):
        - Herdr 에이전트 상태 이벤트(Status Change Notification)를 리스닝하여 폴링 타이머 대기 없이 즉각적인 큐 클리어 트리거.
-[] [Bug/SAST] Daemon 실행 환경 PATH 누락으로 인한 SAST(shellcheck/semgrep) Degraded 과에스컬레이션(Over-escalation) 버그 (#2289 등):
-  - 현상 및 원인:
-    • TUI 또는 서브셸에서 Daemon(`schengen_watcher.py`) 기동 시 `/opt/homebrew/bin` 및 시스템 `PATH` 상속이 누락되어 `shellcheck`/`semgrep` 바이너리를 탐색하지 못함.
-    • `INV-2` 불변식(SAST 부재 시 Fail-Closed)에 의해, 단순 진단 스크립트(`herdr agent get ... | python3 -c ...`) 등 안전한 명령까지 `SAST tools unavailable` 사유로 무차별 에스컬레이션되는 장애 발생.
-  - 해결 방안:
-    1) Daemon 시작 스크립트 및 `verify_host_runtime_environment()`에서 `PATH`에 `/opt/homebrew/bin`, `~/.local/bin`, `/usr/local/bin` 자동 주입 및 사전 검증.
-    2) TUI 시스템 상태 카드/사이드바에 `SAST: READY` vs `SAST: DEGRADED` 인디케이터 시각화.
-[] [Bug/Adapter] Codex Adapter edit-dialog 포맷 불일치(`Destination:` vs `*** Update File:`)로 인한 Fail-closed 오차단 버그:
-  - 현상 및 원인:
-    • `scripts/adapters/agent_adapters/codex.py:112`의 정규식이 `*** (Add|Update|Delete) File:`만 기대하여, 실제 Codex CLI가 출력하는 `Destination: <path>` 또는 `File: <path>` 형태의 파일 편집 다이얼로그에서 대상 경로를 추출하지 못함.
-    • 경로가 누락된 bare `edit_file`로 축소되어 `security_evaluator.py`에서 Pathless 파일 편집으로 판정, 정상 파일 수정이 모두 fail-closed로 거부/에스컬레이션됨.
-  - 해결 방안:
-    • `codex_adapter`에 `Destination:\s*(\S+)`, `File:\s*(\S+)`, `*** (Add|Update|Delete) File:` 다중 템플릿 정규식 지원 및 대상 파일 경로 추출 안정화.
+[x] [Bug/SAST] Daemon 실행 환경 PATH 누락으로 인한 SAST(shellcheck/semgrep) Degraded 과에스컬레이션 버그 (PR #132): `_inject_runtime_path()`로 런타임 bin 디렉터리 주입 완료.
+[x] [Bug/Adapter] Codex Adapter edit-dialog 포맷 불일치(`Destination:` vs `*** Update File:`)로 인한 Fail-closed 오차단 버그 (PR #133): `Destination:` 및 `File:` 정규식 템플릿 지원 완료.
+[] [Refactor/Codex] Codex edit-dialog 파서 정밀화 3종 (#52 피어리뷰 후속):
+  1) `Destination:` 우선 요구 및 `File:` 과포괄(다이얼로그 내 임의의 File: 라인 캡처) 방지 정밀 매칭.
+  2) `re.IGNORECASE` 적용: 소문자 `destination:` / `file:` 매칭 누락으로 인한 오차단(over-block) 방지.
+  3) `edit_file {dests[0].strip()}`의 중복 `.strip()` 제거 정리.
 [] [Prerequisite/Host] 호스트 머신 semgrep 바이너리 미설치로 인한 SAST DEGRADED 해소 (중요):
   - 현상: #45 PATH 주입 수정 후에도 호스트 자체에 `semgrep` 바이너리가 미설치되어 SAST가 `DEGRADED (missing semgrep)`로 유지됨.
   - 조치: 호스트 환경에 semgrep 설치 (`brew install semgrep` 또는 venv 내 `pip install semgrep`) 및 `docs/setup.md` 요구사항 반영.
@@ -63,6 +56,7 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   2) 빈 PATH 항목(`.`) 처리: `os.environ["PATH"].split(":")` 필터 시 빈 항목 drop 동작 정리 및 명시적 문서화.
   3) 플랫폼 가드: `_RUNTIME_BIN_DIRS`에 macOS 전용(`/opt/homebrew`, `/usr/local`) 외 `sys.platform` 분기 및 Linux 경로 지원.
   4) 실행 순서 최적화: `SAST telemetry print`가 host-runtime gate 검증 완료 후 출력되도록 순서 조정.
+
 
 
 
