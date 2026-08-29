@@ -376,7 +376,7 @@ def classify_operation(cmd_str: str) -> tuple[OperationType, Optional[str]]:
         return OperationType.READ, (targets[0] if targets else None)
 
     # 5. Heavy Execution
-    if cmd_verb in ("make", "cargo", "pytest", "npm", "pnpm", "bun", "docker", "mise"):
+    if cmd_verb in ("make", "cargo", "pytest", "npm", "pnpm", "bun", "docker", "mise", "brew", "pip", "pip3", "apt", "apt-get", "yarn", "gem"):
         return OperationType.HEAVY_EXEC, cmd_verb
 
     return OperationType.READ, (cleaned_tokens[1] if len(cleaned_tokens) > 1 else None)

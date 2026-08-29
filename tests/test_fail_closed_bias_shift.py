@@ -31,11 +31,13 @@ class TestFailClosedBiasShift(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
 
     def test_non_allowlisted_package_mutation_fail_closed(self):
-        # `brew install` / `pip install` are not provably benign -> escalate.
+        # `brew install` / `pip install` are package MUTATIONS -> escalate. Since
+        # Milestone 4 they are classified by the package-manager guard and escalate
+        # via PACKAGE_GUARD (previously NOT_ALLOWLISTED) — never auto-approved.
         for cmd in ("brew install git", "pip install requests"):
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
-            self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
+            self.assertIn(layer, (DecisionLayer.NOT_ALLOWLISTED, DecisionLayer.PACKAGE_GUARD))
 
     def test_readonly_pipelines_now_fast_track(self):
         # Milestone 3 widening: pure read-only pipelines (every segment read-only,
@@ -87,10 +89,20 @@ class TestFailClosedBiasShift(unittest.TestCase):
             self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
     def test_not_allowlisted_layer_taxonomy(self):
-        # NOT_ALLOWLISTED must derive a stable taxonomy mechanism.
+        # NOT_ALLOWLISTED must derive a stable taxonomy mechanism. Since Milestone 4
+        # the example `brew install git` is classified by the package guard instead
+        # (PACKAGE_GUARD / package-mutation) — so exercise the NOT_ALLOWLISTED
+        # taxonomy with a non-package command that still hits the fail-closed default.
         from core.security_evaluator import Consequence, audit_shell_command_with_taxonomy
 
         safe, reason, layer, tax = audit_shell_command_with_taxonomy("brew install git")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.PACKAGE_GUARD)
+        self.assertEqual(tax["consequence"], Consequence.INTEGRITY.value)
+        self.assertEqual(tax["mechanism"], "package-mutation")
+        self.assertFalse(tax["counterfactual_block"])
+
+        safe, reason, layer, tax = audit_shell_command_with_taxonomy("some_random_tool --flag")
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
         self.assertEqual(tax["consequence"], Consequence.NONE.value)
