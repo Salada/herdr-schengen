@@ -30,6 +30,19 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   - 해결 방안:
     • OpenCode 서브에이전트 권한 다이얼로그에 대한 RPC permission reply 채널 매핑 강화 및 fallback PTY 주입(Enter / Space) 보장.
     • `inject_approval()`의 실제 전송 성공 여부를 검증하고 실패 시 Gatekeeper에게 명확한 에러 반환 및 재시도 체계 확립.
+[] [Task/Architecture] Pane 직접 승인(Pane-Direct Adjudication) 실시간 감지 및 Stale Escalation 자동 해제(Auto-Eviction) 아키텍처 구현:
+  - Context & Problem (사례: #2108 등):
+    • 사용자가 TUI를 거치지 않고 대상 Pane(AGY/OpenCode/Codex)에서 직접 `1. Yes`나 `y`를 입력하여 승인·진행했음에도, Daemon과 TUI가 이를 실시간으로 감지하지 못해 수 분 동안 `pending_escalations` 큐에 Stale 상태로 잔류하는 현상 발생.
+  - Architecture & Solution Design:
+    1. Daemon 감시 루프 실시간 상태 검증(Live Revalidation):
+       - Herdr `state_change_seq` 변경 또는 매 폴링 시 활성 에스컬레이션 대상 Pane의 실시간 다이얼로그 존재 여부 즉시 재확인.
+       - 프롬프트 텍스트가 사라졌거나 에이전트 상태가 `blocked` → `working` / `idle`로 전이된 경우, 즉시 `resolve_escalation(pane_id, resolution="APPROVED", approver="pane-direct")` 호출.
+    2. TUI 화면 렌더링 전 Live Slot 검증(Pre-Render Slot Validation):
+       - TUI가 인간에게 새 에스컬레이션 모달/배너를 띄우기 직전, 해당 Pane의 실제 다이얼로그 생존 여부를 1회 즉시 조회.
+       - 이미 Pane에서 처리되어 사라진 경우, 사용자 화면에 알림을 띄우지 않고 큐에서 즉시 자동 퇴출(Silent Eviction).
+    3. Event-Driven State Channel (선택):
+       - Herdr 에이전트 상태 이벤트(Status Change Notification)를 리스닝하여 폴링 타이머 대기 없이 즉각적인 큐 클리어 트리거.
+
 
 
 
