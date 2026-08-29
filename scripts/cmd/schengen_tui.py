@@ -75,6 +75,7 @@ from core.guard_db import (
     get_answer_language,
     get_audit_log_by_id,
     get_channel_approve_config,
+    get_escalation_approver,
     get_escalation_resolution,
     get_instruction_delivery_config,
     get_pending_escalations,
@@ -110,6 +111,17 @@ def format_resolution_badge(resolution: Optional[str], short: bool = False) -> s
         return "[red]RJ[/]" if short else "[red]REJECTED[/]"
     if resolution == "UNANSWERED":
         return "[yellow]UA[/]" if short else "[yellow]UNANSWERED[/]"
+    return "[dim]—[/]"
+
+
+def format_approver_badge(approver: Optional[str], decision: str = "") -> str:
+    """Render WHO approved/rejected an escalation: machine / human-tui / other."""
+    if decision in ("AUTO_APPROVED", "ALLOWLIST_BYPASS"):
+        return "[dim]machine[/]"
+    if approver == "human-tui":
+        return "[cyan]human-tui[/]"
+    if approver == "other":
+        return "[dim]other[/]"
     return "[dim]—[/]"
 
 
@@ -491,10 +503,11 @@ class AuditDetailModal(ModalCloseMixin, ModalScreen):
         dec = log.get("decision", "")
         badge = "[green]APPROVED[/]" if "APPROVE" in str(dec) else "[red]ESCALATED[/]"
         resolution = get_escalation_resolution(log.get("pane_id", ""), log.get("raw_command", ""))
+        approver = get_escalation_approver(log.get("pane_id", ""), log.get("raw_command", ""))
         fields = (
             f"[bold]ID[/]: #{log['id']}    [bold]Time[/]: {format_local_time(log.get('timestamp', ''))}\n"
             f"[bold]Pane[/]: {log.get('pane_id', '')}    [bold]Agent[/]: {log.get('agent_kind', 'unknown')}\n"
-            f"[bold]Verdict[/]: {badge}    [bold]Resolution[/]: {format_resolution_badge(resolution)}\n"
+            f"[bold]Verdict[/]: {badge}    [bold]Resolution[/]: {format_resolution_badge(resolution)}    [bold]Approver[/]: {format_approver_badge(approver, dec)}\n"
             f"[bold]Layer[/]: {log.get('decision_layer', 'FAST_TRACK_AST')}\n"
             f"[bold]Reason[/]: {rich_escape(str(log.get('safety_reason', '')))}\n"
             f"[bold]Origin[/]: {log.get('origin', 'A')}    [bold]Consequence[/]: {log.get('consequence', 'NONE')}    [bold]Mechanism[/]: {log.get('mechanism', 'none')}\n"
@@ -1356,12 +1369,13 @@ class SchengenTUIApp(App):
                 
                 dec = log['decision']
                 resolution = log.get('resolution')
+                approver = log.get('approver')
                 if "APPROVE" in dec:
                     badge = "[green]OK[/]"
                 elif resolution == "APPROVED":
-                    badge = "[green]AP[/]"
+                    badge = "[green]AP·👤[/]" if approver == "human-tui" else "[green]AP·❓[/]"
                 elif resolution == "REJECTED":
-                    badge = "[red]RJ[/]"
+                    badge = "[red]RJ·👤[/]" if approver == "human-tui" else "[red]RJ·❓[/]"
                 elif resolution == "UNANSWERED":
                     badge = "[yellow]UA[/]"
                 else:

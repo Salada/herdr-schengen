@@ -867,7 +867,7 @@ def main():
                 if not req_cmd:
                     # Prompt is no longer active; reset last_processed_prompt for this pane
                     if pane_id in last_processed_prompt:
-                        resolve_escalation(pane_id=pane_id)
+                        resolve_escalation(pane_id=pane_id, approver="other")
                         last_processed_prompt.pop(pane_id, None)
                     continue
 
@@ -1015,7 +1015,7 @@ def main():
                                         "is_safe": True,
                                         "last_alert_time": now,
                                     }
-                                    resolve_escalation(pane_id=pane_id)
+                                    resolve_escalation(pane_id=pane_id, approver="machine")
                                     continue
                                 print(
                                     f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
@@ -1078,7 +1078,7 @@ def main():
                         "is_safe": True,
                         "last_alert_time": now,
                     }
-                    resolve_escalation(pane_id=pane_id)
+                    resolve_escalation(pane_id=pane_id, approver="machine")
                 else:
                     # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
                     escalate_request(pane_id, pane_info, req_cmd, reason, layer, agent_kind, visible_text=visible_text)

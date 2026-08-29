@@ -173,6 +173,8 @@ def init_db():
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN dialog_snapshot TEXT")
         if "resolution" not in p_columns:
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN resolution TEXT")
+        if "approver" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN approver TEXT")
 
         # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
@@ -499,7 +501,8 @@ def get_recent_audit_logs(
     query = """
         SELECT a.id, a.timestamp, a.pane_id, a.agent_kind, a.raw_command, a.normalized_pattern,
                a.decision, a.safety_reason, COALESCE(a.decision_layer, 'FAST_TRACK_AST') AS decision_layer,
-               pe.resolution AS resolution
+               pe.resolution AS resolution,
+               pe.approver AS approver
         FROM audit_logs a
         LEFT JOIN pending_escalations pe ON pe.pane_id = a.pane_id AND pe.raw_command = a.raw_command
         WHERE 1=1
@@ -558,6 +561,17 @@ def get_escalation_resolution(pane_id: str, raw_command: str) -> Optional[str]:
             (pane_id, raw_command),
         ).fetchone()
     return row["resolution"] if row else None
+
+
+def get_escalation_approver(pane_id: str, raw_command: str) -> Optional[str]:
+    """Return the approver (machine/human-tui/other) for a command's escalation."""
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT approver FROM pending_escalations WHERE pane_id = ? AND raw_command = ? ORDER BY id DESC LIMIT 1",
+            (pane_id, raw_command),
+        ).fetchone()
+    return row["approver"] if row else None
 
 
 def get_adjudications_for_audit(
@@ -747,7 +761,7 @@ def record_adjudication(
         )
         if escalation_id:
             conn.execute(
-                "UPDATE pending_escalations SET resolution = ? WHERE id = ?",
+                "UPDATE pending_escalations SET resolution = ?, approver = 'human-tui' WHERE id = ?",
                 (resolution, escalation_id),
             )
         conn.commit()
@@ -886,6 +900,7 @@ def resolve_escalation(
     escalation_id: Optional[int] = None,
     resolution_status: str = "RESOLVED",
     is_approval: bool = False,
+    approver: Optional[str] = None,
 ):
     """Mark escalation(s) as resolved or cancelled after user/agent action (ACK)."""
     init_db()
@@ -907,28 +922,28 @@ def resolve_escalation(
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?
+                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver)
                 WHERE id = ?
             """,
-                (resolution_status, now_iso, escalation_id),
+                (resolution_status, now_iso, approver, escalation_id),
             )
         elif command_hash:
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?
+                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver)
                 WHERE pane_id = ? AND command_hash = ? AND status IN ('PENDING', 'DELIVERED')
             """,
-                (resolution_status, now_iso, pane_id, command_hash),
+                (resolution_status, now_iso, approver, pane_id, command_hash),
             )
         else:
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?
+                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver)
                 WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')
             """,
-                (resolution_status, now_iso, pane_id),
+                (resolution_status, now_iso, approver, pane_id),
             )
         conn.commit()
 
@@ -977,7 +992,7 @@ def cleanup_escalations(
             cursor.execute(
                 f"""
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED')
+                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED'), approver = COALESCE(approver, 'other')
                 WHERE id IN ({placeholders})
             """,
                 [new_status, now_iso] + escalation_ids,
@@ -991,7 +1006,7 @@ def cleanup_escalations(
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED')
+                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED'), approver = COALESCE(approver, 'other')
                 WHERE status IN ('PENDING', 'DELIVERED')
                   AND started_at < ?
             """,
@@ -1005,7 +1020,7 @@ def cleanup_escalations(
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED')
+                SET status = ?, last_transitioned_at = ?, resolution = COALESCE(resolution, 'UNANSWERED'), approver = COALESCE(approver, 'other')
                 WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')
             """,
                 (new_status, now_iso, pane_id),
