@@ -110,7 +110,8 @@ Idea / Research:
         - INV-PL-2 (Revocation Immediacy): REVOKED 처리된 룰은 모든 캐시/메모리에서 즉시 무효화되어 fallback fail-closed 경로로 진입.
         - INV-PL-3 (Audit Trail): 모든 CUD 변경 이력은 `audit_log` 및 `adjudication_log`에 영구 기록.
 
-[] [Task/Feature] 에스컬레이션 로그(#1800~) 기반 Fast-Track 후보군 발굴 및 TUI 명령/Tool Call 등록 체계 구현
+[x] [Task/Feature] 에스컬레이션 로그(#1800~) 기반 Fast-Track 후보군 발굴 (PR #129: sub-task 1·2 완료 — 읽기전용 파이프라인 fast-track + 민감 Denylist)
+   - 잔여: sub-task 3 (TUI Slash Command / Tool Call: /allow, /allow-last, /revoke) → Persistent Allowlist CUD(#91)와 통합 추진
    - Context:
      - fail-closed 편향 전환 이후 #1800~#1970 구간의 에스컬레이션 88건 분석 결과, 안전한 읽기 전용 파이프라인/Git 조회/테스트 실행이 복합 명령(;, &&, |) 결합으로 인해 과도하게 에스컬레이션됨.
      - 인간이 TUI 프롬프트 창이나 Gatekeeper Tool Call(`add_fast_track_pattern`, `register_allowlist_rule`)을 통해 손쉽게 패턴을 allowlist에 등록하고 제어할 수 있는 실행 경로 필요.
@@ -245,6 +246,25 @@ Idea / Research:
           • ⚡ `GATEKEEPER`
           • 🤖 `MACHINE`
           • ❓ `OTHER`
+
+[] [Task/UX] Gatekeeper 인간 위임(Delegation to Human) 메시지 가시성 및 구조화 포매팅 강화
+   - Context & Problem:
+     - Gatekeeper가 조사를 마치고 자체 승인이 불가능하여 최종 결정을 인간 지휘관에게 위임할 때, `Investigation and execution completed.`와 같은 모호하고 평이한 단문이 출력되어 인간에게 판단 위임 사실 및 권장 액션이 명확히 인지되지 못함.
+   - Solution & Structured Formatting Design:
+     1. 모호한 단문 대체: 단순 완료 메시지 대신 **구조화된 인간 위임 카드(Delegation Card)** 출력:
+        ```text
+        🚨 [bold red]▶ [Human Delegation] Escalation #<id> requires Commander Adjudication[/]
+        • [bold white]Target Pane:[/] <pane_id> (<agent>)
+        • [bold white]Command:[/] `<command>`
+        • [bold yellow]Investigation Summary:[/]
+          - Checked: <검토 대상 파일 및 호출 경로 요약>
+          - Risk / Gray-Zone: <자율 승인 불가 사유 및 리스크 요인>
+        👉 [bold cyan]Action Required:[/] Type [bold yellow]/approve <id>[/] to allow, or [bold yellow]/reject <id> [reason][/] to deny.
+        ```
+     2. Gatekeeper System Prompt & TUI Formatter 연동:
+        - `scripts/tools/schengen_agent_llm.py` 내 Gatekeeper 시스템 지침에 위임 시 구조화된 서식(Fact-sheet + Risk assessment + CTA) 생성 강제.
+        - TUI 마크다운/리치 렌더러에서 위임 메시지를 시각적 박스 또는 강조 테두리로 렌더링.
+
 
 
 
