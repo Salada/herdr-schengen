@@ -12,7 +12,7 @@ from unittest import mock
 SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from cmd.schengen_watcher import InspectorCoordinator, WATCHER_DEFAULTS, load_watcher_config
+from cmd.schengen_watcher import InspectorCoordinator, WATCHER_DEFAULTS, cancel_stale_human_escalation, load_watcher_config
 from core import guard_db
 from core.session_memory import PaneSessionMemory
 
@@ -61,6 +61,12 @@ class TestInspectorConcurrency(unittest.TestCase):
             live = {("pane-b", "b")}
             cancelled = coordinator.evict_stale_human_requests(lambda pane, command: (pane, command) in live)
             self.assertEqual(cancelled, ("pane-a", "a"))
+            with mock.patch("cmd.schengen_watcher.resolve_escalation") as resolve:
+                cancel_stale_human_escalation(*cancelled)
+            resolve.assert_called_once_with(
+                pane_id="pane-a", command_hash="ca978112ca1bbdca",
+                resolution_status="CANCELLED", approver="other",
+            )
             self.assertNotIn("pane-a", coordinator.owned)
             self.assertEqual(coordinator.human_queue[0][0], "pane-b")
         finally:

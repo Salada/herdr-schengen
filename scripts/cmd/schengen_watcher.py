@@ -165,6 +165,16 @@ class InspectorCoordinator:
         self.executor.shutdown(wait=False, cancel_futures=True)
 
 
+def cancel_stale_human_escalation(pane_id, command):
+    """Persist cancellation for a human slot invalidated by live-pane revalidation."""
+    resolve_escalation(
+        pane_id=pane_id,
+        command_hash=hashlib.sha256(command.encode("utf-8")).hexdigest()[:16],
+        resolution_status="CANCELLED",
+        approver="other",
+    )
+
+
 def sanitize_target_name(target: str) -> str:
     """Normalize target string for safe lockfile naming (e.g. 'wS:pF' -> 'wS_pF')."""
     return re.sub(r"[^a-zA-Z0-9_-]", "_", target.strip())
@@ -971,7 +981,7 @@ def main():
             cancelled = inspector.evict_stale_human_requests(human_request_is_live)
             if cancelled:
                 active_pane, active_cmd = cancelled
-                resolve_escalation(pane_id=active_pane, command_hash=hashlib.sha256(active_cmd.encode("utf-8")).hexdigest()[:16], resolution_status="CANCELLED", approver="other")
+                cancel_stale_human_escalation(active_pane, active_cmd)
             if inspector.active_human is None and inspector.human_queue:
                 queued = inspector.human_queue.popleft()
                 pane_id, pane_info, req_cmd, reason, layer, visible_text, state_seq, agent_status = queued
