@@ -1306,15 +1306,14 @@ class SchengenTUIApp(App):
                 safe_reason = rich_escape(active_esc['safety_reason'])
 
                 if is_question:
-                    # INVARIANT (AGENTS.md / adapters README): a question must NEVER
-                    # be sent to the gatekeeper LLM (process_user_chat) — that path
-                    # adjudicates (approve/reject) and would auto-resolve the question.
-                    # The user answers directly in the agent pane; the escalation
-                    # auto-resolves only when the dialog clears.
                     self._write(f"\n[cyan]{'─'*20} ❓ Question #{active_id} {'─'*20}[/]")
                     self._write(f"  [dim]Pane:[/]     {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
                     self._write(f"  [dim]Question:[/] [white]{safe_cmd}[/]")
                     self._write(f"[dim]  ↩ Answer directly in the pane — resolves automatically.[/]\n")
+                    # Read-only interpretation (NO approve/reject tools): surface the
+                    # question in the TUI chat so the user notices it, without giving
+                    # the gatekeeper any ability to adjudicate (AGENTS.md rule 10).
+                    self._interpret_question()
                 else:
                     self._write(f"\n[yellow]{'─'*20} ▶ Escalation #{active_id} Intercepted {'─'*20}[/]")
                     self._write(f"  [dim]Pane:[/]   {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
@@ -1408,6 +1407,33 @@ class SchengenTUIApp(App):
 
     def on_resize(self, event: events.Resize) -> None:
         self.update_radar_data(force=True)
+
+    @work(exclusive=False)
+    async def _interpret_question(self) -> None:
+        """Read-only interpretation of the pending question (NO adjudication tools).
+
+        Invokes the gatekeeper LLM with allow_adjudication=False so it can surface
+        and interpret the question in the chat, but can never approve/reject it.
+        """
+        if self._processing_chat:
+            return
+        self._processing_chat = True
+        try:
+            def on_tool(chunk: str):
+                self._write_markdown(chunk)
+
+            resp = await self.agent.send_message(
+                "Interpret this pending question and suggest how the user should answer it.",
+                on_chunk=on_tool,
+                allow_adjudication=False,
+            )
+            self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper (interpretation)[/]:")
+            self._write_markdown(resp)
+            self._write(f"[dim]{'─'*70}[/]")
+        except Exception as exc:
+            self._write(f"[bold red]❌ [Interpretation Error]:[/] {exc}")
+        finally:
+            self._processing_chat = False
 
     @work(exclusive=False)
     async def process_user_chat(self, user_msg: str) -> None:
