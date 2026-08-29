@@ -111,7 +111,6 @@ class InspectorCoordinator:
 
     def __init__(self, max_workers=10):
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="schengen-inspector")
-        self.evaluator_lock = threading.Lock()
         self.in_flight = {}
         self.owned = {}
         self.human_queue = deque()
@@ -125,10 +124,7 @@ class InspectorCoordinator:
         return True
 
     def _evaluate(self, evaluate):
-        # ponytail: global evaluator lock; remove only after evaluator/cache and
-        # cloud-client thread safety are explicitly guaranteed.
-        with self.evaluator_lock:
-            return evaluate()
+        return evaluate()
 
     def completed(self):
         for pane_id, (request, future) in list(self.in_flight.items()):

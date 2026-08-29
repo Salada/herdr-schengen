@@ -11,6 +11,7 @@ Database location: ~/.local/state/herdr-schengen/schengen_history.db (XDG compli
 import os
 import re
 import sqlite3
+import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -187,12 +188,14 @@ def init_db():
 
 # In-memory true LRU evaluation cache: cache_key -> (is_safe, safety_reason, decision_layer, taxonomy, expiry_timestamp)
 _IN_MEMORY_EVAL_CACHE: OrderedDict[str, tuple[bool, str, str, dict[str, Any], float]] = OrderedDict()
+_EVAL_CACHE_LOCK = threading.RLock()
 _MAX_MEMORY_CACHE_SIZE = 1000
 
 
 def clear_in_memory_cache():
     """Clear all entries from in-memory cache."""
-    _IN_MEMORY_EVAL_CACHE.clear()
+    with _EVAL_CACHE_LOCK:
+        _IN_MEMORY_EVAL_CACHE.clear()
 
 
 def get_cached_evaluation(cache_key: str) -> Optional[dict[str, Any]]:
