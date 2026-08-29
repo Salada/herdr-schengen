@@ -228,6 +228,25 @@ Idea / Research:
      3. [Phase 3: 자율 판정 통과 시 (Auto-Approved)]:
         - 인간 화면에 어떤 방해/경고도 남기지 않고 조용히 `[green]✔ Auto-Approved[/]` 처리 후 큐 클리어.
 
+[] [Bug/Audit] 승인 주체(Approver Provenance) 오귀속 수정: 시스템/Gatekeeper LLM 자동 승인과 인간 직접 승인(Human TUI) 엄격 분리
+   - Context & Problem:
+     - PR #125 구현에서 Gatekeeper LLM의 Tool Call에 의한 자동 승인과 인간의 TUI 직접 입력(`/approve`)이 둘 다 `human-tui`로 묶여 기록됨.
+     - 이로 인해 실제 인간이 승인하지 않은 시스템/AI 자율 승인 건조차 로그/UI에 `👤 human-tui`로 표기되어 감사 신뢰도 및 상황 파악에 심각한 왜곡 발생.
+   - Solution & Provenance Classification:
+     1. 세분화된 Provenance 분류 체계:
+        - `👤 human` (또는 `human-tui`): 인간 사용자가 TUI 인풋 창에서 직접 `/approve`를 입력하거나 버튼을 클릭한 경우에만 엄격 한정.
+        - `⚡ gatekeeper-llm` (또는 `system-agent`): TUI 내 Gatekeeper LLM이 Tool Call(`approve_escalation`)을 통해 자율적으로 승인한 경우.
+        - `🤖 machine-guard` (또는 `system-ast`): Watcher 데몬이 Fast-Track AST/Allowlist로 자동 승인한 경우.
+        - `❓ other`: PTY 직접 입력 등 출처 불명인 잔여 경로.
+     2. Implementation Points:
+        - `adjudication_log.action` 및 `pending_escalations.approver` 컬럼에 `gatekeeper-llm` vs `human` 명시적 구분자 저장.
+        - TUI Audit Ledger 테이블 및 Detail 모달 배지 갱신:
+          • 👤 `HUMAN`
+          • ⚡ `GATEKEEPER`
+          • 🤖 `MACHINE`
+          • ❓ `OTHER`
+
+
 
 
 
