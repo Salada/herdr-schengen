@@ -212,6 +212,23 @@ Idea / Research:
           • [보안 정책]: Approval Bias (Conservative / Balanced / Permissive), Fast-Track 모드 토글
         - 설정 모달 내 변경 사항 즉시 SQLite `guard_config` 영속화 및 우측 상태 카드에 실시간 동기화.
 
+[] [Task/UX] 에스컬레이션 배너/메시지 타이밍 및 상태 전이 명확화: 자율 판정 완료 후 '인간 개입 필요(Action Required)' 진한 강조 노출
+   - Context & Problem:
+     - 현재 Inspector가 자율 조사를 진행 중인 상태임에도 `Gray-zone deferred to human` 및 `⚠ Not in fast-track allowlist` 문구가 미리 화면에 노출되어, 인간 지휘관 입장에서 "지금 개입해야 하는지, AI 판단을 기다려야 하는지" 혼란을 초래함.
+   - Solution & State Machine UX Design:
+     1. [Phase 1: 자율 조사 진행 중 (In-Flight Autonomous Inspection)]:
+        - TUI 배너/상태: `[dim]⚡ Autonomous inspection in progress...[/]` (은은한 진행 표시만 유지)
+        - `deferred to human` 경고문구, 경고음(Alert Sound), 개입 유도 메시지 일체 노출 금지.
+     2. [Phase 2: 자율 판정 종료 & 인간 승인 필요 확정 (Action Required)]:
+        - Inspector/Judge가 자체 해결 불가(Gray-Zone / Fail-Closed Denylist)로 최종 결론을 내렸을 때만 전환.
+        - 화면에 **진한 굵은 강조(Bold Highlight)** 및 명확한 액션 유도 메시지 노출:
+          `🚨 [bold red]▶ Action Required: Gray-zone deferred to Human Review[/]`
+          `   [bold white]Cmd:[/] <command>`
+          `   [bold yellow]Reason:[/] <최종 자율 판정 실패 및 인간 검토 필요 사유>`
+     3. [Phase 3: 자율 판정 통과 시 (Auto-Approved)]:
+        - 인간 화면에 어떤 방해/경고도 남기지 않고 조용히 `[green]✔ Auto-Approved[/]` 처리 후 큐 클리어.
+
+
 
 
 
