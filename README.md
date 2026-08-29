@@ -161,3 +161,9 @@ Herdr Schengen is designed to be open-source ready and modular:
 - **Architecture Decision Records**: Consult [`docs/adr-001`](docs/adr-001-runtime-architecture-python-vs-go.md) and [`docs/adr-002`](docs/adr-002-dynamic-substitution-tool-calling-inspector.md) for technical trade-off details.
 
 Pull requests, issues, and security rule proposals are warmly welcomed!
+## Watcher configuration
+
+`config/schengen_watcher.json` is the default home for watcher tunables. It is
+read at startup; absent or invalid values safely fall back to built-in defaults.
+Command-line flags override file defaults. Add future watcher-wide tunables to
+this file and `WATCHER_DEFAULTS` in `scripts/cmd/schengen_watcher.py`.

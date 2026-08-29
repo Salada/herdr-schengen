@@ -16,7 +16,10 @@ Key Architecture:
 
 import argparse
 import ast
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -24,6 +27,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -70,9 +74,105 @@ from core.security_evaluator import (
 
 LOCK_FILE = DB_DIR / "schengen.lock"
 LOG_FILE = LOG_DIR / "schengen.log"
+WATCHER_CONFIG_PATH = SCRIPTS_ROOT.parent / "config" / "schengen_watcher.json"
+WATCHER_DEFAULTS = {"max_workers": 10, "interval_seconds": 3, "auto_exit_idle_cycles": 10}
+WATCHER_LIMITS = {"max_workers": (1, 10), "interval_seconds": (1, 3600), "auto_exit_idle_cycles": (1, 10000)}
 
 # Global reload trigger flag
 _RELOAD_REQUESTED = False
+
+
+def load_watcher_config(path=WATCHER_CONFIG_PATH):
+    """Load watcher tunables; malformed or missing config fails safely to defaults."""
+    try:
+        with Path(path).open(encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            raise ValueError("top-level value must be an object")
+    except (OSError, ValueError, json.JSONDecodeError):
+        return dict(WATCHER_DEFAULTS)
+    config = dict(WATCHER_DEFAULTS)
+    for key, default in WATCHER_DEFAULTS.items():
+        value = loaded.get(key, default)
+        low, high = WATCHER_LIMITS[key]
+        if type(value) is int and low <= value <= high:
+            config[key] = value
+    return config
+
+
+class InspectorCoordinator:
+    """Bounded silent inspection with per-pane in-flight ownership.
+
+    Evaluations run concurrently; pane polling and all UI/key actions remain on
+    the watcher thread. Evaluator-owned shared caches must synchronize their
+    own access.
+    """
+
+    def __init__(self, max_workers=10):
+        self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="schengen-inspector")
+        self.in_flight = {}
+        self.owned = {}
+        self.human_queue = deque()
+        self.active_human = None
+
+    def submit(self, pane_id, request, evaluate):
+        if pane_id in self.owned:  # INV-CONC-1: ownership survives completion
+            return False
+        self.owned[pane_id] = (request, "in_flight")
+        self.in_flight[pane_id] = (request, self.executor.submit(self._evaluate, evaluate))
+        return True
+
+    def _evaluate(self, evaluate):
+        return evaluate()
+
+    def completed(self):
+        for pane_id, (request, future) in list(self.in_flight.items()):
+            if not future.done():
+                continue
+            del self.in_flight[pane_id]
+            try:
+                yield pane_id, request, future.result()
+            except Exception as exc:
+                yield pane_id, request, (False, f"Inspector failed closed: {exc}", DecisionLayer.SHELL_CRITICAL, {})
+
+    def set_state(self, pane_id, request, state):
+        if self.owned.get(pane_id, (None,))[0] == request:
+            self.owned[pane_id] = (request, state)
+
+    def release(self, pane_id, request=None):
+        owned = self.owned.get(pane_id)
+        if owned and (request is None or owned[0] == request):
+            self.owned.pop(pane_id, None)
+
+    def evict_stale_human_requests(self, is_live):
+        """Drop stale active/queued requests and return the cancelled active slot."""
+        cancelled = None
+        if self.active_human and not is_live(*self.active_human):
+            cancelled = self.active_human
+            self.release(cancelled[0])
+            self.active_human = None
+        kept = deque()
+        while self.human_queue:
+            queued = self.human_queue.popleft()
+            if is_live(queued[0], queued[2]):
+                kept.append(queued)
+            else:
+                self.release(queued[0])
+        self.human_queue = kept
+        return cancelled
+
+    def close(self):
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def cancel_stale_human_escalation(pane_id, command):
+    """Persist cancellation for a human slot invalidated by live-pane revalidation."""
+    resolve_escalation(
+        pane_id=pane_id,
+        command_hash=hashlib.sha256(command.encode("utf-8")).hexdigest()[:16],
+        resolution_status="CANCELLED",
+        approver="other",
+    )
 
 
 def sanitize_target_name(target: str) -> str:
@@ -630,6 +730,7 @@ def find_blocked_panes(agent_filter=frozenset(), exclude_panes=None):
 
 def main():
     global _RELOAD_REQUESTED
+    config = load_watcher_config()
     parser = argparse.ArgumentParser(description="Herdr SmartGate / Schengen Trusted Clearance Watcher (AGY Exclusive)")
     parser.add_argument(
         "--target",
@@ -637,7 +738,7 @@ def main():
         help="Target pane ID (e.g. wP:p2) or 'auto' (default: auto - monitors all active & future panes)",
     )
     parser.add_argument("--exclude-pane", action="append", default=[], help="Pane ID to exclude from auto-approval")
-    parser.add_argument("--interval", type=int, default=3, help="Polling interval in seconds (default: 3)")
+    parser.add_argument("--interval", type=int, default=config["interval_seconds"], help="Polling interval in seconds")
     parser.add_argument(
         "--auto-exit",
         action="store_true",
@@ -792,10 +893,105 @@ def main():
     )
 
     last_processed_prompt = {}
+    inspector = InspectorCoordinator(max_workers=config["max_workers"])
     idle_count = 0
 
     try:
         while True:
+            # Completed inspections are applied only after the live dialog is
+            # re-read (INV-CONC-4); worker threads never touch panes, SQLite, or UI.
+            for pane_id, request, result in inspector.completed():
+                req_cmd, state_seq, agent_status, pane_info, visible_text = request
+                live_info = get_pane_info(pane_id)
+                adapter = get_adapter(live_info.get("agent", "")) if live_info else None
+                live_cmd = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) if adapter else None
+                if not live_info or live_cmd != req_cmd:
+                    inspector.release(pane_id, request)
+                    continue
+                is_safe, reason, layer, tax = result
+                decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
+                record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision=decision,
+                    safety_reason=reason or "", agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
+                    origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
+                    mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
+                    shadow_mode=tax.get("shadow_mode", False))
+                if is_safe:
+                    deferred = False
+                    approval_failed_reason = None
+                    if not args.dry_run:
+                        # Channel approval is an explicit OpenCode opt-in.  Keep
+                        # its verified permission.reply path ahead of the
+                        # keystroke fallback used by every other adapter.
+                        if guard_db.get_channel_approve_config():
+                            ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
+                            if ch_approved:
+                                deadline = time.monotonic() + 2.5
+                                while time.monotonic() < deadline:
+                                    time.sleep(0.5)
+                                    if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                                        break
+                                else:
+                                    print(
+                                        f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
+                                        flush=True,
+                                    )
+                                if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                                    print(f"🚀 Auto-approving {live_info.get('agent', 'unknown')} via permission.reply for {pane_id}...", flush=True)
+                            if ch_reason == INJECT_SKIP_CHANGED:
+                                deferred = True
+                                print(f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.", flush=True)
+                        if not deferred:
+                            current_req = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80))
+                            if current_req == req_cmd:
+                                approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
+                                if not approved and inject_reason == INJECT_SKIP_CHANGED:
+                                    deferred = True
+                                    print(f"⏭️  [SKIP] Pane {pane_id} dialog changed during evaluation; deferring to next poll.", flush=True)
+                                elif not approved:
+                                    approval_failed_reason = inject_reason
+                                    print(f"🚨 [{live_info.get('agent', 'unknown')}] {inject_reason} on {pane_id}", flush=True)
+                            elif current_req is not None:
+                                deferred = True
+                                print(f"⏭️  [SKIP] Pane {pane_id} prompt changed during evaluation; deferring to next poll.", flush=True)
+                    if deferred:
+                        inspector.release(pane_id, request)
+                        continue
+                    if approval_failed_reason:
+                        escalate_request(
+                            pane_id, live_info, req_cmd, approval_failed_reason,
+                            "OPENCODE_FAILSAFE", live_info.get("agent", "unknown"), visible_text=visible_text,
+                        )
+                        last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
+                        inspector.release(pane_id, request)
+                        continue
+                    last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": True, "last_alert_time": time.time()}
+                    resolve_escalation(pane_id=pane_id, approver="machine")
+                    inspector.release(pane_id, request)
+                else:
+                    inspector.human_queue.append((pane_id, live_info, req_cmd, reason, layer, visible_text, state_seq, agent_status))
+                    inspector.set_state(pane_id, request, "queued")
+
+            # INV-CONC-3: publish exactly one unsafe result at a time. The rest
+            # remain silent in memory until its dialog clears.
+            def human_request_is_live(pane_id, command):
+                info = get_pane_info(pane_id)
+                adapter = get_adapter(info.get("agent", "")) if info else None
+                return bool(adapter and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == command)
+
+            cancelled = inspector.evict_stale_human_requests(human_request_is_live)
+            if cancelled:
+                active_pane, active_cmd = cancelled
+                cancel_stale_human_escalation(active_pane, active_cmd)
+            if inspector.active_human is None and inspector.human_queue:
+                queued = inspector.human_queue.popleft()
+                pane_id, pane_info, req_cmd, reason, layer, visible_text, state_seq, agent_status = queued
+                adapter = get_adapter(pane_info.get("agent", ""))
+                if adapter and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == req_cmd:
+                    escalate_request(pane_id, pane_info, req_cmd, reason, layer, pane_info.get("agent", "unknown"), visible_text)
+                    inspector.active_human = (pane_id, req_cmd)
+                    inspector.set_state(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), "active")
+                    last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
+
             # Check for dynamic reload trigger (SIGHUP)
             if _RELOAD_REQUESTED:
                 _RELOAD_REQUESTED = False
@@ -837,7 +1033,7 @@ def main():
 
             if not target_panes:
                 idle_count += 1
-                if args.auto_exit and idle_count > 10:
+                if args.auto_exit and idle_count > config["auto_exit_idle_cycles"]:
                     print("🏁 No active target AGY agent found. SmartGate exiting gracefully.", flush=True)
                     break
                 time.sleep(args.interval)
@@ -869,6 +1065,9 @@ def main():
                     if pane_id in last_processed_prompt:
                         resolve_escalation(pane_id=pane_id, approver="other")
                         last_processed_prompt.pop(pane_id, None)
+                    if inspector.active_human and inspector.active_human[0] == pane_id:
+                        inspector.active_human = None
+                    inspector.release(pane_id)
                     continue
 
                 if req_cmd.startswith("question"):
@@ -940,158 +1139,22 @@ def main():
 
                 target_cwd = pane_info.get("foreground_cwd") or pane_info.get("cwd") or os.getcwd()
 
-                # 1. Check user persisted allowlist
-                is_whitelisted, wl_reason = check_persisted_allowlist(req_cmd)
-                if is_whitelisted:
-                    is_safe = True
-                    reason = wl_reason
-                    decision = "ALLOWLIST_BYPASS"
-                    layer = DecisionLayer.ALLOWLIST
-                    tax = derive_taxonomy(req_cmd, layer, is_safe, reason or "", origin=Origin.HUMAN)
-                else:
-                    is_safe, reason, layer, tax = audit_shell_command_with_taxonomy(
-                        req_cmd,
-                        use_llm_judge=args.use_gpt_oss,
-                        reasoning_effort=args.reasoning,
-                        origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN,
-                        cwd=target_cwd,
-                        scope=pane_id,
-                        agent_id=agent_kind,
-                    )
-                    if tax.get("counterfactual_block"):
-                        decision = "SHADOW_BLOCKED"
-                    else:
-                        decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
-
-                state_tag = f"[{tax.get('gate_state', 'ENFORCE')}]"
-                print(
-                    f"⚖️  Safety Evaluation {state_tag}: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}, Origin: {tax.get('origin')}, Conseq: {tax.get('consequence')}]",
-                    flush=True,
-                )
-
-                # 2. Record to SQLite3 DB
-                record_audit_log(
-                    pane_id=pane_id,
-                    raw_command=req_cmd,
-                    decision=decision,
-                    safety_reason=reason or "",
-                    agent_kind=agent_kind,
-                    decision_layer=layer,
-                    origin=tax.get("origin", "A"),
-                    consequence=tax.get("consequence", "NONE"),
-                    mechanism=tax.get("mechanism", "none"),
-                    gate_state=tax.get("gate_state", "ENFORCE"),
-                    shadow_mode=tax.get("shadow_mode", False),
-                )
-
-                # 3. Action
-                if is_safe:
-                    if not args.dry_run:
-                        # Channel-based approve (opencode): OPT-IN via the
-                        # persistent `channel_approve` guard_config setting (TUI
-                        # toggle, issue #114). It requires the opencode host plugin
-                        # to be loaded with the decision poller (PR #105) — until
-                        # then keystroke injection is the primary path.
-                        if guard_db.get_channel_approve_config():
-                            ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
-                            if ch_approved:
-                                # Verify the host plugin actually replied (dialog cleared).
-                                cleared = False
-                                deadline = time.monotonic() + 2.5
-                                while time.monotonic() < deadline:
-                                    time.sleep(0.5)
-                                    if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
-                                        cleared = True
-                                        break
-                                if cleared:
-                                    print(
-                                        f"🚀 Auto-approving {agent_kind} via permission.reply for {pane_id}...",
-                                        flush=True,
-                                    )
-                                    last_processed_prompt[pane_id] = {
-                                        "cmd": req_cmd,
-                                        "seq": state_seq,
-                                        "status": agent_status,
-                                        "is_safe": True,
-                                        "last_alert_time": now,
-                                    }
-                                    resolve_escalation(pane_id=pane_id, approver="machine")
-                                    continue
-                                print(
-                                    f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
-                                    flush=True,
-                                )
-                                # fall through to the send-keys fallback below
-                            if ch_reason == INJECT_SKIP_CHANGED:
-                                print(
-                                    f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.",
-                                    flush=True,
-                                )
-                                continue
-
-                        # Keystroke injection (primary path: agy, and opencode until
-                        # the channel approve is opted in).
-                        # P0 TOCTOU Guard: Re-read pane immediately before sending enter to ensure prompt has not changed
-                        current_text = get_pane_text(pane_id, lines=80)
-                        current_req = adapter.get_pending_request(pane_id, current_text)
-                        if current_req != req_cmd:
-                            print(
-                                f"⚠️  [TOCTOU_ABORT] Pane {pane_id} prompt modified during safety evaluation. Aborting key injection.",
-                                flush=True,
-                            )
-                            continue
-
-                        approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
-                        if not approved:
-                            if inject_reason == INJECT_SKIP_CHANGED:
-                                # The live dialog trampolined to a DIFFERENT request
-                                # (e.g. access_directory -> shell command) while we
-                                # evaluated. The stale req_cmd is gone; skip and let the
-                                # next poll re-parse the new request. Escalating the stale
-                                # command would enqueue an un-resolvable escalation and
-                                # deadlock the strict FIFO queue.
-                                print(
-                                    f"⏭️  [SKIP] Pane {pane_id} dialog changed to a different request during evaluation; deferring to next poll.",
-                                    flush=True,
-                                )
-                                continue
-                            print(f"🚨 [{agent_kind}] {inject_reason} on {pane_id}", flush=True)
-                            # 'OPENCODE_FAILSAFE' is a watcher-level escalation marker, deliberately
-                            # outside the command-classification DecisionLayer enum.
-                            escalate_request(
-                                pane_id, pane_info, req_cmd, inject_reason, "OPENCODE_FAILSAFE", agent_kind, visible_text=visible_text
-                            )
-                            last_processed_prompt[pane_id] = {
-                                "cmd": req_cmd,
-                                "seq": state_seq,
-                                "status": agent_status,
-                                "is_safe": False,
-                                "last_alert_time": now,
-                            }
-                            continue
-                    else:
-                        print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
-                    last_processed_prompt[pane_id] = {
-                        "cmd": req_cmd,
-                        "seq": state_seq,
-                        "status": agent_status,
-                        "is_safe": True,
-                        "last_alert_time": now,
-                    }
-                    resolve_escalation(pane_id=pane_id, approver="machine")
-                else:
-                    # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
-                    escalate_request(pane_id, pane_info, req_cmd, reason, layer, agent_kind, visible_text=visible_text)
-                    last_processed_prompt[pane_id] = {
-                        "cmd": req_cmd,
-                        "seq": state_seq,
-                        "status": agent_status,
-                        "is_safe": False,
-                        "last_alert_time": now,
-                    }
+                # INV-CONC-1/2: submit silently; approval/escalation is handled
+                # only from the completion drain at the next poll.
+                def evaluate(req=req_cmd, cwd=target_cwd, kind=agent_kind, scope=pane_id):
+                    is_whitelisted, wl_reason = check_persisted_allowlist(req)
+                    if is_whitelisted:
+                        tax = derive_taxonomy(req, DecisionLayer.ALLOWLIST, True, wl_reason or "", origin=Origin.HUMAN)
+                        return True, wl_reason, DecisionLayer.ALLOWLIST, tax
+                    return audit_shell_command_with_taxonomy(req, use_llm_judge=args.use_gpt_oss,
+                        reasoning_effort=args.reasoning, origin=Origin.AGENT if kind != "human" else Origin.HUMAN,
+                        cwd=cwd, scope=scope, agent_id=kind)
+                inspector.submit(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), evaluate)
+                continue
 
             time.sleep(args.interval)
     finally:
+        inspector.close()
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()
