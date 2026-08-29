@@ -341,7 +341,7 @@ export default async ({ client }) => {
     if (!pendingPermissions.has(decision.permission_id)) return;
     const response = decision.response === "reject" ? "reject" : "once";
     try {
-      await client.permission.postSessionIdPermissionsPermissionId({
+      await client.postSessionIdPermissionsPermissionId({
         path: { id: sessionID, permissionID: decision.permission_id },
         body: { response },
       });
