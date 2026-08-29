@@ -239,6 +239,10 @@ STATIC_RESOLVABLE_SUBSTITUTION_PATTERN = re.compile(
     re.VERBOSE | re.IGNORECASE,
 )
 
+# Shell redirection tokens (fd + operator + target, e.g. '2>/dev/null', '>/dev/null',
+# '2>&1', '<input', '2>>log') are not file arguments and must not be treated as paths.
+REDIRECT_ARG_RE = re.compile(r"^[0-9]*[<>]")
+
 # 8. Dangerous Python AST modules & functions
 DANGEROUS_PY_MODULES = {"socket", "requests", "urllib", "http.client", "ftplib", "smtplib"}
 DANGEROUS_PY_CALLS = {"eval", "exec", "__import__", "compile"}
@@ -372,6 +376,10 @@ def resolve_dynamic_substitutions_locally(
                 sub_files = shlex.split(raw_arg)
             except Exception:
                 sub_files = raw_arg.split()
+
+            # Drop shell redirection tokens (e.g. '2>/dev/null', '>/dev/null',
+            # '2>&1', '<input') — they are not file arguments to read.
+            sub_files = [f for f in sub_files if not REDIRECT_ARG_RE.match(f)]
 
             combined_chunks = []
             for fpath in sub_files:
