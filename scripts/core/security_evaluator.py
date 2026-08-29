@@ -37,6 +37,7 @@ from core.gray_zone_evaluator import (
     evaluate_gray_zone_operation,
     format_decision_guidance,
 )
+from core.guard_db import has_human_approval_pattern, normalize_command
 from core.redaction import redact_for_cloud
 from core.semgrep_evaluator import audit_script_with_semgrep
 from core.shellcheck_evaluator import audit_shell_with_shellcheck
@@ -937,6 +938,7 @@ class DecisionLayer(str, Enum):
     GRAY_ZONE_MATRIX = "GRAY_ZONE_MATRIX"  # Layer 7: Non-VCS Irreversible Mutation Matrix (ADR-004 / SOP-12)
     FAST_TRACK_AST = "FAST_TRACK_AST"  # Layer 8: Fast-track static safe development operations
     NOT_ALLOWLISTED = "NOT_ALLOWLISTED"  # Fail-closed default: not in fast-track allowlist, requires human review
+    HUMAN_APPROVED = "HUMAN_APPROVED"  # Novelty gate: canonical pattern has prior human approval (scope+TTL)
 
 
 # INV-6: shell metacharacters disqualify a command from fast-track auto-approve
@@ -1230,6 +1232,12 @@ def _audit_static_shell_command(
     if _is_fast_track_allowlisted(cmd_str):
         return True, f"Fast-track verified safe: '{cmd_str}'", DecisionLayer.FAST_TRACK_AST
 
+    # INV-3: novelty/history gate — a canonical pattern with prior HUMAN approval
+    # (scoped to pane + cwd, within TTL) auto-approves, instead of re-escalating.
+    canonical = normalize_command(cmd_str)
+    if has_human_approval_pattern(canonical, scope=scope, cwd=cwd):
+        return True, f"Human-approved pattern (session): '{canonical}'", DecisionLayer.HUMAN_APPROVED
+
     # INV-2: degraded SAST can no longer auto-approve — fail-closed.
     if is_degraded:
         return False, "SAST tools unavailable; requires human review (fail-closed)", DecisionLayer.NOT_ALLOWLISTED
@@ -1322,6 +1330,9 @@ def derive_taxonomy(
         consequence = Consequence.NONE
         if layer == DecisionLayer.ALLOWLIST:
             mechanism = "user-allowlist"
+            origin = Origin.HUMAN
+        elif layer == DecisionLayer.HUMAN_APPROVED:
+            mechanism = "human-approved-history"
             origin = Origin.HUMAN
         elif layer == DecisionLayer.CLOUD_JUDGE:
             mechanism = "cloud-judge-verified"
@@ -1426,6 +1437,9 @@ def derive_taxonomy(
     elif layer == DecisionLayer.NOT_ALLOWLISTED:
         consequence = Consequence.NONE
         mechanism = "fail-closed-not-allowlisted"
+    elif layer == DecisionLayer.HUMAN_APPROVED:
+        consequence = Consequence.NONE
+        mechanism = "human-approved-history"
     elif layer == DecisionLayer.CLOUD_JUDGE:
         consequence = Consequence.DESTRUCTION
         mechanism = "cloud-judge-defer"
