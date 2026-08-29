@@ -1306,16 +1306,15 @@ class SchengenTUIApp(App):
                 safe_reason = rich_escape(active_esc['safety_reason'])
 
                 if is_question:
+                    # INVARIANT (AGENTS.md / adapters README): a question must NEVER
+                    # be sent to the gatekeeper LLM (process_user_chat) — that path
+                    # adjudicates (approve/reject) and would auto-resolve the question.
+                    # The user answers directly in the agent pane; the escalation
+                    # auto-resolves only when the dialog clears.
                     self._write(f"\n[cyan]{'─'*20} ❓ Question #{active_id} {'─'*20}[/]")
                     self._write(f"  [dim]Pane:[/]     {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
                     self._write(f"  [dim]Question:[/] [white]{safe_cmd}[/]")
                     self._write(f"[dim]  ↩ Answer directly in the pane — resolves automatically.[/]\n")
-                    # LLM interpretation: interpret the question + context to help the
-                    # user answer (parity with the dangerous-command inspector).
-                    self.process_user_chat(
-                        "New question intercepted. Interpret the question and its surrounding context, "
-                        "and suggest how the user should answer it in the agent pane."
-                    )
                 else:
                     self._write(f"\n[yellow]{'─'*20} ▶ Escalation #{active_id} Intercepted {'─'*20}[/]")
                     self._write(f"  [dim]Pane:[/]   {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
