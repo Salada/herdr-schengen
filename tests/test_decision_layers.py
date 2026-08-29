@@ -414,6 +414,16 @@ class TestDecisionLayers(unittest.TestCase):
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
 
+        # Human question dialogs (with or without extracted text) must never be
+        # auto-approved either.
+        safe, reason, layer = audit_shell_command("question")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+
+        safe, reason, layer = audit_shell_command("question: Which branch should I merge?")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+
         # Mock the cloud judge so the unhandled-dialog path is deterministic:
         # the real LLM judge may classify a read-only glob as safe (correct in
         # isolation, but it makes this assertion flaky). A mocked "defer to

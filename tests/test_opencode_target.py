@@ -410,8 +410,43 @@ class TestAgentDispatch(unittest.TestCase):
 
     def test_question_dialog_detected(self):
         adapter = get_adapter("opencode")
-        q_text = "PR merge order?\n1. option A\n2. option B\n↑↓ select  enter submit  esc dismiss"
-        self.assertEqual(adapter.parse_permission_request(q_text), "question")
+        q_text = (
+            "┃\n"
+            "┃  Which deployment target should I use?\n"
+            "┃\n"
+            "┃  1. Production\n"
+            "┃     Recommended for stable releases\n"
+            "┃  2. Staging\n"
+            "┃  3. Type your own answer\n"
+            "┃\n"
+            "┃  ↑↓ select  enter submit  esc dismiss"
+        )
+        self.assertEqual(
+            adapter.parse_permission_request(q_text),
+            "question: Which deployment target should I use?",
+        )
+
+    def test_question_dialog_multi_select_text(self):
+        adapter = get_adapter("opencode")
+        q_text = (
+            "┃\n"
+            "┃  Which features do you want? (select all that apply)\n"
+            "┃\n"
+            "┃  1. [ ] Auth\n"
+            "┃  2. [✓] Billing\n"
+            "┃  3. Type your own answer\n"
+            "┃\n"
+            "┃  ↑↓ select  enter toggle  esc dismiss"
+        )
+        self.assertEqual(
+            adapter.parse_permission_request(q_text),
+            "question: Which features do you want? (select all that apply)",
+        )
+
+    def test_question_dialog_no_text_falls_back_to_sentinel(self):
+        adapter = get_adapter("opencode")
+        # Detection marker present but no extractable body above it -> bare sentinel.
+        self.assertEqual(adapter.parse_permission_request("esc dismiss"), "question")
 
     def test_permission_dialog_not_question(self):
         adapter = get_adapter("opencode")

@@ -1030,7 +1030,7 @@ def _audit_static_shell_command(
         return False, "Doom loop detected; requires human review", DecisionLayer.SHELL_CRITICAL
 
     # 0a-4b. opencode human question dialogs must NEVER be auto-approved.
-    if cmd_str == "question":
+    if cmd_str.startswith("question"):
         return False, "Agent asked the user a question; requires human input", DecisionLayer.SHELL_CRITICAL
 
     # 0a-5. Unhandled opencode dialogs: route to the second-tier cloud judge (fail-closed to human).
@@ -1252,9 +1252,9 @@ def derive_taxonomy(
             mechanism = "cloud-judge-verified"
         else:
             mechanism = "fast-track-verified"
-    elif cmd_str == "doom_loop" or cmd_str == "question" or cmd_str.startswith("unhandled_dialog "):
+    elif cmd_str == "doom_loop" or cmd_str.startswith("question") or cmd_str.startswith("unhandled_dialog "):
         consequence = Consequence.INTEGRITY
-        mechanism = "doom-loop" if cmd_str == "doom_loop" else ("question" if cmd_str == "question" else "unhandled-dialog")
+        mechanism = "doom-loop" if cmd_str == "doom_loop" else ("question" if cmd_str.startswith("question") else "unhandled-dialog")
     elif layer == DecisionLayer.SECRET_GUARD:
         consequence = Consequence.EXFILTRATION
         mechanism = "secret-path"
