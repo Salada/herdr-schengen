@@ -687,6 +687,45 @@ def set_answer_language(language: str) -> str:
     return lang
 
 
+_CHANNEL_APPROVE_DEFAULT = False
+
+
+def get_channel_approve_config() -> bool:
+    """Return whether programmatic permission.reply approval (channel_approve) is enabled.
+
+    When True, the watcher writes an approve/reject decision bound to the exact
+    permission_id and the opencode host plugin replies via client.permission
+    (issue #57 full closure). When False, the watcher falls back to keystroke
+    injection (send-keys enter). Backed by the `guard_config` table — no longer a
+    transient env var (issue #114), so the TUI is the single toggle surface and
+    the daemon reads a consistent value regardless of spawn path.
+    """
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM guard_config WHERE key = 'channel_approve'"
+        ).fetchone()
+    if row is not None:
+        return _parse_bool(row["value"])
+    return _CHANNEL_APPROVE_DEFAULT
+
+
+def set_channel_approve_config(enabled: bool) -> bool:
+    """Persist the channel_approve (permission.reply) opt-in. Returns the new value."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            ("channel_approve", "true" if enabled else "false", now_iso),
+        )
+        conn.commit()
+    return bool(enabled)
+
+
 def record_adjudication(
     escalation_id: int,
     pane_id: str,

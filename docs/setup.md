@@ -84,21 +84,15 @@ In a dedicated Herdr pane (e.g. `w1D:p7`):
 ~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/cmd/schengen_tui.py
 ```
 
-### Option B: Standalone Background Watcher Daemon
-To run the background monitoring daemon without the interactive TUI:
+### Option B: Standalone Background Watcher Daemon (deprecated — issue #114)
+
+> The daemon lifecycle is owned exclusively by the TUI (`Ctrl+T`). Direct
+> `schengen_watcher.py --target auto` is deprecated. The `--status`/`--reload`/
+> `--stop` subcommands remain as read-only diagnostics / TUI-internal ops.
 
 ```bash
-# Start background guard on all active agent panes
-python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto
-
-# Check status of active daemon locks
+# Read-only diagnostics (NOT lifecycle — the TUI owns start/stop/reload)
 python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --status
-
-# Gracefully reload rulesets in-process via SIGHUP (0ms downtime)
-python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --reload
-
-# Safely stop guard daemon
-python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --stop
 ```
 
 ---

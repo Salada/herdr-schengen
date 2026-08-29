@@ -171,6 +171,16 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
         self.assertEqual(guard_db.set_answer_language("gibberish"), "korean")
         self.assertEqual(guard_db.get_answer_language(), "korean")
 
+    def test_default_channel_approve_off(self):
+        # permission.reply approval is opt-in; default is keystroke injection.
+        self.assertFalse(guard_db.get_channel_approve_config())
+
+    def test_set_channel_approve_persists(self):
+        self.assertTrue(guard_db.set_channel_approve_config(True))
+        self.assertTrue(guard_db.get_channel_approve_config())
+        self.assertFalse(guard_db.set_channel_approve_config(False))
+        self.assertFalse(guard_db.get_channel_approve_config())
+
     def test_get_audit_log_by_id_roundtrip(self):
         guard_db.record_audit_log(
             "w1D:p1", "git status", "AUTO_APPROVED", "safe git query",

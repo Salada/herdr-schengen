@@ -13,91 +13,58 @@ description: Herdr Schengen (SmartGate) - Autonomous border-free flow with stric
 
 ---
 
-## ⚙️ Host Runtime Dispatch
+## ⚙️ Daemon Lifecycle (TUI — single owner)
 
-This skill is loaded by **both** Antigravity (AGY) and OpenCode agents. Determine
-your runtime and follow **only** the matching host-execution section; ignore the
-other. All remaining sections (governance, decision layers, border policy) are
-shared.
-
-- `ANTIGRAVITY_AGENT=1` / `AI_AGENT=antigravity` → **🟢 AGY-Native Host Execution**.
-- `OPENCODE=1` → **🔵 OpenCode-Native Host Execution**.
+The guard daemon lifecycle (start/stop/reload) is owned **exclusively by the
+Schengen TUI** (`schengen_tui.py`, `Ctrl+T`). There is no other supported way to
+start/stop the daemon — direct `schengen_watcher.py --target auto` and the
+OpenCode plugin's `schengen_start` are deprecated (issue #114). All remaining
+sections (governance, decision layers, border policy) are shared.
 
 ---
 
-## 🚀 Quick Start (Shared — daemon lifecycle, both hosts)
+## 🚀 Quick Start (TUI — daemon lifecycle)
 
-> **🚨 Mandatory Session-Bound Governance (ADR-003 / ADR-008)**: the watcher MUST
-> run as a child of a living host agent session (never detached/orphaned); the
-> `is_parent_alive` guard self-terminates it when the host exits. Reload via
-> `--reload` (SIGHUP), never by killing the daemon.
+> **🚨 Mandatory Session-Bound Governance (ADR-003 / ADR-008)**: the watcher runs
+> die-with-parent under the TUI (`SCHENGEN_STRICT_PARENT=1`); its `is_parent_alive`
+> guard self-terminates it when the TUI closes — never orphaned. Start/stop/reload
+> is done **only** through the TUI (`Ctrl+T` / `/toggle`), never by direct CLI.
 
 ```bash
-# Guard all target panes (AGY + OpenCode)
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto
+# Launch the interactive gatekeeper (single daemon lifecycle owner)
+~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/cmd/schengen_tui.py
 
-# Enable the private tool-calling semantic inspector (dynamic $(cat ...) judge)
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto --use-gpt-oss
-
-# Target a specific pane / reload / stop
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --target wP:p2
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --reload
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --reload --target wS:pF
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --stop --target wS:pF
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --stop
-
-# Status / history / stats
+# Diagnostics (read-only — NOT lifecycle; the TUI owns start/stop/reload)
 python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --status
 python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py -n 10
 python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --search "git"
 python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --tail 20
 python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py -n 5 --json
 python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --paths
+python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --pending
 python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --stats
 ```
 
 ---
 
-## 🟢 AGY-Native Host Execution (Antigravity only)
+## 🗑️ Deprecated: Non-TUI Host Execution (issue #114)
 
-> **Session-Bound Lifetime**: run the watcher as a tracked background task
-> (`run_command` / `task-<id>`) in the orchestrating AGY session; re-launch on
-> any termination.
+The former per-runtime daemon lifecycle paths are **deprecated**:
 
-```bash
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --target auto
-```
+- **AGY-Native** (`schengen_watcher.py --target auto` run as a tracked background task)
+- **OpenCode-Native** (`schengen_start` / `schengen_stop` / `schengen_status` plugin tools)
 
-> **Proactive Escalation Heartbeat & Exponential Drain Rule**:
-> - Arm a `schedule` heartbeat when idle: exponential `60s → 60s → 120s → 240s → 360s → …` (cap 1800s); reset to 60s on any event.
->   ```json
->   schedule(DurationSeconds=60, Prompt="Check pending escalations queue and drain blocked panes", TimerCondition="any")
->   ```
-> - At the start of EVERY turn / wakeup, drain the queue:
->   ```bash
->   python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --pending
->   ```
-> - If a `PENDING` escalation exists, immediately evaluate and prompt the human / auto-resolve.
+Use the **Schengen TUI (`Ctrl+T`)** as the single daemon lifecycle owner instead.
 
----
-
-## 🔵 OpenCode-Native Host Execution (OpenCode only)
-
-> **Activation**: install the host plugin once, then start the guard on-demand in
-> the specific session you want as host.
+The OpenCode plugin (`~/.config/opencode/plugins/schengen-host.js`) still provides
+the permission.reply pipeline (permission.asked channel emit + decision poller);
+it no longer spawns the daemon nor surfaces escalations. Install it once:
 
 ```bash
 mkdir -p ~/.config/opencode/plugins
 cp opencode/plugins/schengen-host.js ~/.config/opencode/plugins/schengen-host.js
 # restart OpenCode
 ```
-
-- `start the schengen guard` → `schengen_start` (spawns the daemon; this session becomes the host).
-- `stop the schengen guard` → `schengen_stop`.
-- `is the schengen guard running?` → `schengen_status`.
-- **die-with-parent**: `tui.lifecycle.onDispose` + `SCHENGEN_STRICT_PARENT=1` kill the daemon when the session closes.
-- **watcher-of-the-watcher**: the plugin re-spawns the daemon on crash while `desired`.
-- See `opencode/README.md` for config env vars and multi-session behavior.
 
 ---
 
