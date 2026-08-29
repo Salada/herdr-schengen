@@ -56,8 +56,15 @@ SENSITIVE_FILE_PATTERN = re.compile(
         \.(pem|key|pfx|pkcs12){END_SEP}|
         hosts\.ya?ml|
         \.netrc|
-        \.aws/credentials|
-        \.kube/config
+        \.aws/|
+        \.kube/config|
+        {SEP}\.(zsh|bash)_history{END_SEP}|
+        \.kdbx{END_SEP}|
+        \.keychain{END_SEP}|
+        {SEP}\.npmrc{END_SEP}|
+        {SEP}\.pypirc{END_SEP}|
+        {SEP}authorized_keys{END_SEP}|
+        {SEP}known_hosts{END_SEP}
     )""",
     re.VERBOSE | re.IGNORECASE,
 )
@@ -941,9 +948,6 @@ class DecisionLayer(str, Enum):
     HUMAN_APPROVED = "HUMAN_APPROVED"  # Novelty gate: canonical pattern has prior human approval (scope+TTL)
 
 
-# INV-6: shell metacharacters disqualify a command from fast-track auto-approve
-_SHELL_METACHAR_RE = re.compile(r"[|&;<>]|\$\(|`")
-
 # INV-6: forensic / network primitives must NEVER fast-track (binary inspection / egress)
 _FORENSIC_NETWORK_BIN_RE = re.compile(
     r"\b(strings|xxd|hexdump|od|base64|objdump|otool|curl|wget|ssh|scp|sftp|rsync|nc|ncat|socat|npx)\b",
@@ -979,18 +983,87 @@ FAST_TRACK_SAFE_GIT_PATTERNS = (
     r"^git\s+config\s+(--get|--list|--get-regexp)(?:\s|$)",
 )
 
+# Read-only commands permitted inside a pure read-only pipeline (segments joined by | && ;)
+READONLY_PIPELINE_COMMANDS = {
+    "ls", "find", "tree", "du", "df", "stat", "file", "wc", "sort", "uniq",
+    "pwd", "echo", "printf", "date", "uname", "whoami", "id", "env", "printenv",
+    "which", "type", "hostname", "uptime", "dirname", "basename", "readlink", "realpath",
+    "cat", "head", "tail", "less", "more", "grep", "rg", "sed", "awk", "jq",
+    "cut", "tr", "column", "xargs",
+}
+# INV-SENS-2: broad/root-level targets that could sweep sensitive paths -> hard-escalate
+_BROAD_WILDCARD_RE = re.compile(r"(^|\s)(~|~/|/(?:\s|$)|\.\*|\.\.(?:\s|$)|(?<!\S)\*(?!\S))(?:\s|$)")
+
+# Pipeline separators that join a (possibly) multi-segment command
+_PIPELINE_SEP_RE = re.compile(r"[|&;]")
+
+
+def _is_readonly_pipeline_segment(seg: str) -> bool:
+    """True if a single pipeline segment is a pure read-only command with no sensitive target."""
+    seg = seg.strip()
+    if not seg:
+        return False
+    tokens = seg.split()
+    cmd = tokens[0]
+    # git: only read-only subcommands (reuse the Milestone-1 git-pattern approach)
+    if cmd == "git":
+        for pat in FAST_TRACK_SAFE_GIT_PATTERNS:
+            m = re.match(pat, seg)
+            if m:
+                rest = seg[m.end():]
+                if re.search(r"(^|\s)-[dDfFmM]{1,2}(\s|$)|--(delete|force|set|add|unset|move|copy|tag)\b", rest):
+                    return False
+                # Sensitive/broad target in the git segment -> fail-closed (safety backstop)
+                if SENSITIVE_FILE_PATTERN.search(seg) or SENSITIVE_DIRECTORY_PATTERN.search(seg):
+                    return False
+                if _BROAD_WILDCARD_RE.search(seg):
+                    return False
+                return True
+        return False
+    if cmd not in READONLY_PIPELINE_COMMANDS:
+        return False
+    # in-place sed mutation must never fast-track
+    if cmd == "sed" and re.search(r"(^|\s)(-i|--in-place)(\s|$)", seg):
+        return False
+    # sensitive path in any argument -> fail-closed
+    if SENSITIVE_FILE_PATTERN.search(seg) or SENSITIVE_DIRECTORY_PATTERN.search(seg):
+        return False
+    # broad/root-level target (INV-SENS-2) -> fail-closed
+    if _BROAD_WILDCARD_RE.search(seg):
+        return False
+    return True
+
+
+def _is_safe_readonly_pipeline(cmd_str: str) -> bool:
+    """True if cmd_str is a pure read-only pipeline (segments joined by | && ;)."""
+    segments = re.split(r"[|&;]+", cmd_str)
+    nonempty = [s.strip() for s in segments if s.strip()]
+    if not nonempty:
+        return False
+    return all(_is_readonly_pipeline_segment(s) for s in nonempty)
+
 
 def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     """INV-5/6: True only if cmd_str is provably-benign per the closed allowlist.
 
-    Rejects any command with shell metacharacters (pipe/redirect/background/
-    command-substitution) or forensic/network binaries, then matches the command
-    name (or a read-only git subcommand) against the explicit allowlist.
+    Hard-rejects command substitution, redirection/heredoc, and forensic/network
+    binaries; then fast-tracks either a pure read-only pipeline (segments joined
+    by | && ;) or a single read-only command — always refusing sensitive paths,
+    broad/root-level wildcard targets, and destructive git flags.
     """
-    if _SHELL_METACHAR_RE.search(cmd_str):
-        return False
+    # Hard rejects — never fast-track mutation/execution/dynamic constructs
+    if re.search(r"\$\(|`", cmd_str):
+        return False          # command substitution
+    if re.search(r">>?|<<?", cmd_str):
+        return False          # redirection / heredoc (write)
     if _FORENSIC_NETWORK_BIN_RE.search(cmd_str):
-        return False
+        return False          # forensic / network egress primitives
+
+    # Pure read-only pipeline (segments joined by | && ;)
+    if _PIPELINE_SEP_RE.search(cmd_str):
+        return _is_safe_readonly_pipeline(cmd_str)
+
+    # Single-command allowlist (no pipeline separators)
     for pat in FAST_TRACK_SAFE_GIT_PATTERNS:
         m = re.match(pat, cmd_str)
         if not m:
@@ -1002,9 +1075,21 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
         rest = cmd_str[m.end():]
         if re.search(r"(^|\s)-[dDfFmM]{1,2}(\s|$)|--(delete|force|set|add|unset|move|copy|tag)\b", rest):
             return False
+        # INV-SENS-2: sensitive path or broad/root-level target -> fail-closed
+        if SENSITIVE_FILE_PATTERN.search(cmd_str) or SENSITIVE_DIRECTORY_PATTERN.search(cmd_str):
+            return False
+        if _BROAD_WILDCARD_RE.search(cmd_str):
+            return False
         return True
     tokens = cmd_str.split()
-    return tokens[0] in FAST_TRACK_SAFE_COMMANDS if tokens else False
+    if not tokens or tokens[0] not in FAST_TRACK_SAFE_COMMANDS:
+        return False
+    # INV-SENS-2: single-command broad/root-level or sensitive targets -> fail-closed
+    if SENSITIVE_FILE_PATTERN.search(cmd_str) or SENSITIVE_DIRECTORY_PATTERN.search(cmd_str):
+        return False
+    if _BROAD_WILDCARD_RE.search(cmd_str):
+        return False
+    return True
 
 
 def _audit_static_shell_command(

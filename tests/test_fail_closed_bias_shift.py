@@ -37,12 +37,19 @@ class TestFailClosedBiasShift(unittest.TestCase):
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
             self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
 
-    def test_shell_metacharacters_fail_closed(self):
-        # INV-6: pipe / && metacharacters disqualify from fast-track.
+    def test_readonly_pipelines_now_fast_track(self):
+        # Milestone 3 widening: pure read-only pipelines (every segment read-only,
+        # no sensitive/broad target) now fast-track instead of escalating on the
+        # bare metacharacter. Non-read-only metachar chains still escalate.
         for cmd in ("ls | grep foo", "git status && echo done"):
             safe, reason, layer = audit_shell_command(cmd)
-            self.assertFalse(safe, f"Expected '{cmd}' fail-closed (metachar), got safe=True: {reason}")
-            self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
+            self.assertTrue(safe, f"Expected pure read-only pipeline '{cmd}' to fast-track, got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+        # A metachar chain with a non-read-only segment still escalates (fail-closed).
+        safe, reason, layer = audit_shell_command("ls | grep foo ; npm install")
+        self.assertFalse(safe, f"Expected non-read-only metachar chain to escalate, got safe=True: {reason}")
+        self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
 
     def test_forensic_network_binary_fail_closed(self):
         # INV-6: forensic (strings) / network (curl) primitives never fast-track.
