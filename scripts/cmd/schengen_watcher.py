@@ -103,10 +103,9 @@ def load_watcher_config(path=WATCHER_CONFIG_PATH):
 class InspectorCoordinator:
     """Bounded silent inspection with per-pane in-flight ownership.
 
-    The evaluator is deliberately serialized: its module-level caches and cloud
-    judge clients have no documented thread-safety contract. Pane polling and
-    future completion still proceed concurrently, while all UI/key actions stay
-    on the watcher thread.
+    Evaluations run concurrently; pane polling and all UI/key actions remain on
+    the watcher thread. Evaluator-owned shared caches must synchronize their
+    own access.
     """
 
     def __init__(self, max_workers=10):
@@ -890,8 +889,54 @@ def main():
                     mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
                     shadow_mode=tax.get("shadow_mode", False))
                 if is_safe:
-                    if not args.dry_run and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == req_cmd:
-                        adapter.inject_approval(pane_id, req_cmd)
+                    deferred = False
+                    approval_failed_reason = None
+                    if not args.dry_run:
+                        # Channel approval is an explicit OpenCode opt-in.  Keep
+                        # its verified permission.reply path ahead of the
+                        # keystroke fallback used by every other adapter.
+                        if guard_db.get_channel_approve_config():
+                            ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
+                            if ch_approved:
+                                deadline = time.monotonic() + 2.5
+                                while time.monotonic() < deadline:
+                                    time.sleep(0.5)
+                                    if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                                        break
+                                else:
+                                    print(
+                                        f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
+                                        flush=True,
+                                    )
+                                if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                                    print(f"🚀 Auto-approving {live_info.get('agent', 'unknown')} via permission.reply for {pane_id}...", flush=True)
+                            if ch_reason == INJECT_SKIP_CHANGED:
+                                deferred = True
+                                print(f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.", flush=True)
+                        if not deferred:
+                            current_req = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80))
+                            if current_req == req_cmd:
+                                approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
+                                if not approved and inject_reason == INJECT_SKIP_CHANGED:
+                                    deferred = True
+                                    print(f"⏭️  [SKIP] Pane {pane_id} dialog changed during evaluation; deferring to next poll.", flush=True)
+                                elif not approved:
+                                    approval_failed_reason = inject_reason
+                                    print(f"🚨 [{live_info.get('agent', 'unknown')}] {inject_reason} on {pane_id}", flush=True)
+                            elif current_req is not None:
+                                deferred = True
+                                print(f"⏭️  [SKIP] Pane {pane_id} prompt changed during evaluation; deferring to next poll.", flush=True)
+                    if deferred:
+                        inspector.release(pane_id, request)
+                        continue
+                    if approval_failed_reason:
+                        escalate_request(
+                            pane_id, live_info, req_cmd, approval_failed_reason,
+                            "OPENCODE_FAILSAFE", live_info.get("agent", "unknown"), visible_text=visible_text,
+                        )
+                        last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
+                        inspector.release(pane_id, request)
+                        continue
                     last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": True, "last_alert_time": time.time()}
                     resolve_escalation(pane_id=pane_id, approver="machine")
                     inspector.release(pane_id, request)
@@ -1096,156 +1141,6 @@ def main():
                         cwd=cwd, scope=scope, agent_id=kind)
                 inspector.submit(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), evaluate)
                 continue
-
-                # 1. Check user persisted allowlist
-                is_whitelisted, wl_reason = check_persisted_allowlist(req_cmd)
-                if is_whitelisted:
-                    is_safe = True
-                    reason = wl_reason
-                    decision = "ALLOWLIST_BYPASS"
-                    layer = DecisionLayer.ALLOWLIST
-                    tax = derive_taxonomy(req_cmd, layer, is_safe, reason or "", origin=Origin.HUMAN)
-                else:
-                    is_safe, reason, layer, tax = audit_shell_command_with_taxonomy(
-                        req_cmd,
-                        use_llm_judge=args.use_gpt_oss,
-                        reasoning_effort=args.reasoning,
-                        origin=Origin.AGENT if agent_kind != "human" else Origin.HUMAN,
-                        cwd=target_cwd,
-                        scope=pane_id,
-                        agent_id=agent_kind,
-                    )
-                    if tax.get("counterfactual_block"):
-                        decision = "SHADOW_BLOCKED"
-                    else:
-                        decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
-
-                state_tag = f"[{tax.get('gate_state', 'ENFORCE')}]"
-                print(
-                    f"⚖️  Safety Evaluation {state_tag}: {'✅ SAFE' if is_safe else '🚨 DANGEROUS / REVIEW NEEDED'} ({reason}) [Decision: {decision}, Layer: {layer}, Origin: {tax.get('origin')}, Conseq: {tax.get('consequence')}]",
-                    flush=True,
-                )
-
-                # 2. Record to SQLite3 DB
-                record_audit_log(
-                    pane_id=pane_id,
-                    raw_command=req_cmd,
-                    decision=decision,
-                    safety_reason=reason or "",
-                    agent_kind=agent_kind,
-                    decision_layer=layer,
-                    origin=tax.get("origin", "A"),
-                    consequence=tax.get("consequence", "NONE"),
-                    mechanism=tax.get("mechanism", "none"),
-                    gate_state=tax.get("gate_state", "ENFORCE"),
-                    shadow_mode=tax.get("shadow_mode", False),
-                )
-
-                # 3. Action
-                if is_safe:
-                    if not args.dry_run:
-                        # Channel-based approve (opencode): OPT-IN via the
-                        # persistent `channel_approve` guard_config setting (TUI
-                        # toggle, issue #114). It requires the opencode host plugin
-                        # to be loaded with the decision poller (PR #105) — until
-                        # then keystroke injection is the primary path.
-                        if guard_db.get_channel_approve_config():
-                            ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
-                            if ch_approved:
-                                # Verify the host plugin actually replied (dialog cleared).
-                                cleared = False
-                                deadline = time.monotonic() + 2.5
-                                while time.monotonic() < deadline:
-                                    time.sleep(0.5)
-                                    if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
-                                        cleared = True
-                                        break
-                                if cleared:
-                                    print(
-                                        f"🚀 Auto-approving {agent_kind} via permission.reply for {pane_id}...",
-                                        flush=True,
-                                    )
-                                    last_processed_prompt[pane_id] = {
-                                        "cmd": req_cmd,
-                                        "seq": state_seq,
-                                        "status": agent_status,
-                                        "is_safe": True,
-                                        "last_alert_time": now,
-                                    }
-                                    resolve_escalation(pane_id=pane_id, approver="machine")
-                                    continue
-                                print(
-                                    f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
-                                    flush=True,
-                                )
-                                # fall through to the send-keys fallback below
-                            if ch_reason == INJECT_SKIP_CHANGED:
-                                print(
-                                    f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.",
-                                    flush=True,
-                                )
-                                continue
-
-                        # Keystroke injection (primary path: agy, and opencode until
-                        # the channel approve is opted in).
-                        # P0 TOCTOU Guard: Re-read pane immediately before sending enter to ensure prompt has not changed
-                        current_text = get_pane_text(pane_id, lines=80)
-                        current_req = adapter.get_pending_request(pane_id, current_text)
-                        if current_req != req_cmd:
-                            print(
-                                f"⚠️  [TOCTOU_ABORT] Pane {pane_id} prompt modified during safety evaluation. Aborting key injection.",
-                                flush=True,
-                            )
-                            continue
-
-                        approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
-                        if not approved:
-                            if inject_reason == INJECT_SKIP_CHANGED:
-                                # The live dialog trampolined to a DIFFERENT request
-                                # (e.g. access_directory -> shell command) while we
-                                # evaluated. The stale req_cmd is gone; skip and let the
-                                # next poll re-parse the new request. Escalating the stale
-                                # command would enqueue an un-resolvable escalation and
-                                # deadlock the strict FIFO queue.
-                                print(
-                                    f"⏭️  [SKIP] Pane {pane_id} dialog changed to a different request during evaluation; deferring to next poll.",
-                                    flush=True,
-                                )
-                                continue
-                            print(f"🚨 [{agent_kind}] {inject_reason} on {pane_id}", flush=True)
-                            # 'OPENCODE_FAILSAFE' is a watcher-level escalation marker, deliberately
-                            # outside the command-classification DecisionLayer enum.
-                            escalate_request(
-                                pane_id, pane_info, req_cmd, inject_reason, "OPENCODE_FAILSAFE", agent_kind, visible_text=visible_text
-                            )
-                            last_processed_prompt[pane_id] = {
-                                "cmd": req_cmd,
-                                "seq": state_seq,
-                                "status": agent_status,
-                                "is_safe": False,
-                                "last_alert_time": now,
-                            }
-                            continue
-                    else:
-                        print(f"🧪 [Dry-Run] Would send Enter to {pane_id}", flush=True)
-                    last_processed_prompt[pane_id] = {
-                        "cmd": req_cmd,
-                        "seq": state_seq,
-                        "status": agent_status,
-                        "is_safe": True,
-                        "last_alert_time": now,
-                    }
-                    resolve_escalation(pane_id=pane_id, approver="machine")
-                else:
-                    # Enqueue persistent escalation into SQLite3 (At-least-once guarantee)
-                    escalate_request(pane_id, pane_info, req_cmd, reason, layer, agent_kind, visible_text=visible_text)
-                    last_processed_prompt[pane_id] = {
-                        "cmd": req_cmd,
-                        "seq": state_seq,
-                        "status": agent_status,
-                        "is_safe": False,
-                        "last_alert_time": now,
-                    }
 
             time.sleep(args.interval)
     finally:

@@ -9,6 +9,7 @@ Provides pane-isolated approval memory (ADR-010):
 
 import hashlib
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -53,6 +54,7 @@ class PaneSessionMemory:
         self._memory: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # In-memory pattern template cache: dict[pane_id, dict[template_str, record]]
         self._template_memory: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._memory_lock = threading.RLock()
 
     def record_approval(
         self,
@@ -81,16 +83,12 @@ class PaneSessionMemory:
         }
 
         # 1. Update in-memory
-        if norm_pane not in self._memory:
-            self._memory[norm_pane] = {}
-        self._memory[norm_pane][fingerprint] = record
-
-        # 1b. Update in-memory pattern template if matchable
+        # 1. Update in-memory exact and template caches atomically.
         template = extract_safe_command_template(raw_cmd)
-        if template:
-            if norm_pane not in self._template_memory:
-                self._template_memory[norm_pane] = {}
-            self._template_memory[norm_pane][template] = record
+        with self._memory_lock:
+            self._memory.setdefault(norm_pane, {})[fingerprint] = record
+            if template:
+                self._template_memory.setdefault(norm_pane, {})[template] = record
 
         # 2. Persist to DB cache table (evaluation_cache)
         try:
@@ -138,24 +136,23 @@ class PaneSessionMemory:
         now = time.time()
 
         # 1. Check exact fingerprint in-memory
-        if norm_pane in self._memory and fingerprint in self._memory[norm_pane]:
-            rec = self._memory[norm_pane][fingerprint]
-            if rec["expires_at"] > now:
-                return (True, f"[Session Memory: {norm_pane}] {rec['reason']}", rec["decision_layer"])
-            else:
+        template = extract_safe_command_template(raw_cmd)
+        with self._memory_lock:
+            rec = self._memory.get(norm_pane, {}).get(fingerprint)
+            if rec:
+                if rec["expires_at"] > now:
+                    return (True, f"[Session Memory: {norm_pane}] {rec['reason']}", rec["decision_layer"])
                 del self._memory[norm_pane][fingerprint]
 
-        # 1b. Check safe pattern template in-memory
-        template = extract_safe_command_template(raw_cmd)
-        if template and norm_pane in self._template_memory and template in self._template_memory[norm_pane]:
-            tmpl_rec = self._template_memory[norm_pane][template]
-            if tmpl_rec["expires_at"] > now:
-                return (
-                    True,
-                    f"[Session Pattern Memory: {norm_pane}] Matches previously approved template '{template}'",
-                    tmpl_rec["decision_layer"],
-                )
-            else:
+            # 1b. Check safe pattern template in-memory
+            tmpl_rec = self._template_memory.get(norm_pane, {}).get(template) if template else None
+            if tmpl_rec:
+                if tmpl_rec["expires_at"] > now:
+                    return (
+                        True,
+                        f"[Session Pattern Memory: {norm_pane}] Matches previously approved template '{template}'",
+                        tmpl_rec["decision_layer"],
+                    )
                 del self._template_memory[norm_pane][template]
 
         # 2. Check DB
@@ -174,21 +171,18 @@ class PaneSessionMemory:
                 reason, layer, exp_ts = row[0], row[1], row[2]
                 if exp_ts and int(exp_ts) > now:
                     # Restore to in-memory
-                    if norm_pane not in self._memory:
-                        self._memory[norm_pane] = {}
-                    self._memory[norm_pane][fingerprint] = {
-                        "pane_id": norm_pane,
-                        "raw_command": raw_cmd.strip(),
-                        "cwd": cwd,
-                        "decision_layer": layer,
-                        "reason": reason,
-                        "created_at": now,
-                        "expires_at": int(exp_ts),
-                    }
-                    if template:
-                        if norm_pane not in self._template_memory:
-                            self._template_memory[norm_pane] = {}
-                        self._template_memory[norm_pane][template] = self._memory[norm_pane][fingerprint]
+                    with self._memory_lock:
+                        self._memory.setdefault(norm_pane, {})[fingerprint] = {
+                            "pane_id": norm_pane,
+                            "raw_command": raw_cmd.strip(),
+                            "cwd": cwd,
+                            "decision_layer": layer,
+                            "reason": reason,
+                            "created_at": now,
+                            "expires_at": int(exp_ts),
+                        }
+                        if template:
+                            self._template_memory.setdefault(norm_pane, {})[template] = self._memory[norm_pane][fingerprint]
                     return (True, f"[Session Memory: {norm_pane}] {reason}", layer)
                 else:
                     con.execute("DELETE FROM evaluation_cache WHERE cache_key = ?", (f"pane_mem:{norm_pane}:{fingerprint}",))
@@ -199,13 +193,14 @@ class PaneSessionMemory:
 
     def clear(self, pane_id: Optional[str] = None) -> None:
         """Clear memory for a specific pane or all panes."""
-        if pane_id:
-            norm_pane = str(pane_id).strip()
-            self._memory.pop(norm_pane, None)
-            self._template_memory.pop(norm_pane, None)
-        else:
-            self._memory.clear()
-            self._template_memory.clear()
+        with self._memory_lock:
+            if pane_id:
+                norm_pane = str(pane_id).strip()
+                self._memory.pop(norm_pane, None)
+                self._template_memory.pop(norm_pane, None)
+            else:
+                self._memory.clear()
+                self._template_memory.clear()
 
 
 # Global Singleton Instance

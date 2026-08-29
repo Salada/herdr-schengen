@@ -205,19 +205,19 @@ def get_cached_evaluation(cache_key: str) -> Optional[dict[str, Any]]:
     now_ts = datetime.now(timezone.utc).timestamp()
 
     # 1. Check in-memory cache first (<0.1ms)
-    if cache_key in _IN_MEMORY_EVAL_CACHE:
-        is_safe, safety_reason, decision_layer, taxonomy, exp_ts = _IN_MEMORY_EVAL_CACHE[cache_key]
-        if exp_ts > now_ts:
-            _IN_MEMORY_EVAL_CACHE.move_to_end(cache_key)  # True LRU: move to most recent
-            return {
-                "cache_key": cache_key,
-                "is_safe": is_safe,
-                "safety_reason": safety_reason,
-                "decision_layer": decision_layer,
-                "taxonomy": taxonomy,
-                "from_memory": True,
-            }
-        else:
+    with _EVAL_CACHE_LOCK:
+        if cache_key in _IN_MEMORY_EVAL_CACHE:
+            is_safe, safety_reason, decision_layer, taxonomy, exp_ts = _IN_MEMORY_EVAL_CACHE[cache_key]
+            if exp_ts > now_ts:
+                _IN_MEMORY_EVAL_CACHE.move_to_end(cache_key)  # True LRU: move to most recent
+                return {
+                    "cache_key": cache_key,
+                    "is_safe": is_safe,
+                    "safety_reason": safety_reason,
+                    "decision_layer": decision_layer,
+                    "taxonomy": taxonomy,
+                    "from_memory": True,
+                }
             _IN_MEMORY_EVAL_CACHE.pop(cache_key, None)
 
     # 2. Check SQLite persistent cache
@@ -256,9 +256,10 @@ def get_cached_evaluation(cache_key: str) -> Optional[dict[str, Any]]:
                 except Exception:
                     exp_ts = now_ts + 3600.0
 
-                while len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
-                    _IN_MEMORY_EVAL_CACHE.popitem(last=False)  # True LRU: pop least recently used
-                _IN_MEMORY_EVAL_CACHE[cache_key] = (is_safe, safety_reason, decision_layer, taxonomy, exp_ts)
+                with _EVAL_CACHE_LOCK:
+                    while len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
+                        _IN_MEMORY_EVAL_CACHE.popitem(last=False)  # True LRU: pop least recently used
+                    _IN_MEMORY_EVAL_CACHE[cache_key] = (is_safe, safety_reason, decision_layer, taxonomy, exp_ts)
 
                 return {
                     "cache_key": cache_key,
@@ -298,10 +299,11 @@ def set_cached_evaluation(
     exp_ts = exp_dt.timestamp()
 
     # 1. Update in-memory LRU cache
-    while len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
-        _IN_MEMORY_EVAL_CACHE.popitem(last=False)  # True LRU eviction
-    _IN_MEMORY_EVAL_CACHE[cache_key] = (is_safe, safety_reason, decision_layer, taxonomy, exp_ts)
-    _IN_MEMORY_EVAL_CACHE.move_to_end(cache_key)
+    with _EVAL_CACHE_LOCK:
+        while len(_IN_MEMORY_EVAL_CACHE) >= _MAX_MEMORY_CACHE_SIZE:
+            _IN_MEMORY_EVAL_CACHE.popitem(last=False)  # True LRU eviction
+        _IN_MEMORY_EVAL_CACHE[cache_key] = (is_safe, safety_reason, decision_layer, taxonomy, exp_ts)
+        _IN_MEMORY_EVAL_CACHE.move_to_end(cache_key)
 
     # 2. Update SQLite persistent cache
     try:
