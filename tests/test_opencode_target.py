@@ -39,12 +39,59 @@ class TestAgentMatches(unittest.TestCase):
 class TestAdapterRegistry(unittest.TestCase):
     def test_target_kinds_registered(self):
         kinds = set(target_agent_kinds())
-        self.assertEqual(kinds, {"agy", "opencode"})
+        self.assertEqual(kinds, {"agy", "codex", "opencode"})
 
     def test_get_adapter(self):
         self.assertIsNotNone(get_adapter("agy"))
+        self.assertIsNotNone(get_adapter("codex"))
         self.assertIsNotNone(get_adapter("opencode"))
         self.assertIsNone(get_adapter("hermes"))
+
+
+class TestCodexAdapter(unittest.TestCase):
+    """Test the Codex CLI adapter (ratatui approval modal parsing + key injection)."""
+
+    def setUp(self):
+        self.adapter = get_adapter("codex")
+
+    def test_parse_exec_command(self):
+        text = (
+            "  Would you like to run the following command?\n\n"
+            "  Environment: local\n\n"
+            "  $ ls -la /tmp\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "  2. Yes, and don't ask again for commands that start with `ls -la /tmp` (p)\n"
+            "  3. No, and tell Codex what to do differently (esc)\n\n"
+            "  Press enter to confirm or esc to cancel"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "ls -la /tmp")
+
+    def test_parse_exec_command_wrapped(self):
+        text = (
+            "  Would you like to run the following command?\n"
+            "  $ echo a && echo b &&\n"
+            "  echo c\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "  Press enter to confirm or esc to cancel"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "echo a && echo b && echo c")
+
+    def test_parse_network_access(self):
+        text = 'Do you want to approve network access to "api.example.com"?\n\n› 1. Yes, just this once (y)'
+        self.assertEqual(self.adapter.parse_permission_request(text), "network_access api.example.com")
+
+    def test_parse_file_edit(self):
+        text = "Would you like to make the following edits?\n\n› 1. Yes, proceed (y)"
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
+
+    def test_parse_none_when_no_dialog(self):
+        self.assertIsNone(self.adapter.parse_permission_request("random terminal output"))
+
+    def test_inject_approval_sends_y(self):
+        with patch("adapters.agent_adapters.codex.run_cmd") as rc:
+            approved, reason = self.adapter.inject_approval("w1D:p1K", "ls -la /tmp")
+            self.assertTrue(approved)
+            rc.assert_called_once_with(["herdr", "agent", "send-keys", "w1D:p1K", "y"])
 
 
 class TestOpenCodeDialogParsing(unittest.TestCase):
