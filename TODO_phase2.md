@@ -55,6 +55,21 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
       1) `schengen_watcher.py`: `decision_layer == "QUESTION"` 에스컬레이션에 대해 어댑터의 질문 다이얼로그(header/footer)가 소멸되었거나 에이전트가 `blocked`를 벗어난 경우 즉시 큐에서 해소/제거(`resolve_escalation` 또는 `status=RESOLVED, approver="pane-direct"` / `resolution="ANSWERED"`).
       2) `schengen_tui.py`: `pre-render slot validation`에서 `is_question` 예외를 제거하고, `adapter.dialog_is_live(pane_text) == False`일 때 즉시 큐에서 자동 퇴출(Silent Eviction)하여 상단 배너 고착 해소.
 
+[] [Idea/Architecture] Question 분리 처리: 커맨드 에스컬레이션 큐 비차단(Non-blocking) & 사이드바/힌트 버튼 기반 Pane 점프 분리
+  - Context & Core Problem:
+    • Question은 TUI에서 승인/거절할 수 없고 반드시 사용자가 해당 Pane으로 가서 텍스트를 입력해야 함.
+    • 현재 구조에서는 Question이 발생하면 TUI 단일 활성 슬롯을 점유하여, 다른 에이전트들의 모든 위험 명령 에스컬레이션 및 승인 파이프라인이 전면 병목(Block)되는 심각한 비효율 발생.
+  - Solution & UI/UX Architecture:
+    1) [Command Approval Slot과 Question 전면 분리 (Non-blocking)]:
+       - Question(`decision_layer == "QUESTION"`)은 메인 커맨드 결재 슬롯(`Active Action Required Slot`)을 점유하지 않고 백그라운드 힌트로 격리.
+       - 다른 Pane의 쉘 명령 에스컬레이션은 차질 없이 계속 TUI 메인 화면에 올라오고 정상 승인/거절 수행.
+    2) [사이드바/레이더 힌트 배지 & 원클릭 Jump 연동]:
+       - 우측 사이드 패널(Radar) 또는 상단 칩에 `💬 [w1N:p1 Question Awaiting Answer]` 미니 힌트 배지 표시.
+       - 클릭 또는 `/jump <pane_id>` 입력 시 Herdr를 통해 해당 Pane으로 포커스를 즉시 전환하여 사용자가 타이핑할 수 있도록 안내.
+    3) [자동 소멸 생명주기]:
+       - 사용자가 해당 Pane에서 답변을 제출하면 `dialog_is_live == False` 감지와 함께 사이드바 힌트 배지가 무음 소멸.
+
+
 
 [] [Bug/Eviction] AGY 및 Codex 다이얼로그 오판(tail 오버플로우/앵커 누락)으로 인한 조기 Auto-Eviction(가짜 pane-direct 승인) 버그 (사례: #7771 AGY / #7938 Codex):
   - 현상 및 원인 (사례: Audit #7771 AGY Git 커밋 & Audit #7938 / Escalation #2947 Codex SQLite 장문 쿼리):
