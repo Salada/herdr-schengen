@@ -84,6 +84,7 @@ from core.guard_db import (
     get_recent_audit_logs,
     get_session_dashboard_summary,
     group_pending_escalations,
+    resolve_escalation,
     set_answer_language,
     set_channel_approve_config,
     set_instruction_delivery_config,
@@ -94,6 +95,8 @@ from tools.schengen_agent_llm import (
     get_current_active_escalation,
     reject_batch_escalations,
 )
+from adapters.agent_adapters import get_adapter
+from adapters.herdr_client import get_pane_text
 from cmd.schengen_watcher import list_active_guard_locks
 
 
@@ -949,6 +952,10 @@ class SchengenTUIApp(App):
         self._chat_plain: List[str] = []  # Plain-text buffer for clipboard copy
         self._last_escalation_hash = ""
         self._notified_escalation_ids: Set[int] = set()
+        # Escalation ids whose pane-dialog liveness was already validated this
+        # session (pane-direct pre-render eviction runs ONCE per escalation id to
+        # avoid a pane-read subprocess on every render).
+        self._validated_liveness_ids: Set[int] = set()
         self._last_active_id: Optional[int] = None
         self._processing_chat: bool = False
         self._last_guard_active: bool = False
@@ -1284,84 +1291,117 @@ class SchengenTUIApp(App):
             active_id = active_esc["id"]
             is_question = active_esc.get('decision_layer') == "QUESTION"
             raw_cmd = active_esc['raw_command'].strip()
-            cmd_lines = raw_cmd.splitlines()
-            if len(cmd_lines) > 5:
-                cmd_display = "\n".join(cmd_lines[:5]) + f"\n[dim]… (+{len(cmd_lines) - 5} lines truncated)[/]"
-            else:
-                cmd_display = "\n".join(cmd_lines)
-            
-            reason_short = active_esc['safety_reason'][:72]
-            if is_question:
-                banner_text = (
-                    f"[bold cyan]❓ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
-                    f"[bold white]{rich_escape(cmd_display)}[/]\n"
-                    f"[dim]   ↩ Answer this question directly in the pane — resolves automatically.[/]"
+
+            # PANE-DIRECT pre-render slot validation: a non-QUESTION escalation
+            # whose pane dialog is no longer LIVE was already answered directly in
+            # the pane — auto-evict (approver=pane-direct) BEFORE rendering the
+            # banner/notification so a stale PENDING row never pins the FIFO head.
+            # Run ONCE per escalation id (_validated_liveness_ids) to avoid a
+            # pane-read subprocess on every render. adapter None (unknown agent
+            # kind) -> fail-closed: never evict.
+            pane_direct_evicted = False
+            if not is_question and active_id not in self._validated_liveness_ids:
+                self._validated_liveness_ids.add(active_id)
+                adapter = get_adapter(active_esc.get("agent_kind") or "")
+                if adapter is not None:
+                    try:
+                        dialog_live = adapter.dialog_is_live(get_pane_text(active_esc["pane_id"], lines=80))
+                    except Exception:
+                        dialog_live = True  # fail-closed: never evict on read error
+                    if not dialog_live:
+                        resolve_escalation(
+                            pane_id=active_esc["pane_id"],
+                            resolution="APPROVED",
+                            approver="pane-direct",
+                        )
+                        pane_direct_evicted = True
+
+            if pane_direct_evicted:
+                _update_static_if_changed(
+                    banner,
+                    "\n[bold green]✔ Dialog answered in-pane  —  escalation auto-evicted[/]\n"
+                    "[dim]🛡️  Stale escalation resolved via pane-direct.[/]",
                 )
+                self._set_question_ui(None)
             else:
-                # M7 anti-fatigue (INV-13): when the FIFO head group aggregates
-                # >1 identical (decision_layer, canonical_pattern) rows, surface a
-                # batch line with one-key /approve-batch | /reject-batch actions.
-                batch_note = ""
-                try:
-                    batch_cfg = get_batch_approval_config()
-                    if batch_cfg.get("batch_approval_enabled", True):
-                        groups = group_pending_escalations(get_pending_escalations())
-                        head = groups[0] if groups else None
-                        if head and head["count"] > 1 and head["items"][0]["id"] == active_id:
-                            batch_note = (
-                                f"[bold magenta]⚠ {head['count']} similar commands — pattern:[/] "
-                                f"[white]{rich_escape(head['canonical_pattern'][:60])}[/] "
-                                f"[dim](layer: {head['decision_layer']})[/]\n"
-                                f"[dim]   [/][bold magenta]/approve-batch[/] [dim]or[/] [bold magenta]/reject-batch[/] [dim]for one-key resolution[/]\n"
-                            )
-                except Exception:
-                    batch_note = ""
-                banner_text = (
-                    f"[bold yellow]▶ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
-                    f"[bold white]{rich_escape(cmd_display)}[/]\n"
-                    f"{batch_note}"
-                    f"[dim]⚠ {rich_escape(reason_short)}[/]\n"
-                    f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
-                )
-            _update_static_if_changed(banner, banner_text)
-            self._set_question_ui(active_esc if is_question else None)
-
-            # STRICT SEQUENTIAL FIFO: Only CONTROLLER awakens/delivers chat for active escalation
-            if self.is_controller and active_id not in self._notified_escalation_ids and not self._processing_chat:
-                self._notified_escalation_ids.add(active_id)
-                self._last_active_id = active_id
-
-                # Sound alert
-                try:
-                    subprocess.Popen(
-                        ["herdr", "notification", "show", "Schengen — Escalation Intercepted", "--body", f"Pending on {active_esc['pane_id']}", "--sound", "request"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    subprocess.Popen(["afplay", "/System/Library/Sounds/Ping.aiff"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    self.bell()
-
-                safe_cmd = rich_escape(active_esc['raw_command'])
-                safe_reason = rich_escape(active_esc['safety_reason'])
-
-                if is_question:
-                    self._write(f"\n[cyan]{'─'*20} ❓ Question #{active_id} {'─'*20}[/]")
-                    self._write(f"  [dim]Pane:[/]     {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
-                    self._write(f"  [dim]Question:[/] [white]{safe_cmd}[/]")
-                    self._write(f"[dim]  ↩ Answer directly in the pane — resolves automatically.[/]\n")
-                    # Read-only interpretation (NO approve/reject tools): surface the
-                    # question in the TUI chat so the user notices it, without giving
-                    # the gatekeeper any ability to adjudicate (AGENTS.md rule 10).
-                    self._interpret_question()
+                cmd_lines = raw_cmd.splitlines()
+                if len(cmd_lines) > 5:
+                    cmd_display = "\n".join(cmd_lines[:5]) + f"\n[dim]… (+{len(cmd_lines) - 5} lines truncated)[/]"
                 else:
-                    self._write(f"\n[yellow]{'─'*20} ▶ Escalation #{active_id} Intercepted {'─'*20}[/]")
-                    self._write(f"  [dim]Pane:[/]   {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
-                    self._write(f"  [dim]Cmd:[/]    [white]{safe_cmd}[/]")
-                    self._write(f"  [dim]Reason:[/] {safe_reason}")
-                    self._write(f"[dim]  ⚡ Autonomous inspector awakening...[/]\n")
+                    cmd_display = "\n".join(cmd_lines)
 
-                    self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
+                reason_short = active_esc['safety_reason'][:72]
+                if is_question:
+                    banner_text = (
+                        f"[bold cyan]❓ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                        f"[bold white]{rich_escape(cmd_display)}[/]\n"
+                        f"[dim]   ↩ Answer this question directly in the pane — resolves automatically.[/]"
+                    )
+                else:
+                    # M7 anti-fatigue (INV-13): when the FIFO head group aggregates
+                    # >1 identical (decision_layer, canonical_pattern) rows, surface a
+                    # batch line with one-key /approve-batch | /reject-batch actions.
+                    batch_note = ""
+                    try:
+                        batch_cfg = get_batch_approval_config()
+                        if batch_cfg.get("batch_approval_enabled", True):
+                            groups = group_pending_escalations(get_pending_escalations())
+                            head = groups[0] if groups else None
+                            if head and head["count"] > 1 and head["items"][0]["id"] == active_id:
+                                batch_note = (
+                                    f"[bold magenta]⚠ {head['count']} similar commands — pattern:[/] "
+                                    f"[white]{rich_escape(head['canonical_pattern'][:60])}[/] "
+                                    f"[dim](layer: {head['decision_layer']})[/]\n"
+                                    f"[dim]   [/][bold magenta]/approve-batch[/] [dim]or[/] [bold magenta]/reject-batch[/] [dim]for one-key resolution[/]\n"
+                                )
+                    except Exception:
+                        batch_note = ""
+                    banner_text = (
+                        f"[bold yellow]▶ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                        f"[bold white]{rich_escape(cmd_display)}[/]\n"
+                        f"{batch_note}"
+                        f"[dim]⚠ {rich_escape(reason_short)}[/]\n"
+                        f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
+                    )
+                _update_static_if_changed(banner, banner_text)
+                self._set_question_ui(active_esc if is_question else None)
+
+                # STRICT SEQUENTIAL FIFO: Only CONTROLLER awakens/delivers chat for active escalation
+                if self.is_controller and active_id not in self._notified_escalation_ids and not self._processing_chat:
+                    self._notified_escalation_ids.add(active_id)
+                    self._last_active_id = active_id
+
+                    # Sound alert
+                    try:
+                        subprocess.Popen(
+                            ["herdr", "notification", "show", "Schengen — Escalation Intercepted", "--body", f"Pending on {active_esc['pane_id']}", "--sound", "request"],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        subprocess.Popen(["afplay", "/System/Library/Sounds/Ping.aiff"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        self.bell()
+
+                    safe_cmd = rich_escape(active_esc['raw_command'])
+                    safe_reason = rich_escape(active_esc['safety_reason'])
+
+                    if is_question:
+                        self._write(f"\n[cyan]{'─'*20} ❓ Question #{active_id} {'─'*20}[/]")
+                        self._write(f"  [dim]Pane:[/]     {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
+                        self._write(f"  [dim]Question:[/] [white]{safe_cmd}[/]")
+                        self._write(f"[dim]  ↩ Answer directly in the pane — resolves automatically.[/]\n")
+                        # Read-only interpretation (NO approve/reject tools): surface the
+                        # question in the TUI chat so the user notices it, without giving
+                        # the gatekeeper any ability to adjudicate (AGENTS.md rule 10).
+                        self._interpret_question()
+                    else:
+                        self._write(f"\n[yellow]{'─'*20} ▶ Escalation #{active_id} Intercepted {'─'*20}[/]")
+                        self._write(f"  [dim]Pane:[/]   {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
+                        self._write(f"  [dim]Cmd:[/]    [white]{safe_cmd}[/]")
+                        self._write(f"  [dim]Reason:[/] {safe_reason}")
+                        self._write(f"[dim]  ⚡ Autonomous inspector awakening...[/]\n")
+
+                        self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
 
         else:
             self._set_question_ui(None)

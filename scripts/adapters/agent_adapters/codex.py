@@ -29,6 +29,13 @@ _QUESTION_FOOTER_RE = re.compile(r"enter\s+to\s+submit\s+answer", re.IGNORECASE)
 _QUESTION_HEADER_RE = re.compile(r"Question\s+\d+\s*/\s*\d+\s*\([^)]*\)")
 _OPTION_ROW_RE = re.compile(r"^›?\s*\d+\.\s")
 
+# Focused-row marker of the ratatui list-selection modal: the '›' glyph precedes
+# the ACTIVE (selected) option row. The ACTIVE dialog has '› 1. Yes' in its tail;
+# a historical prompt or an already-completed (enter-pressed) dialog has the
+# marker moved off or gone entirely. MULTILINE so '^' anchors at each LINE start
+# (the option row is never the first char of the pane read).
+_ACTIVE_CHOICE_RE = re.compile(r"^\s*›\s*1\.\s*Yes\b", re.MULTILINE)
+
 
 def _extract_codex_question_text(text: str):
     """Extract the free-text question body from a codex input-request dialog.
@@ -115,25 +122,47 @@ class CodexAdapter(AgentAdapter):
         # File edit: preserve a single patch target so the evaluator can apply
         # its path-based secret, sandbox, and gray-zone checks.  Deletions,
         # multiple files, and pathless dialogs deliberately remain fail-closed.
-        if "Would you like to make the following edits?" in visible_text:
-            # Legacy Codex patch header: `*** Add/Update/Delete File: <path>`
-            edits = re.findall(r"^\*\*\* (Add|Update|Delete) File: (.+)$", visible_text, re.MULTILINE)
-            if edits:
-                if len(edits) == 1 and edits[0][0] in ("Add", "Update"):
-                    return f"edit_file {edits[0][1].strip()}"
-                return "edit_file"  # delete or multi-file -> fail-closed
+        # Anchored to a LIVE region (rfind from the latest header + focused-row
+        # '› 1. Yes' marker in the tail) so a historical header or an
+        # already-completed (enter-pressed) edit dialog lingering in scrollback
+        # is NOT re-parsed as a pending edit_file request (stale-pending
+        # eviction).
+        hdr = visible_text.rfind("Would you like to make the following edits?")
+        region = visible_text[hdr:] if hdr != -1 else ""
+        if not region or not _ACTIVE_CHOICE_RE.search(region[-400:]):
+            return None  # historical header / already-completed edit -> NOT live
 
-            # Current Codex CLI format: `Destination: <path>` / `File: <path>`
-            dests = re.findall(r"^(?:Destination|File):\s*(.+?)\s*$", visible_text, re.MULTILINE)
-            if len(dests) == 1:
-                return f"edit_file {dests[0].strip()}"
-            return "edit_file"  # multi-file or pathless -> fail-closed
+        # Legacy Codex patch header: `*** Add/Update/Delete File: <path>`
+        edits = re.findall(r"^\*\*\* (Add|Update|Delete) File: (.+)$", region, re.MULTILINE)
+        if edits:
+            if len(edits) == 1 and edits[0][0] in ("Add", "Update"):
+                return f"edit_file {edits[0][1].strip()}"
+            return "edit_file"  # delete or multi-file -> fail-closed
+
+        # Current Codex CLI format: `Destination: <path>` / `File: <path>`
+        dests = re.findall(r"^(?:Destination|File):\s*(.+?)\s*$", region, re.MULTILINE)
+        if len(dests) == 1:
+            return f"edit_file {dests[0].strip()}"
+        return "edit_file"  # multi-file or pathless -> fail-closed (unchanged #52 semantics)
 
         # Permissions: Would you like to grant these permissions?
         if "Would you like to grant these permissions?" in visible_text:
             return "grant_permissions"
 
         return None
+
+    def dialog_is_live(self, visible_text: str) -> bool:
+        """True only if the ACTIVE codex approval dialog is genuinely open.
+
+        Requires the dialog footer AND the focused-row '› 1. Yes' marker in the
+        tail of visible_text — a historical prompt or a completed (enter-pressed)
+        edit dialog lingering in scrollback is NOT live. Stricter than
+        get_pending_request (which only requires the footer).
+        """
+        return (
+            footer_is_live(visible_text, "Press enter to confirm or esc to cancel")
+            and _ACTIVE_CHOICE_RE.search(visible_text[-400:]) is not None
+        )
 
     def inject_approval(self, pane_id, req_cmd):
         """Approve via 'y' (selection-independent, per Codex default keymap)."""

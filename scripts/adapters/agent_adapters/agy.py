@@ -37,6 +37,24 @@ class AgyAdapter(AgentAdapter):
         "↑/↓ Navigate",
     )
 
+    def dialog_is_live(self, visible_text: str) -> bool:
+        """True only if an ACTIVE agy approval dialog anchor is present in the tail.
+
+        AGY dialogs render their live option rows/footers ("esc Skip", "> 1. Yes",
+        "[y/N]", "Press enter to continue", "[0] Skip") at the BOTTOM of the pane;
+        a completed dialog's anchors scroll out of the tail window. Tail-anchored
+        mirror of codex/opencode dialog_is_live so pane-direct eviction never
+        fires on a scrollback artifact.
+        """
+        tail = visible_text[-400:]
+        return (
+            footer_is_live(visible_text, "esc Skip")
+            or footer_is_live(visible_text, "Press enter to continue")
+            or "[0] Skip" in tail
+            or bool(re.search(r">\s*1\.\s*Yes\b", tail))
+            or bool(re.search(r"\[[Yy]/[Nn]\]", tail))
+        )
+
     def parse_permission_request(self, visible_text):
         """Extract command/script/file-edit/survey from diverse AGY approval dialogs."""
         # 0. Human question dialog (Antigravity CLI): "Question N/M: <text>" header

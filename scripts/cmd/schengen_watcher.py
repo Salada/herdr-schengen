@@ -52,6 +52,7 @@ from core.guard_db import (
     check_persisted_allowlist,
     enqueue_pending_escalation,
     get_pattern_analysis,
+    get_pane_direct_config,
     get_recent_audit_logs,
     get_state_file_paths,
     init_db,
@@ -82,6 +83,10 @@ WATCHER_LIMITS = {"max_workers": (1, 10), "interval_seconds": (1, 3600), "auto_e
 
 # Global reload trigger flag
 _RELOAD_REQUESTED = False
+
+# Pane-direct PD-C debounce counter: consecutive not-live polls per pane_id.
+# Module-scope so the pure decision helper and the poll loop share one counter.
+_not_live_streak: dict[str, int] = {}
 
 # Host binary dirs that may be missing from the daemon's inherited PATH (e.g.
 # launched from a bare shell) but are required for SAST tools (shellcheck /
@@ -610,18 +615,67 @@ def _inject_runtime_path() -> None:
     os.environ["PATH"] = os.pathsep.join(parts)
 
 
-def _should_evict_stale_escalation(cached: Optional[dict], agent_status: str) -> bool:
-    """Return True if a cached UNSAFE escalation should be auto-evicted.
+NON_BLOCKED_STATUSES = ("working", "idle", "done")
 
-    Signals pane-direct adjudication: the agent was `blocked` (dialog shown) when
-    the escalation was cached, and has since transitioned to a non-blocked state
-    (working / idle / done) — i.e. the user answered the dialog directly in the pane.
+
+def should_evict_pane_direct(cached, pane_info, visible_text, req_cmd, adapter):
+    """Returns (evict: bool, reason: str). cached is the last_processed_prompt entry
+    or None; pane_info is get_pane_info(); req_cmd is adapter.get_pending_request(...)
+    (already computed) or None; adapter is the registered AgentAdapter or None."""
+    if not cached or cached.get("is_safe", True):
+        return False, "no unsafe escalation"
+    if adapter is None:
+        return False, "no adapter"
+    dialog_live = adapter.dialog_is_live(visible_text)
+    seq_changed = pane_info.get("state_change_seq", 0) != cached.get("seq", -1)
+    status = pane_info.get("agent_status", "")
+    status_changed = status != cached.get("status", "")
+    if not dialog_live and not req_cmd:
+        return True, "dialog gone"           # PD-A
+    if cached.get("status") == "blocked" and status in NON_BLOCKED_STATUSES and not dialog_live:
+        return True, "agent left blocked"    # PD-B
+    if seq_changed and not dialog_live:
+        return True, "state changed, dialog not live"  # PD-C (debounced by caller)
+    return False, "still live"
+
+
+def pane_direct_maybe_evict(pane_id, cached, pane_info, visible_text, req_cmd, adapter, confirm_polls=2):
+    """Single-poll pane-direct eviction decision INCLUDING the PD-C debounce.
+
+    Pure decision helper (module-scope `_not_live_streak` counter): PD-A (dialog
+    gone) and PD-B (agent left blocked) evict immediately; PD-C (state changed +
+    dialog not live) requires `confirm_polls` CONSECUTIVE not-live polls so a
+    transient dialog redraw never self-approves a stale escalation.
+
+    Returns (evict: bool, reason: str). On a debounced PD-C the caller must keep
+    the cached entry untouched and re-poll.
+    """
+    evict, reason = should_evict_pane_direct(cached, pane_info, visible_text, req_cmd, adapter)
+    if not evict:
+        _not_live_streak.pop(pane_id, None)
+        return False, reason
+    if reason == "state changed, dialog not live":
+        streak = _not_live_streak.get(pane_id, 0) + 1
+        _not_live_streak[pane_id] = streak
+        if streak < max(1, int(confirm_polls)):
+            return False, f"debounced (not-live poll {streak}/{int(confirm_polls)})"
+    _not_live_streak.pop(pane_id, None)
+    return True, reason
+
+
+def _should_evict_stale_escalation(cached: Optional[dict], agent_status: str) -> bool:
+    """Backward-compatible predicate wrapper (issue #33), superseded in the poll
+    loop by should_evict_pane_direct (the single pane-direct eviction path).
+
+    Old semantics: a cached UNSAFE escalation whose agent was `blocked` at cache
+    time is evicted once the agent transitions to a non-blocked state (the user
+    answered the dialog directly in the pane). Retained for tests/back-compat.
     """
     if not cached or cached.get("is_safe", True):
         return False
     if cached.get("status", "") != "blocked":
         return False
-    return agent_status in ("working", "idle", "done")
+    return agent_status in NON_BLOCKED_STATUSES
 
 
 def verify_host_runtime_environment():
@@ -1095,6 +1149,11 @@ def main():
 
             idle_count = 0
 
+            # Pane-direct auto-eviction knobs (one config read per poll cycle).
+            pane_direct_cfg = get_pane_direct_config()
+            pane_direct_enabled = bool(pane_direct_cfg.get("pane_direct_eviction_enabled", True))
+            pane_direct_confirm_polls = max(1, int(pane_direct_cfg.get("pane_direct_confirm_polls", 2)))
+
             for pane_id in target_panes:
                 pane_info = get_pane_info(pane_id)
                 if not pane_info:
@@ -1116,32 +1175,50 @@ def main():
 
                 if not req_cmd:
                     # Prompt is no longer active; reset last_processed_prompt for this pane
-                    if pane_id in last_processed_prompt:
-                        resolve_escalation(pane_id=pane_id, approver="other")
+                    cached_clear = last_processed_prompt.get(pane_id)
+                    if cached_clear:
+                        if not cached_clear.get("is_safe", True):
+                            # UNSAFE escalation whose dialog is gone: the user
+                            # answered it DIRECTLY in the pane — record pane-direct
+                            # provenance (approver + APPROVED resolution).
+                            resolve_escalation(pane_id=pane_id, resolution="APPROVED", approver="pane-direct")
+                        else:
+                            resolve_escalation(pane_id=pane_id, approver="other")
                         last_processed_prompt.pop(pane_id, None)
+                        _not_live_streak.pop(pane_id, None)
                     if inspector.active_human and inspector.active_human[0] == pane_id:
                         inspector.active_human = None
                     inspector.release(pane_id)
                     continue
 
-                # Live revalidation (issue #33): the agent was `blocked` (dialog
-                # shown) when this UNSAFE escalation was cached, but has since
-                # transitioned to a non-blocked state — the user answered the
-                # dialog DIRECTLY in the pane (y/n/enter). Auto-evict the stale
-                # escalation instead of letting the scrollback dialog keep it
-                # PENDING for minutes.
-                cached_esc = last_processed_prompt.get(pane_id)
-                if _should_evict_stale_escalation(cached_esc, agent_status):
-                    resolve_escalation(pane_id=pane_id, approver="pane-direct")
-                    last_processed_prompt.pop(pane_id, None)
-                    if inspector.active_human and inspector.active_human[0] == pane_id:
-                        inspector.active_human = None
-                    inspector.release(pane_id)
-                    print(
-                        f"♻️ [AUTO-EVICT] Pane {pane_id}: agent left blocked state; resolved stale escalation (pane-direct).",
-                        flush=True,
+                # Pane-direct adjudication auto-eviction (PD-A/PD-B/PD-C): a cached
+                # UNSAFE escalation is auto-resolved (approver=pane-direct,
+                # resolution=APPROVED) when the live dialog is no longer present —
+                # the user answered it DIRECTLY in the pane (y/n/enter). PD-C is
+                # debounced (confirm_polls consecutive not-live polls) so a
+                # transient dialog redraw never self-approves a stale escalation.
+                if pane_direct_enabled:
+                    cached_esc = last_processed_prompt.get(pane_id)
+                    evict, evict_reason = pane_direct_maybe_evict(
+                        pane_id, cached_esc, pane_info, visible_text, req_cmd, adapter,
+                        confirm_polls=pane_direct_confirm_polls,
                     )
-                    continue
+                    if evict:
+                        resolve_escalation(pane_id=pane_id, resolution="APPROVED", approver="pane-direct")
+                        last_processed_prompt.pop(pane_id, None)
+                        _not_live_streak.pop(pane_id, None)
+                        if inspector.active_human and inspector.active_human[0] == pane_id:
+                            inspector.active_human = None
+                        inspector.release(pane_id)
+                        print(
+                            f"♻️ [PANE-DIRECT] Pane {pane_id}: {evict_reason}; resolved stale escalation (approver=pane-direct).",
+                            flush=True,
+                        )
+                        continue
+                    if evict_reason.startswith("debounced"):
+                        # PD-C debounce: hold processing (no re-evaluation/re-escalation)
+                        # until confirm_polls consecutive not-live polls observed.
+                        continue
 
                 if req_cmd.startswith("question"):
                     # Human question dialog (subjective). Never send a keystroke,
