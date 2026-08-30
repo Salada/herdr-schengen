@@ -1281,9 +1281,11 @@ class SchengenTUIApp(App):
         status = ""
         try:
             info = get_pane_info(pane_id)
-            status = (info or {}).get("agent_status", "")
         except Exception:
-            pass
+            return False  # INV-PD-4: unknown status -> never evict (fail-closed)
+        if not info or not info.get("agent_status"):
+            return False  # INV-PD-4: unknown status -> never evict (fail-closed)
+        status = info["agent_status"]
         if status == "blocked":
             self._pane_direct_polls[active_id] = 0   # INV-PD-4: blocked -> NEVER evict
             return False

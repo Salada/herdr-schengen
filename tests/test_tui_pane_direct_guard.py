@@ -120,6 +120,38 @@ class TestTUIPaneDirectGuard(unittest.TestCase):
         self.assertEqual(app._pane_direct_head, 8)
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_tui_get_pane_info_error_never_evicts(self):
+        # INV-PD-4 fail-closed: a get_pane_info EXCEPTION must never reach the
+        # debounce/eviction path — unknown status -> never evict, even across
+        # many renders.
+        app = _make_app()
+        with patch(
+            "cmd.schengen_tui.get_pane_info", side_effect=RuntimeError("herdr CLI unavailable")
+        ), patch("cmd.schengen_tui.get_pane_text", return_value="cleared pane text"), patch(
+            "cmd.schengen_tui.resolve_escalation"
+        ) as mock_resolve:
+            for _ in range(3):  # well beyond confirm_polls=2
+                evicted = app._pane_direct_liveness_guard(self.esc, confirm_polls=2)
+                self.assertFalse(evicted)
+        mock_resolve.assert_not_called()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_tui_get_pane_info_empty_never_evicts(self):
+        # INV-PD-4 fail-closed: get_pane_info returning no/empty agent_status
+        # ({} or None) must never evict.
+        app = _make_app()
+        for empty_info in ({}, None):
+            with patch(
+                "cmd.schengen_tui.get_pane_info", return_value=empty_info
+            ), patch("cmd.schengen_tui.get_pane_text", return_value="cleared pane text"), patch(
+                "cmd.schengen_tui.resolve_escalation"
+            ) as mock_resolve:
+                for _ in range(3):
+                    evicted = app._pane_direct_liveness_guard(self.esc, confirm_polls=2)
+                    self.assertFalse(evicted)
+            mock_resolve.assert_not_called()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     def test_tui_live_dialog_resets_counter(self):
         # A live read resets the not-live counter (no eviction on recovery).
         app = _make_app()
