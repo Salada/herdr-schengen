@@ -49,7 +49,7 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   2) `_norm_req_cmd` 공백 붕괴 유의: soft-wrap으로 path/token이 newline 분할될 때의 동작 정합성 및 향후 렌더러 변경 시 주의점 문서화.
   3) [x] Test Runner Fast-Track 허용 (PR #142): `python3 -m unittest` 및 `2>&1 | grep` 파이프라인 Fast-Track + Complexity Tax 사전 통과 완료 (#2555 해소).
 
-[] [Task/Allowlist] 단독 실행 읽기 전용 sed(`sed -n '<range>p' <file>`) Fast-Track Allowlist 등록 (#6935 등 Codex 다빈도 패턴):
+[x] [Task/Allowlist] 단독 실행 읽기 전용 sed(`sed -n '<range>p' <file>`) — PR #141 완료 (폐쇄 화이트리스트 + -e/-f 가드 + 파이프라인 하드닝):
   - 현상 및 원인:
     • Codex 에이전트가 파일/스킬 문서 열람을 위해 `sed -n '1,260p' /path/to/file`을 빈번히 실행하나, 현재 `security_evaluator.py`의 `READONLY_PIPELINE_COMMANDS`에는 `sed`가 포함되어 있으나 단독 명령 allowlist인 `FAST_TRACK_SAFE_COMMANDS`에는 `sed`가 누락되어 있어 파이프라인(`|`) 없는 단독 `sed -n`이 `NOT_ALLOWLISTED`로 fail-closed 에스컬레이션됨.
   - 안전성 검증 및 Allowlist 등록 조건:
@@ -174,7 +174,7 @@ Epic:
      미등록 매니저(yarn/pnpm/bun/nix/go install)·READ 쿼리 네트워크(brew search/npm view) 라우팅.
     [milestone 순서]
      1) [x] narrow AST + catch-all 제거 (PR #126) 2) [x] novelty/history gate + scope/TTL (PR #128) 3) [x] complexity (PR #139)
-     4) [x] package manager (PR #131) 5) [x] origin weighting (PR #141) 6) [x] cloud judge confidence (PR #143)
+     4) [x] package manager (PR #131) 5) [x] origin weighting (PR #140) 6) [x] cloud judge confidence (PR #143)
     7) [ ] anti-fatigue batch 집계 (INV-13 잔여, 2b)
 
 
