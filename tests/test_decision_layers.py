@@ -1146,5 +1146,42 @@ class TestStandaloneReadOnlySed(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
 
+class TestTestRunnerStderrRedirect(unittest.TestCase):
+    """Issue #2555: the gatekeeper's own test command with `2>&1 | grep` fast-tracks.
+
+    Fix A: `2>&1` is a file-descriptor redirect, NOT a command separator — the
+    complexity metric must not inflate the segment count.
+    Fix B: `python3 -m unittest ... 2>&1` plus AT MOST ONE read-only filter pipe
+    fast-tracks; multi-pipe, file redirection, and non-filter pipes stay fail-closed.
+    """
+
+    def test_test_runner_with_2and1_and_filter_pipe_fast_tracks(self):
+        safe_cmds = (
+            "python3 -m unittest discover -s tests 2>&1 | grep -E 'FAIL|ERROR'",
+            "python3 -m unittest discover -s tests 2>&1 | grep FAIL",
+            "python3 -m unittest discover -s tests 2>&1 | head -20",
+            "python3 -m unittest discover -s tests",  # bare regression
+        )
+        for cmd in safe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_test_runner_unsafe_pipes_stay_fail_closed(self):
+        unsafe_cmds = (
+            "python3 -m unittest discover -s tests 2>&1 | grep FAIL | tee /tmp/out",  # multi-pipe
+            "python3 -m unittest discover -s tests 2>&1 > /tmp/out",  # file redirection
+            "python3 -m unittest discover -s tests | sh",  # non-filter pipe
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
+    def test_compute_complexity_2and1_not_a_separator(self):
+        # Fix A metric: '2>&1' counts as 1 segment + 1 redirection (was 2 segments + 1).
+        self.assertEqual(compute_complexity("ls 2>&1"), 2)
+        self.assertEqual(compute_complexity("a 2>&1 | b"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
