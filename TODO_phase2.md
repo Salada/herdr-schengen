@@ -44,10 +44,13 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
       1) `schengen_tui.py`: `pre-render slot validation`에서 `if not is_question`으로 `QUESTION` 레이어를 의도적으로 제외하여, TUI 렌더링 시 다이얼로그 소멸 검사 및 Auto-Eviction이 전혀 발동하지 않음.
       2) `schengen_watcher.py`: `pane_direct_maybe_evict`가 `not is_safe`인 UNSAFE 에스컬레이션만 검사(`is_safe=True`인 QUESTION은 제외)하여 데몬 루프에서도 소멸 감지 누락.
       3) Cross-Workspace/Idle 감시 갭: 감시 대상이 아닌 워크스페이스/Pane이거나 답변 후 에이전트가 즉시 다음 작업/idle로 전이될 때 `not req_cmd` 트리거가 유실됨.
+  - 임시 Workaround 조치 (2026-08-31 완료):
+    • 블로킹 긴급 해소를 위해 Escalation #2800 레코드를 SQLite에서 `status='RESOLVED', resolution='ANSWERED', approver='human-pane'`로 수동 업데이트하여 TUI 배너 클리어 완료. (코드 수준 근본 해결 필요)
   - 해결 방향 (최저 난이도 / 최소 변경):
     • **Watcher 및 TUI의 단순 Liveness 소멸 감지 & Auto-Evict (가장 낮은 난이도 적용)**:
       1) `schengen_watcher.py`: `decision_layer == "QUESTION"` 에스컬레이션에 대해 어댑터의 질문 다이얼로그(header/footer)가 소멸되었거나 에이전트가 `blocked`를 벗어난 경우 즉시 큐에서 해소/제거(`resolve_escalation` 또는 `status=RESOLVED, approver="pane-direct"` / `resolution="ANSWERED"`).
       2) `schengen_tui.py`: `pre-render slot validation`에서 `is_question` 예외를 제거하고, `adapter.dialog_is_live(pane_text) == False`일 때 즉시 큐에서 자동 퇴출(Silent Eviction)하여 상단 배너 고착 해소.
+
 
 
 [] [Refactor/Adapter] `footer_is_live` 공용 유틸 안정화 및 엣지케이스 대응 3종 (#17 피어리뷰 후속):
