@@ -71,21 +71,9 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
 
 
 
-[] [Bug/Eviction] AGY 및 Codex 다이얼로그 오판(tail 오버플로우/앵커 누락)으로 인한 조기 Auto-Eviction(가짜 pane-direct 승인) 버그 (사례: #7771 AGY / #7938 Codex):
-  - 현상 및 원인 (사례: Audit #7771 AGY Git 커밋 & Audit #7938 / Escalation #2947 Codex SQLite 장문 쿼리):
-    • 대상 Pane(`w1D:p5X` AGY, `w1N:p1` Codex)에서 명령이 실제로 승인되지 않고 승인 모달에서 대기 중이었음에도, TUI/Watcher가 생성 직후(사례 #7938의 경우 129ms 만에) `APPROVED (pane-direct)`로 오판하여 큐와 배너를 강제 소멸시킴.
-    • 이로 인해 TUI/DB 상에는 승인 완료된 것으로 기록되지만, 실제 에이전트는 터미널에서 승인을 기다리며 영구 대기(Deadlock)에 빠지는 심각한 보안/운영 회귀 발생.
-    • 근본 원인:
-      1) 어댑터별 `dialog_is_live()` 앵커 불완전 및 Tail Window 한계:
-         - AGY: 표준 권한 프레임(`Do you want to proceed?`, `1. Yes`, `Requesting permission for:` 등) 앵커 누락.
-         - Codex: 장문 명령(예: #7938 긴 SQL문) 실행 시 `visible_text[-400:]` 고정 길이 윈도우를 벗어나 `_ACTIVE_CHOICE_RE` 매칭 실패 ➔ `dialog_is_live == False` 반환.
-      2) TUI Pre-render Slot Validation의 과격한 즉시 승인: `dialog_is_live`가 1회 `False`를 반환하는 순간, 사용자가 Pane에서 직접 승인한 것으로 단정하고 즉시 `resolve_escalation(..., resolution="APPROVED", approver="pane-direct")`을 호출함.
-  - 해결 방안:
-    1) 어댑터 `dialog_is_live()` 전면 보강:
-       - `agy.py`: 전체 권한 다이얼로그 텍스트 프레임 누락 없이 포함.
-       - `codex.py`: `visible_text[-400:]` 고정값 대신 다이얼로그 헤더(`rfind`) 기준으로 가변 윈도우 탐색 적용.
-    2) Eviction 판정 가드 강화 (`INV-PD-4`):
-       - 단순 liveness 1회 실패로 즉시 `APPROVED` 처리하지 않고, 에이전트의 실제 프로세스 상태(`blocked` -> `working/idle`)를 확인하거나 연속 n회 불일치(debounce) 확인 후 퇴출하도록 방어.
+[x] [Bug/Eviction] AGY 및 Codex 다이얼로그 오판(tail 오버플로우/앵커 누락)으로 인한 조기 Auto-Eviction(가짜 pane-direct 승인) 버그 (PR #153 완료, INV-PD-1/4/5):
+  - 해결: (1) AGY `dialog_is_live` 앵커 전면 보강 (2) Codex 헤더(`rfind`) 기준 가변 윈도우 탐색 적용 (3) TUI/Watcher debounce & 프로세스 상태전이 가드(`INV-PD-4/5`)로 가짜 `pane-direct` 승인 완벽 차단.
+
 
 
 
