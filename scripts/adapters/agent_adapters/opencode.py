@@ -343,6 +343,15 @@ class OpenCodeAdapter(AgentAdapter):
         """
         return self.classify_dialog_stage(visible_text) == "permission"
 
+    def question_is_live(self, visible_text: str) -> bool:
+        """True if the opencode human-question dialog is live.
+
+        Footer-keyed "esc dismiss" on the stripped text — mirrors the parse gate
+        at parse_permission_request (INV-Q-3). A question dialog must NEVER be
+        gated by the permission-stage dialog_is_live anchor.
+        """
+        return footer_is_live(strip_leaked_text(strip_tui(visible_text)), "esc dismiss")
+
     def classify_dialog_stage(self, visible_text: str) -> str:
         """Classify the opencode dialog stage: 'always_confirm' | 'reject' | 'permission' | 'unknown'.
 

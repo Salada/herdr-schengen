@@ -119,13 +119,15 @@ def format_local_time(iso_ts: str) -> str:
 
 
 def format_resolution_badge(resolution: Optional[str], short: bool = False) -> str:
-    """Render the post-escalation processing status (APPROVED/REJECTED/UNANSWERED)."""
+    """Render the post-escalation processing status (APPROVED/REJECTED/UNANSWERED/ANSWERED)."""
     if resolution == "APPROVED":
         return "[green]AP[/]" if short else "[green]APPROVED[/]"
     if resolution == "REJECTED":
         return "[red]RJ[/]" if short else "[red]REJECTED[/]"
     if resolution == "UNANSWERED":
         return "[yellow]UA[/]" if short else "[yellow]UNANSWERED[/]"
+    if resolution == "ANSWERED":
+        return "[cyan]ANS[/]" if short else "[cyan]ANSWERED[/]"
     return "[dim]—[/]"
 
 
@@ -1256,15 +1258,18 @@ class SchengenTUIApp(App):
 
         Returns True when the escalation was auto-evicted this cycle
         (approver=pane-direct). Rules:
-        - QUESTION dialogs and unknown adapters (None) are never evicted
-          (fail-closed).
+        - QUESTION escalations are liveness-checked via adapter.question_is_live
+          (footer-keyed, INV-Q-3) and resolved as ANSWERED — never APPROVED
+          (INV-Q-1); non-question escalations use dialog_is_live and resolve
+          APPROVED.
+        - Unknown adapters (None) are never evicted (fail-closed).
         - While the pane agent_status is 'blocked' the dialog is treated as live
           and NEVER evicted (INV-PD-4) — a blocked agent is by definition still
           waiting on the user.
         - Otherwise the dialog is liveness-checked; eviction requires
-          `confirm_polls` (default 2) CONSECUTIVE not-live renders (INV-PD-5
-          debounce) so a single transient read can never fake-approve a live
-          dialog. A live read resets the counter.
+          `confirm_polls` (default 2) CONSECUTIVE not-live renders (INV-PD-5 /
+          INV-Q-5 debounce) so a single transient read can never fake-approve a
+          live dialog. A live read resets the counter.
         - Pane-read errors fail closed (treated live).
         The counter dict is reset whenever the FIFO head escalation id changes.
         """
@@ -1273,8 +1278,7 @@ class SchengenTUIApp(App):
         if active_id != self._pane_direct_head:
             self._pane_direct_head = active_id
             self._pane_direct_polls.clear()
-        if active_esc.get("decision_layer") == "QUESTION":
-            return False
+        is_question = active_esc.get("decision_layer") == "QUESTION"
         adapter = get_adapter(active_esc.get("agent_kind") or "")
         if adapter is None:
             return False
@@ -1290,16 +1294,25 @@ class SchengenTUIApp(App):
             self._pane_direct_polls[active_id] = 0   # INV-PD-4: blocked -> NEVER evict
             return False
         try:
-            dialog_live = adapter.dialog_is_live(get_pane_text(pane_id, lines=80))
+            pane_text = get_pane_text(pane_id, lines=80)
+            # INV-Q-3: questions are footer-keyed (question_is_live); approval
+            # dialogs use dialog_is_live.
+            live = adapter.question_is_live(pane_text) if is_question else adapter.dialog_is_live(pane_text)
         except Exception:
-            dialog_live = True  # fail-closed: never evict on read error
-        if dialog_live:
+            live = True  # fail-closed: never evict on read error
+        if live:
             self._pane_direct_polls[active_id] = 0
             return False
         n = self._pane_direct_polls.get(active_id, 0) + 1
         self._pane_direct_polls[active_id] = n
-        if n >= max(1, int(confirm_polls)):  # INV-PD-5: debounced
-            resolve_escalation(pane_id=pane_id, resolution="APPROVED", approver="pane-direct")
+        if n >= max(1, int(confirm_polls)):  # INV-PD-5 / INV-Q-5: debounced
+            # INV-Q-1: a cleared question is ANSWERED (the user answered it in
+            # the pane) — never APPROVED; non-questions keep APPROVED.
+            resolve_escalation(
+                pane_id=pane_id,
+                resolution="ANSWERED" if is_question else "APPROVED",
+                approver="pane-direct",
+            )
             return True
         return False
 
@@ -1515,6 +1528,8 @@ class SchengenTUIApp(App):
                         badge = "[red]RJ·❓[/]"
                 elif resolution == "UNANSWERED":
                     badge = "[yellow]UA[/]"
+                elif resolution == "ANSWERED":
+                    badge = "[cyan]ANS[/]"
                 else:
                     badge = "[red]ES[/]"
                 audit_table.add_row(time_str, log['pane_id'], badge, short_cmd)

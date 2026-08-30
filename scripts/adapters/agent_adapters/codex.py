@@ -211,6 +211,15 @@ class CodexAdapter(AgentAdapter):
             return False
         return _ACTIVE_CHOICE_RE.search(_latest_dialog_region(visible_text)) is not None
 
+    def question_is_live(self, visible_text: str) -> bool:
+        """True if the Codex input-request (question) dialog is live.
+
+        Footer-keyed "enter to submit answer" — mirrors the parse gate at
+        parse_permission_request (INV-Q-3). A question dialog must NEVER be
+        gated by the approval dialog_is_live anchors.
+        """
+        return footer_is_live(visible_text, "enter to submit answer")
+
     def inject_approval(self, pane_id, req_cmd):
         """Approve via 'y' (selection-independent, per Codex default keymap)."""
         print(f"🚀 Auto-approving codex request for {pane_id} (sending 'y')...", flush=True)

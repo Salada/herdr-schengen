@@ -62,6 +62,15 @@ class AgentAdapter:
         Stricter than get_pending_request. Conservative default: False."""
         return False
 
+    def question_is_live(self, visible_text: str) -> bool:
+        """True if the ACTIVE human-question dialog is live. Default False.
+
+        Questions are footer-keyed (opencode `esc dismiss`, codex `enter to
+        submit answer`, AGY `esc Skip`) and must NEVER be adjudicated via the
+        approval dialog_is_live anchors (INV-Q-3).
+        """
+        return False
+
     def is_truncated(self, visible_text: str) -> bool:
         """True if the visible pane text shows a truncation/fold marker."""
         return False

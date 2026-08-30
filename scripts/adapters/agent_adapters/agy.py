@@ -72,6 +72,15 @@ class AgyAdapter(AgentAdapter):
             or bool(re.search(r"\[[Yy]/[Nn]\]", tail))
         )
 
+    def question_is_live(self, visible_text: str) -> bool:
+        """True if the AGY human-question dialog is live.
+
+        Footer-keyed ("esc Skip") + the "Question N/M:" header — mirrors the
+        parse gate (INV-Q-3). A cleared question dialog scrolls the footer out
+        of the tail.
+        """
+        return footer_is_live(visible_text, "esc Skip") and _QUESTION_RE.search(visible_text) is not None
+
     def is_truncated(self, visible_text: str) -> bool:
         """True if the AGY dialog body is folded ("⋯ N lines hidden" marker).
 
