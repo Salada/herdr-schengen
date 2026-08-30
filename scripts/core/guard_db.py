@@ -1397,8 +1397,14 @@ def resolve_escalation(
     with get_db_connection() as conn:
         cursor = conn.cursor()
         approved_cmds: list[tuple[str, str]] = []
-        if resolution_status == "RESOLVED" and is_approval:
-            # Fetch raw commands to record in pane session memory only on explicit approval
+        # INV-AP-2/3: session-memory seeding is a THIRD trust mechanism (novelty
+        # gate + workspace promotion are already gated). ONLY an EXPLICIT human
+        # adjudication (approver="human-tui") may seed pane session memory — the
+        # gatekeeper LLM's approve (approver=None) records the disposition but
+        # grants NO fast-path trust.
+        if resolution_status == "RESOLVED" and is_approval and approver == "human-tui":
+            # Fetch raw commands to record in pane session memory only on explicit
+            # human approval
             if escalation_id:
                 cursor.execute("SELECT pane_id, raw_command FROM pending_escalations WHERE id = ?", (escalation_id,))
             elif command_hash:

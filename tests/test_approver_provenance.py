@@ -345,6 +345,49 @@ class TestApproverProvenance(unittest.TestCase):
             "reject must never seed the novelty gate",
         )
 
+    # --- INV-AP-2: session-memory seeding gated on explicit human adjudication ---
+
+    def test_gatekeeper_approve_does_not_seed_session_memory(self):
+        # The gatekeeper LLM's approve (resolve_escalation with NO approver,
+        # is_approval=True) must NOT seed the pane session-memory fast-path —
+        # the third trust mechanism (novelty gate + workspace promotion were
+        # already gated).
+        pane_id = "w1D:sm1"
+        raw_cmd = "make build"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=raw_cmd, safety_reason="cx",
+            decision_layer="COMPLEXITY_TAX", agent_kind="opencode",
+        )
+        with patch("core.session_memory.record_pane_approval") as mock_seed:
+            resolve_escalation(
+                pane_id=pane_id, escalation_id=esc_id,
+                resolution_status="RESOLVED", is_approval=True,
+            )
+        mock_seed.assert_not_called()
+        # The escalation is resolved, but no pane fast-path trust was granted.
+        row = self._get_row(esc_id)
+        self.assertEqual(row["status"], "RESOLVED")
+
+    def test_human_tui_approve_seeds_session_memory(self):
+        # The explicit human batch path (approver="human-tui") MUST still seed
+        # the session-memory fast-path — no regression on the human trust grant.
+        pane_id = "w1D:sm2"
+        raw_cmd = "make clean"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=raw_cmd, safety_reason="cx",
+            decision_layer="COMPLEXITY_TAX", agent_kind="opencode",
+        )
+        with patch("core.session_memory.record_pane_approval") as mock_seed:
+            resolve_escalation(
+                pane_id=pane_id, escalation_id=esc_id,
+                resolution_status="RESOLVED", is_approval=True,
+                approver="human-tui",
+            )
+        mock_seed.assert_called_once()
+        call_args = mock_seed.call_args
+        self.assertEqual(call_args.args[0], pane_id)
+        self.assertEqual(call_args.args[1], raw_cmd)
+
 
 if __name__ == "__main__":
     unittest.main()
