@@ -46,6 +46,16 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   1) Stale event 회귀 테스트: '다른 ask 발생, 동일 command string' 상황에서 CHANNEL_TTL 3600 안전성 고정 단위테스트 추가.
   2) `_norm_req_cmd` 공백 붕괴 유의: soft-wrap으로 path/token이 newline 분할될 때의 동작 정합성 및 향후 렌더러 변경 시 주의점 문서화.
   3) Test Runner Fast-Track 허용: `python3 -m unittest` 등 로컬 테스트 러너의 false-positive 과에스컬레이션 방지를 위해 `opencode.jsonc` 좁은 allow 규칙 또는 watcher allowlist 등록.
+[] [Task/Allowlist] 단독 실행 읽기 전용 sed(`sed -n '<range>p' <file>`) Fast-Track Allowlist 등록 (#6935 등 Codex 다빈도 패턴):
+  - 현상 및 원인:
+    • Codex 에이전트가 파일/스킬 문서 열람을 위해 `sed -n '1,260p' /path/to/file`을 빈번히 실행하나, 현재 `security_evaluator.py`의 `READONLY_PIPELINE_COMMANDS`에는 `sed`가 포함되어 있으나 단독 명령 allowlist인 `FAST_TRACK_SAFE_COMMANDS`에는 `sed`가 누락되어 있어 파이프라인(`|`) 없는 단독 `sed -n`이 `NOT_ALLOWLISTED`로 fail-closed 에스컬레이션됨.
+  - 안전성 검증 및 Allowlist 등록 조건:
+    1) `-n` 플래그 및 `...p` 출력 패턴 확인 (인-플레이스 수정 `-i`, `--in-place` 절대 금지).
+    2) 리다이렉트(`>`, `>>`) 및 치환 쓰기 배제 확인.
+    3) Sensitive File Denylist (`.env*`, `~/.ssh/*`, `*.key` 등) 및 광범위 와일드카드(`~`, `/`) 차단 불변식(INV-SENS-1/2) 통과 전제.
+  - 해결 방안:
+    • `security_evaluator.py`의 단독 명령 판정 로직에 읽기 전용 `sed` 패턴(`^sed\s+-n\s+['"][^'"]*p['"]\s+\S+`) 또는 `FAST_TRACK_SAFE_COMMANDS` + in-place 가드 추가.
+
 
 
 [] [Task/Architecture] Pane 직접 승인(Pane-Direct Adjudication) 실시간 감지 및 Stale Escalation 자동 해제(Auto-Eviction) 아키텍처 구현:
