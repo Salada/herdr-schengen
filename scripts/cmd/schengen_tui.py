@@ -72,6 +72,7 @@ from core.feature_db import (
 )
 from core.guard_db import (
     LOG_DIR,
+    add_to_allowlist,
     get_adjudications_for_audit,
     get_answer_language,
     get_audit_log_by_id,
@@ -84,7 +85,9 @@ from core.guard_db import (
     get_recent_audit_logs,
     get_session_dashboard_summary,
     group_pending_escalations,
+    list_allowlist_rules,
     resolve_escalation,
+    revoke_allowlist_rule,
     set_answer_language,
     set_channel_approve_config,
     set_instruction_delivery_config,
@@ -1296,6 +1299,9 @@ class SchengenTUIApp(App):
             active_id = active_esc["id"]
             is_question = active_esc.get('decision_layer') == "QUESTION"
             raw_cmd = active_esc['raw_command'].strip()
+            # #91: remember the current FIFO head command so /allow-last can
+            # persist an exact-literal (re.escape'd) allowlist rule for it.
+            self._last_intercepted_cmd = active_esc["raw_command"]
 
             # PANE-DIRECT pre-render slot validation: a non-QUESTION escalation
             # whose pane dialog is no longer LIVE was already answered directly in
@@ -1616,7 +1622,7 @@ class SchengenTUIApp(App):
             self._write("[dim]⏳ Another investigation/chat is currently in-flight. Press ESC twice or type [bold yellow]/interrupt[/] to abort.[/]")
             return
 
-        if not self.is_controller and (user_msg.startswith("/approve") or user_msg.startswith("/reject") or user_msg.startswith("/start") or user_msg.startswith("/stop")):
+        if not self.is_controller and (user_msg.startswith("/approve") or user_msg.startswith("/reject") or user_msg.startswith("/start") or user_msg.startswith("/stop") or user_msg.startswith("/allow") or user_msg.startswith("/revoke")):
             self._write(f"[bold yellow]⚠️ [Observer Mode]:[/] Read-only instance. Leader PID {self.leader_pid} controls execution.")
             return
 
@@ -1667,6 +1673,84 @@ class SchengenTUIApp(App):
                 self._write(f"{self._timestamp()} 🤖 [bold cyan]Batch Gatekeeper[/]:")
                 self._write_markdown(f"```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```")
                 self.update_radar_data(force=True)
+                return
+
+            # #91 Persistent Allowlist CUD — human-typed input channel
+            # (INV-PL-1): explicit human provenance (created_by/revoked_by
+            # = "human-tui"), TUI-controller only (observer guard above blocks
+            # read-only instances). Audited GLOBAL_RULE rows (INV-PL-3).
+            if user_msg.startswith("/allow "):
+                parts = user_msg.split(maxsplit=1)
+                rest = parts[1].strip() if len(parts) > 1 else ""
+                pat, _, desc = rest.partition(" ")
+                if not pat:
+                    self._write("[bold yellow]⚠️ Usage: /allow <pattern> [description][/]")
+                    return
+                try:
+                    add_to_allowlist(pat, description=desc.strip(), created_by="human-tui")
+                except ValueError as e:
+                    self._write(f"[bold red]❌ {e}[/]")
+                    return
+                self._write(f"[bold green]✅ Allowlist rule added:[/] [white]{rich_escape(pat)}[/]")
+                self.update_radar_data(force=True)
+                return
+
+            if user_msg.startswith("/allow-last"):
+                parts = user_msg.split(maxsplit=1)
+                desc = parts[1].strip() if len(parts) > 1 else ""
+                last_cmd = getattr(self, "_last_intercepted_cmd", "") or ""
+                if not last_cmd:
+                    self._write("[bold yellow]⚠️ No intercepted command to allow (queue empty).[/]")
+                    return
+                # re.escape -> EXACT literal match, NOT regex-interpreted (#91).
+                escaped = re.escape(last_cmd)
+                try:
+                    add_to_allowlist(
+                        escaped,
+                        description=desc or f"allow-last: {last_cmd[:60]}",
+                        created_by="human-tui",
+                    )
+                except ValueError as e:
+                    self._write(f"[bold red]❌ {e}[/]")
+                    return
+                self._write(f"[bold green]✅ Allowlist rule added (exact literal):[/] [white]{rich_escape(escaped)}[/]")
+                self.update_radar_data(force=True)
+                return
+
+            if user_msg.startswith("/revoke "):
+                parts = user_msg.split(maxsplit=1)
+                target = parts[1].strip() if len(parts) > 1 else ""
+                if not target:
+                    self._write("[bold yellow]⚠️ Usage: /revoke <id|pattern>[/]")
+                    return
+                affected = 0
+                if target.isdigit():
+                    affected = revoke_allowlist_rule(int(target), revoked_by="human-tui")
+                else:
+                    # Resolve a pattern to its active rule id (or accept numeric id).
+                    for r in list_allowlist_rules():
+                        if r["pattern_regex"] == target:
+                            affected = revoke_allowlist_rule(r["id"], revoked_by="human-tui")
+                            break
+                if affected:
+                    self._write(f"[bold green]✅ Allowlist rule revoked:[/] [white]{rich_escape(target)}[/]")
+                else:
+                    self._write(f"[bold yellow]⚠️ No active allowlist rule matched:[/] [white]{rich_escape(target)}[/]")
+                self.update_radar_data(force=True)
+                return
+
+            if user_msg.strip() == "/allow-list":
+                rules = list_allowlist_rules()
+                if not rules:
+                    self._write("[dim]Allowlist is empty.[/]")
+                    return
+                lines = [f"[bold]Allowlist ({len(rules)} active rules):[/]"]
+                for r in rules:
+                    lines.append(
+                        f"  [dim]#{r['id']}[/] ✅ [white]{rich_escape(r['pattern_regex'])}[/] "
+                        f"[dim](by {r['created_by'] or '?'} @ {r['created_at'] or '?'})[/]"
+                    )
+                self._write("\n".join(lines))
                 return
 
             def on_tool(chunk: str):
