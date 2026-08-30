@@ -5,12 +5,12 @@
 1. [Epic 잔여 — 유일한 최종 마일스톤] Fail-closed 편향 전환 M7 (Anti-Fatigue 배치 집계 & One-Key Approve, INV-13)
    - M1~M6 완료 (M1 AST, M2 Novelty, M3 Complexity Tax, M4 Package, M5 Origin Weighting, M6 Cloud Judge Confidence).
    - 맥락: INV-13 anti-fatigue(배치 집계 + scope+TTL 캐싱 + one-key approve)는 피로도 경감의 핵심 축.
-2. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
-   - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
-3. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction / M6 cloud-judge / #2555 redirect
-   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, cloud_judge cache-key.
-4. [Architecture] Workspace별 `.schengen/` 영속 Allowlist & 기계적 자동승인 프로모션(#7207) + Persistent CUD(#91) + 単独 sed -n(#6935)
+2. [Architecture — 고마찰 감소] Workspace별 `.schengen/` 영속 Allowlist & 기계적 자동승인 프로모션(#7207) + Persistent CUD(#91)
    - 맥락: fail-closed allowlist(fast-track closed enum) + `.schengen/allowlist.json` + TUI /allow /revoke + INV-WS-1..2.
+3. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
+   - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
+4. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction / M6 cloud-judge / #2555 redirect
+   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, cloud_judge cache-key.
 5. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), UX 상태전이, 카피라이팅, 설정 모달 등.
 
 
