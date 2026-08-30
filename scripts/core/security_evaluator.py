@@ -38,6 +38,7 @@ from core.gray_zone_evaluator import (
     format_decision_guidance,
 )
 from core.guard_db import (
+    get_cloud_judge_config,
     get_complexity_tax_config,
     get_origin_weighting_config,
     has_human_approval_pattern,
@@ -682,12 +683,17 @@ def audit_with_cloud_judge(
     agent_id: str = "default",
     origin: str = "A",
     raise_on_error: bool = False,
+    confidence_threshold: Optional[float] = None,
 ) -> tuple[bool, str]:
     """Second-tier cloud judge for uncertain cases (gray-zone PROMPT, unhandled dialogs).
 
     Returns (is_safe, reason). Fail-closed: any error / unparseable / uncertain
-    verdict returns is_safe=False so the caller defers to human review.
+    / below-threshold verdict returns is_safe=False so the caller defers to human
+    review. M6: an auto-approve requires BOTH is_safe=true AND confidence >=
+    confidence_threshold (default from get_cloud_judge_config() = 0.9).
     """
+    if confidence_threshold is None:
+        confidence_threshold = get_cloud_judge_config().get("cloud_judge_min_confidence", 0.9)
     # 0. Check Pane-scoped Session Memory BEFORE expensive LLM call (ADR-010)
     try:
         from core.session_memory import check_pane_approval, record_pane_approval
@@ -730,14 +736,18 @@ def audit_with_cloud_judge(
         content_str = data["choices"][0].get("message", {}).get("content", "")
         parsed = parse_json_verdict(content_str)
         if parsed is not None:
-            _cache_cloud_verdict(cache_key, cmd_str, parsed[0], parsed[1], "CLOUD_JUDGE", cwd, scope, agent_id, origin)
-            if parsed[0]:
+            is_safe, conf, reason = parsed
+            approved = bool(is_safe) and conf is not None and conf >= confidence_threshold
+            if not approved:
+                reason = f"{reason} (confidence={conf}, threshold={confidence_threshold})"
+            _cache_cloud_verdict(cache_key, cmd_str, approved, reason, "CLOUD_JUDGE", cwd, scope, agent_id, origin)
+            if approved:
                 try:
                     from core.session_memory import record_pane_approval
-                    record_pane_approval(scope, cmd_str, decision_layer="CLOUD_JUDGE", reason=parsed[1], cwd=cwd)
+                    record_pane_approval(scope, cmd_str, decision_layer="CLOUD_JUDGE", reason=reason, cwd=cwd)
                 except Exception:
                     pass
-            return parsed
+            return approved, reason
         if raise_on_error:
             raise RuntimeError(f"Unparseable cloud judge output: {content_str}")
         return False, f"[Cloud Judge] Uncertain verdict: {content_str[:80]}; deferred to human"
@@ -848,16 +858,17 @@ def audit_dynamic_substitution_with_llm(
             content_str = message.get("content", "")
             parsed = parse_json_verdict(content_str)
             if parsed is not None:
+                is_safe, _conf, reason = parsed  # M6: inspector keeps binary behavior (confidence discarded)
                 _cache_cloud_verdict(
-                    cache_key, cmd_str, parsed[0], parsed[1], "LLM_INSPECTOR", cwd, scope, agent_id, origin
+                    cache_key, cmd_str, is_safe, reason, "LLM_INSPECTOR", cwd, scope, agent_id, origin
                 )
-                if parsed[0]:
+                if is_safe:
                     try:
                         from core.session_memory import record_pane_approval
-                        record_pane_approval(scope, cmd_str, decision_layer="LLM_INSPECTOR", reason=parsed[1], cwd=cwd)
+                        record_pane_approval(scope, cmd_str, decision_layer="LLM_INSPECTOR", reason=reason, cwd=cwd)
                     except Exception:
                         pass
-                return parsed
+                return is_safe, reason
             if raise_on_error:
                 raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
             return False, f"[Cloud Judge] Uncertain verdict: {content_str[:80]}; delegating to human"
@@ -1166,11 +1177,22 @@ def compute_complexity(cmd_str: str) -> int:
     return n_segments + n_subst + n_redir
 
 
-def _apply_complexity_tax(cmd_str: str, cfg: dict, origin: Origin) -> "Optional[tuple[bool, str, str]]":
+def _apply_complexity_tax(
+    cmd_str: str,
+    cfg: dict,
+    origin: Origin,
+    cwd: str = "",
+    scope: str = "default",
+    agent_id: str = "default",
+) -> "Optional[tuple[bool, str, str]]":
     """Return an escalation tuple if the command exceeds the complexity threshold,
-    else None (pass through). NEVER returns is_safe=True. M5 threads `origin`
-    through this signature; HUMAN origin skips the structural-complexity deferral
-    (trust concession gated by the origin_weighting_enabled knob)."""
+    else None (pass through). NEVER returns is_safe=True in escalate mode.
+
+    M5 threads `origin`; HUMAN origin skips the structural-complexity deferral
+    (trust concession gated by the origin_weighting_enabled knob). M6: when
+    complexity_mode == "judge", an over-threshold command is routed to the cloud
+    judge (with the confidence gate) instead of a hard human deferral.
+    """
     if not cfg.get("complexity_tax_enabled", True):
         return None
     if origin == Origin.HUMAN and get_origin_weighting_config().get("origin_weighting_enabled", True):
@@ -1178,6 +1200,19 @@ def _apply_complexity_tax(cmd_str: str, cfg: dict, origin: Origin) -> "Optional[
     thr = cfg.get("complexity_threshold", 6)
     cx = compute_complexity(cmd_str)
     if cx > thr:
+        if cfg.get("complexity_mode") == "judge":
+            origin_str = origin.value if isinstance(origin, Origin) else str(origin)
+            cloud_safe, cloud_reason = audit_with_cloud_judge(
+                cmd_str,
+                context="Complex command (M6 judge mode): verify safety before auto-approval.",
+                cwd=cwd,
+                scope=scope,
+                agent_id=agent_id,
+                origin=origin_str,
+            )
+            if cloud_safe:
+                return True, f"Complex command cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
+            return False, f"Complex command deferred to human ({cloud_reason})", DecisionLayer.COMPLEXITY_TAX
         return (
             False,
             f"Complex command requires human review (complexity={cx} > threshold={thr})",
@@ -1517,7 +1552,7 @@ def _audit_static_shell_command(
     if gz_verdict == Verdict.BLOCK:
         return False, f"Non-VCS Gray-Zone Guard [BLOCK]: {gz_reason}", DecisionLayer.GRAY_ZONE_MATRIX
     if gz_verdict == Verdict.PROMPT and gz_payload:
-        tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config(), origin)
+        tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config(), origin, cwd=cwd, scope=scope, agent_id=agent_id)
         if tax is not None:
             return tax
         guidance = format_decision_guidance(gz_payload)
@@ -1549,7 +1584,7 @@ def _audit_static_shell_command(
 
     # M3 COMPLEXITY_TAX: gate the UNPROVEN auto-approve paths (novelty recall,
     # package READ_ONLY). Runs AFTER the provably-benign fast-track + test-runner.
-    tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config(), origin)
+    tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config(), origin, cwd=cwd, scope=scope, agent_id=agent_id)
     if tax is not None:
         return tax
 
