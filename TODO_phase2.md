@@ -5,11 +5,15 @@
 
 1. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
    - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
-2. [피어리뷰 후속 종합] #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207
-   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, M7 raw목록/reject-flow, #7207 신뢰스토어 검증.
+2. 🚨 [UX/가시성 긴급 승격] '인간 개입 필수(Action Required)' 명시적 가시성 극대화 및 3단 패널 시각적 연동 (Designer & Marketer Persona 협업)
+   - 문제: OpenCode가 계류 중인데 TUI에서는 명시적으로 인간의 의견을 구하지 않고 모호하게 대기하여 인간이 개입해야 할지 AI가 처리 중인지 혼란 발생.
+   - 조치: Top Banner(붉은색 점멸) + Radar 상태 카드(`AWAITING HUMAN`) + 채팅창 구조화 결재 카드 + 인풋 박스 `/approve <id>` 자동 완성 연동.
 3. [Architecture] Persistent Allowlist CUD(#91)
    - 맥락: fail-closed allowlist(fast-track closed enum) + TUI /allow /revoke + INV-PL-1..3.
-4. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), UX 상태전이, 카피라이팅, 설정 모달 등.
+4. [피어리뷰 후속 종합] #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207
+   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, M7 raw목록/reject-flow, #7207 신뢰스토어 검증.
+5. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), 설정 모달, 발화 주체 분리 등.
+
 
 
 
@@ -399,42 +403,47 @@ Idea / Research:
           • ❓ `OTHER`
 
 [] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅 및 카피라이팅 혁신 (Designer & Marketer Persona 협업)
-   - Context & Problem (사례: #2348 등):
-     - Gatekeeper가 인간 지휘관에게 승인/거절 판단을 요청할 때, 메시지가 평이한 텍스트로 흘러가거나 승인 요청이라는 긴급성과 결정 옵션이 한눈에 들어오지 않음.
-   - Designer & Marketer Persona 통합 기획:
-     1. 🎨 [Designer Persona: 시각적 계층화 및 박스형 카드 레이아웃]
+   - Context & Problem (사례: OpenCode 대기 중 TUI 모호성 방치 등):
+     - 동일 탭 내에서 대상 Pane(OpenCode w1D:p1)은 permission 대기 상태로 멈춰 있는데, TUI는 명시적으로 인간의 승인을 구하지 않고 모호하게 대기하여 인간 지휘관이 "지금 내가 개입해야 하는지, AI가 계속 조사 중인지" 전혀 알 수 없는 심각한 UX 마찰 발생.
+   - Designer & Marketer Persona 통합 3단 패널 시각적 연동 설계:
+     1. 🚩 [Top Global Banner: 긴급도 즉시 전달]
+        - 자율 조사 중: `[dim]⚡ Autonomous inspection in progress...[/]`
+        - 인간 개입 필수 확정 시: `🚨 [bold red blink]▶ ACTION REQUIRED: Escalation #<id> Awaiting Commander Decision[/]` (붉은색 강조)
+     2. 📡 [Radar Side Panel (Live State Card)]
+        - 우측 상단 상태 카드에 실시간 차단 상태 및 대기 주체 명확 표기:
+          `Blocked Pane : w1D:p1 (opencode)`
+          `Awaiting     : 👤 HUMAN INTERVENTION REQUIRED`
+     3. 💬 [Main Chat Area: 구조화된 결재 카드 (Decision Card)]
         - 터미널 채팅 영역 내 명확한 시각적 구분을 위한 박스형 카드 프레임(`╭─`, `│`, `╰─`) 적용.
         - 정보 3단계 청킹(Chunking):
-          • 헤더: `🚨 [ESCALATION #2348] Commander Decision Required` (경고색/강조 배지)
+          • 헤더: `🚨 [ESCALATION #<id>] Commander Authorization Required` (경고색/강조 배지)
           • 본문: 타겟 Pane/Agent + 정돈된 실행 명령 스니펫 + 1줄 판정 유보 사유(Gray-zone/Denylist 근거)
           • 액션 바: 승인(Green) vs 거절(Rose) vs 영속허용(Cyan)의 시각적 분리
-     2. 📣 [Marketer Persona: 능동적 카피라이팅 & Zero-Friction CTA]
-        - 수동적 서술("조사 완료") 제거 → 지휘관의 결정을 명확히 촉구하는 액션 중심 카피:
-          *"Commander, autonomous inspection cannot guarantee safety for this command. Your authorization is required."*
-        - 즉시 복사/실행 가능한 간결한 단축 명령어(CTA) 제시:
-          • `[✔ Approve]` 👉 `/approve 2348` (또는 `/a 2348`)
-          • `[✖ Reject]` 👉 `/reject 2348 [reason]` (또는 `/r 2348 [reason]`)
-          • `[🔒 Always Allow]` 👉 `/allow 2348` (영속 allowlist 등록)
-     3. 📐 [최종 출력 렌더링 목업 (Rich Markdown / ANSI Card)]:
+     4. ⌨️ [Prompt Bar & Quick Action 연동 (Zero-Friction CTA)]
+        - 인간 개입 상태 진입 시 TUI 하단 입력창 플레이스홀더 또는 프롬프트에 `/approve <id>` 자동 완성 유도.
+        - 지휘관의 결정을 명확히 촉구하는 능동적 카피:
+          *"Commander, autonomous inspection cannot guarantee safety. Your authorization is mandatory to resume w1D:p1."*
+     5. 📐 [최종 출력 렌더링 목업 (Rich Markdown / ANSI Card)]:
         ```text
-        ╭── 🚨 DECISION REQUIRED ──────────────── Escalation #2348 ──╮
-        │ 🌐 Target   : w1D:p5X (agy)                                 │
-        │ 💻 Command  : python3 -c "import sqlite3..."                 │
-        │ ⚠️ Reason   : Read-only SQLite query on sensitive DB file   │
+        ╭── 🚨 ACTION REQUIRED ────────────────── Escalation #7494 ──╮
+        │ 🌐 Target   : w1D:p1 (opencode)                             │
+        │ 💻 Command  : git show --stat HEAD | head -12 && ...        │
+        │ ⚠️ Reason   : Not in fast-track allowlist (Fail-Closed)     │
         ├─────────────────────────────────────────────────────────────┤
         │ 💡 Gatekeeper Assessment:                                   │
-        │   - Safe SELECT query observed, but fail-closed on DB file. │
-        │   - Zero filesystem mutation risk.                          │
+        │   - Complex compound pipeline with mutation risk.           │
+        │   - Autonomous clearance impossible; human decision needed. │
         ├─────────────────────────────────────────────────────────────┤
-        │ 👉 TAKE ACTION:                                             │
-        │   [✔ Approve]       : /approve 2348                         │
-        │   [✖ Reject]        : /reject 2348 [reason]                 │
-        │   [🔒 Always Allow] : /allow 2348                           │
+        │ 👉 MANDATORY ACTION (Type to execute):                      │
+        │   [✔ Approve]       : /approve 7494                         │
+        │   [✖ Reject]        : /reject 7494 [reason]                 │
+        │   [🔒 Always Allow] : /allow 7494                           │
         ╰─────────────────────────────────────────────────────────────╯
         ```
-     4. Implementation Points:
-        - `scripts/tools/schengen_agent_llm.py` 시스템 프롬프트에 승인 요청 시 위 카드 포맷 생성 강제.
-        - TUI 채팅 렌더러(`_write_markdown`)에서 카드 테두리 및 액션 바 ANSI 하이라이팅 지원.
+     6. Implementation Points:
+        - `scripts/tools/schengen_agent_llm.py` 시스템 프롬프트에 위임 시 위 카드 포맷 생성 강제.
+        - TUI 채팅 렌더러(`_write_markdown`), 상단 배너 및 사이드 패널의 상태 머신 실시간 동기화.
+
 
 [] [Task/Feature] AGY 장문/생략 명령(⋯ lines hidden) 발생 시 `ctrl+g` 전개(Expand)를 통한 전문 자율 검증 체계 구현
    - Context & Problem (사례: #2099 등):
