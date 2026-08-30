@@ -239,6 +239,54 @@ class TestPaneDirectEviction(unittest.TestCase):
         self.assertEqual(adapter.parse_permission_request(live), "edit_file /path/to/file.py")
         self.assertTrue(adapter.dialog_is_live(live))
 
+    def test_codex_command_dialog_focused_on_non_yes_not_evicted(self):
+        # INV-PD-1 (reviewer finding): a genuinely live dialog whose focus was
+        # navigated to a non-Yes row ('› 2. No') must NEVER be treated as
+        # answered. The exec regex requires "1. Yes" so parse returns None, but
+        # the presence of the '›' focus marker proves the dialog is live —
+        # should_evict_pane_direct must return (False, "still live").
+        adapter = CodexAdapter()
+        text = (
+            "Would you like to run the following command?\n"
+            "  $ rm -rf /tmp/navigated_dir\n"
+            "› 2. No, and tell Codex what to do differently (esc)\n"
+            "Press enter to confirm or esc to cancel\n"
+        )
+        self.assertIsNone(adapter.parse_permission_request(text))
+        self.assertTrue(adapter.dialog_is_live(text))
+
+        pane_id = "w1D:p10"
+        cmd = "rm -rf /tmp/navigated_dir"
+        self._enqueue(pane_id, cmd)
+        cached = {"cmd": cmd, "seq": 11, "status": "blocked", "is_safe": False}
+        pane_info = {"state_change_seq": 11, "agent_status": "blocked"}
+        evict, reason = should_evict_pane_direct(cached, pane_info, text, None, adapter)
+        self.assertFalse(evict)
+        self.assertEqual(reason, "still live")
+
+    def test_codex_edit_dialog_focused_on_non_yes_stays_live(self):
+        # Same INV-PD-1 invariant for the EDIT dialog: focus on '› 2. No' keeps
+        # the edit region live (parseable) and the escalation is NOT evicted.
+        adapter = CodexAdapter()
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "Description: Apply proposed file edits\n"
+            "Destination: /path/to/file.py\n\n"
+            "› 2. No\n"
+            "Press enter to confirm or esc to cancel\n"
+        )
+        self.assertEqual(adapter.parse_permission_request(text), "edit_file /path/to/file.py")
+        self.assertTrue(adapter.dialog_is_live(text))
+
+        pane_id = "w1D:p11"
+        cmd = "edit_file /path/to/file.py"
+        self._enqueue(pane_id, cmd)
+        cached = {"cmd": cmd, "seq": 12, "status": "blocked", "is_safe": False}
+        pane_info = {"state_change_seq": 12, "agent_status": "blocked"}
+        evict, reason = should_evict_pane_direct(cached, pane_info, text, cmd, adapter)
+        self.assertFalse(evict)
+        self.assertEqual(reason, "still live")
+
     # ---- PD-C debounce (regression) ---------------------------------------
 
     def test_pd_c_debounce_requires_consecutive_not_live_polls(self):

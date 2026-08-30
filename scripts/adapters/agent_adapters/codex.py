@@ -30,11 +30,14 @@ _QUESTION_HEADER_RE = re.compile(r"Question\s+\d+\s*/\s*\d+\s*\([^)]*\)")
 _OPTION_ROW_RE = re.compile(r"^›?\s*\d+\.\s")
 
 # Focused-row marker of the ratatui list-selection modal: the '›' glyph precedes
-# the ACTIVE (selected) option row. The ACTIVE dialog has '› 1. Yes' in its tail;
-# a historical prompt or an already-completed (enter-pressed) dialog has the
-# marker moved off or gone entirely. MULTILINE so '^' anchors at each LINE start
-# (the option row is never the first char of the pane read).
-_ACTIVE_CHOICE_RE = re.compile(r"^\s*›\s*1\.\s*Yes\b", re.MULTILINE)
+# the ACTIVE (selected) option row. The liveness signal is the PRESENCE of the
+# focus marker on ANY numbered row ('› 1. Yes', '› 2. No', '› 3. …'), NOT which
+# option is selected — a dialog the user navigated to a non-Yes row is still a
+# live dialog and must never be treated as answered. A historical prompt or an
+# already-completed (enter-pressed) dialog has the marker moved off or gone
+# entirely. MULTILINE so '^' anchors at each LINE start (the option row is never
+# the first char of the pane read).
+_ACTIVE_CHOICE_RE = re.compile(r"^\s*›\s*\d+\.", re.MULTILINE)
 
 
 def _extract_codex_question_text(text: str):
