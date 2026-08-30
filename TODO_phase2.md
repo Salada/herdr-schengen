@@ -352,6 +352,22 @@ Idea / Research:
         - `scripts/tools/schengen_agent_llm.py` 시스템 프롬프트에 승인 요청 시 위 카드 포맷 생성 강제.
         - TUI 채팅 렌더러(`_write_markdown`)에서 카드 테두리 및 액션 바 ANSI 하이라이팅 지원.
 
+[] [Task/Feature] AGY 장문/생략 명령(⋯ lines hidden) 발생 시 `ctrl+g` 전개(Expand)를 통한 전문 자율 검증 체계 구현
+   - Context & Problem (사례: #2099 등):
+     - AGY 다이얼로그에서 긴 스크립트(`python3 -c ...` 등)가 실행될 때 `⋯ (14 lines hidden)` 형태로 축약되어 표시됨.
+     - Gatekeeper/Inspector가 축약된 본문을 다 보지 못해 "Hidden lines were not fully verifiable" 사유로 불필요하게 인간에게 에스컬레이션하거나 전문 확인을 요청함.
+   - Key Insight & Architecture:
+     1. AGY `ctrl+g` 단축키 자율 전개:
+        - AGY 승인 모달은 `ctrl+g` 키를 통해 전체 스크립트를 에디터/전개 모드로 열람 가능.
+        - Gatekeeper/Inspector가 `⋯ lines hidden` 감지 시, `herdr agent send-keys <pane_id> ctrl+g`를 자율 호출하여 전체 원문을 읽어오고 파싱.
+     2. 완전한 AST/보안 검사 후 자율 승인:
+        - 전개된 100% 원문 전체에 대해 AST 파싱, 민감 파일 접근, 위험 명령어 검사를 완결.
+        - 안전성이 입증되면 인간 개입 없이 `AUTO_APPROVED` 자율 승인 완료 (에디터 모드 해제 후 `1. Yes` 전송).
+     3. Invariants:
+        - INV-AGY-1: 축약된 생략 줄(`⋯ lines hidden`)이 존재하는 상태에서 내용 미확인 채로 임의 통과(Fail-Open) 금지.
+        - INV-AGY-2: `ctrl+g` 전개 실패 또는 원문 읽기 불가 시에만 안전하게 Fail-Closed 에스컬레이션.
+
+
 
 
 
