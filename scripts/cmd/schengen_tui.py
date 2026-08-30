@@ -81,6 +81,7 @@ from core.guard_db import (
     get_escalation_approver,
     get_escalation_resolution,
     get_instruction_delivery_config,
+    get_pane_direct_config,
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
@@ -99,7 +100,7 @@ from tools.schengen_agent_llm import (
     reject_batch_escalations,
 )
 from adapters.agent_adapters import get_adapter
-from adapters.herdr_client import get_pane_text
+from adapters.herdr_client import get_pane_info, get_pane_text
 from cmd.schengen_watcher import list_active_guard_locks
 
 
@@ -960,10 +961,14 @@ class SchengenTUIApp(App):
         self._chat_plain: List[str] = []  # Plain-text buffer for clipboard copy
         self._last_escalation_hash = ""
         self._notified_escalation_ids: Set[int] = set()
-        # Escalation ids whose pane-dialog liveness was already validated this
-        # session (pane-direct pre-render eviction runs ONCE per escalation id to
-        # avoid a pane-read subprocess on every render).
-        self._validated_liveness_ids: Set[int] = set()
+        # Pane-direct pre-render eviction (INV-PD-4/5): escalation_id ->
+        # CONSECUTIVE not-live renders. Eviction requires confirm_polls
+        # consecutive not-live reads AND a non-blocked pane status — a single
+        # transient read or a still-blocked agent never fake-approves (#7771).
+        self._pane_direct_polls: Dict[int, int] = {}
+        # FIFO head escalation id whose pane-direct counters are live; the
+        # counter dict is reset whenever the head id changes.
+        self._pane_direct_head: Optional[int] = None
         self._last_active_id: Optional[int] = None
         self._processing_chat: bool = False
         self._last_guard_active: bool = False
@@ -1246,6 +1251,58 @@ class SchengenTUIApp(App):
         self._write(f"[bold yellow]⚙️ [Daemon Control]:[/] {msg}")
         self.update_radar_data(force=True)
 
+    def _pane_direct_liveness_guard(self, active_esc: dict, confirm_polls: int = 2) -> bool:
+        """INV-PD-4/5 pane-direct pre-render guard for the active FIFO escalation.
+
+        Returns True when the escalation was auto-evicted this cycle
+        (approver=pane-direct). Rules:
+        - QUESTION dialogs and unknown adapters (None) are never evicted
+          (fail-closed).
+        - While the pane agent_status is 'blocked' the dialog is treated as live
+          and NEVER evicted (INV-PD-4) — a blocked agent is by definition still
+          waiting on the user.
+        - Otherwise the dialog is liveness-checked; eviction requires
+          `confirm_polls` (default 2) CONSECUTIVE not-live renders (INV-PD-5
+          debounce) so a single transient read can never fake-approve a live
+          dialog. A live read resets the counter.
+        - Pane-read errors fail closed (treated live).
+        The counter dict is reset whenever the FIFO head escalation id changes.
+        """
+        active_id = active_esc["id"]
+        pane_id = active_esc["pane_id"]
+        if active_id != self._pane_direct_head:
+            self._pane_direct_head = active_id
+            self._pane_direct_polls.clear()
+        if active_esc.get("decision_layer") == "QUESTION":
+            return False
+        adapter = get_adapter(active_esc.get("agent_kind") or "")
+        if adapter is None:
+            return False
+        status = ""
+        try:
+            info = get_pane_info(pane_id)
+        except Exception:
+            return False  # INV-PD-4: unknown status -> never evict (fail-closed)
+        if not info or not info.get("agent_status"):
+            return False  # INV-PD-4: unknown status -> never evict (fail-closed)
+        status = info["agent_status"]
+        if status == "blocked":
+            self._pane_direct_polls[active_id] = 0   # INV-PD-4: blocked -> NEVER evict
+            return False
+        try:
+            dialog_live = adapter.dialog_is_live(get_pane_text(pane_id, lines=80))
+        except Exception:
+            dialog_live = True  # fail-closed: never evict on read error
+        if dialog_live:
+            self._pane_direct_polls[active_id] = 0
+            return False
+        n = self._pane_direct_polls.get(active_id, 0) + 1
+        self._pane_direct_polls[active_id] = n
+        if n >= max(1, int(confirm_polls)):  # INV-PD-5: debounced
+            resolve_escalation(pane_id=pane_id, resolution="APPROVED", approver="pane-direct")
+            return True
+        return False
+
     def update_radar_data(self, force: bool = False) -> None:
         if not self._columns_initialized:
             return
@@ -1303,29 +1360,17 @@ class SchengenTUIApp(App):
             # persist an exact-literal (re.escape'd) allowlist rule for it.
             self._last_intercepted_cmd = active_esc["raw_command"]
 
-            # PANE-DIRECT pre-render slot validation: a non-QUESTION escalation
-            # whose pane dialog is no longer LIVE was already answered directly in
-            # the pane — auto-evict (approver=pane-direct) BEFORE rendering the
-            # banner/notification so a stale PENDING row never pins the FIFO head.
-            # Run ONCE per escalation id (_validated_liveness_ids) to avoid a
-            # pane-read subprocess on every render. adapter None (unknown agent
-            # kind) -> fail-closed: never evict.
+            # PANE-DIRECT pre-render slot validation (INV-PD-4/5): never evict a
+            # blocked pane, and only evict a not-live dialog after confirm_polls
+            # CONSECUTIVE not-live renders (debounce) — a single transient read
+            # must never fake-approve a still-live dialog (#7771). Delegates to
+            # _pane_direct_liveness_guard; adapter None / read error fail closed.
             pane_direct_evicted = False
-            if not is_question and active_id not in self._validated_liveness_ids:
-                self._validated_liveness_ids.add(active_id)
-                adapter = get_adapter(active_esc.get("agent_kind") or "")
-                if adapter is not None:
-                    try:
-                        dialog_live = adapter.dialog_is_live(get_pane_text(active_esc["pane_id"], lines=80))
-                    except Exception:
-                        dialog_live = True  # fail-closed: never evict on read error
-                    if not dialog_live:
-                        resolve_escalation(
-                            pane_id=active_esc["pane_id"],
-                            resolution="APPROVED",
-                            approver="pane-direct",
-                        )
-                        pane_direct_evicted = True
+            try:
+                confirm_polls = int(get_pane_direct_config().get("pane_direct_confirm_polls", 2))
+            except Exception:
+                confirm_polls = 2
+            pane_direct_evicted = self._pane_direct_liveness_guard(active_esc, confirm_polls=confirm_polls)
 
             if pane_direct_evicted:
                 _update_static_if_changed(

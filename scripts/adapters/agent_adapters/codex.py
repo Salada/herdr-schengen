@@ -49,6 +49,32 @@ _EDIT_DEST_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# #7938: every Codex approval-dialog header. `_latest_dialog_region` anchors the
+# focused-row marker search on the LAST (bottom) dialog header — a variable
+# window instead of a fixed `visible_text[-400:]` tail, so a long command body
+# or multi-file diff can never overflow the window and hide a live '› N.' row.
+_CODEX_DIALOG_HEADERS = (
+    "Would you like to run the following command?",
+    "Do you want to approve network access",
+    "Would you like to send input to terminal",
+    "Would you like to make the following edits?",
+    "Would you like to grant these permissions?",
+)
+
+
+def _latest_dialog_region(visible_text: str) -> str:
+    """Return the text from the LAST codex dialog header to the end of the buffer.
+
+    Falls back to the whole text when no dialog header is present (the footer
+    gate already requires a live dialog, so a header is expected in practice).
+    """
+    idx = -1
+    for h in _CODEX_DIALOG_HEADERS:
+        i = visible_text.rfind(h)
+        if i > idx:
+            idx = i
+    return visible_text[idx:] if idx != -1 else visible_text
+
 
 def _extract_codex_question_text(text: str):
     """Extract the free-text question body from a codex input-request dialog.
@@ -142,7 +168,10 @@ class CodexAdapter(AgentAdapter):
         # eviction).
         hdr = visible_text.rfind("Would you like to make the following edits?")
         region = visible_text[hdr:] if hdr != -1 else ""
-        if not region or not _ACTIVE_CHOICE_RE.search(region[-400:]):
+        # #7938: region is already header-anchored via rfind — search the WHOLE
+        # region (not a fixed [-400:] tail) so a long multi-file diff can never
+        # overflow the window and hide the live '› N.' marker.
+        if not region or not _ACTIVE_CHOICE_RE.search(region):
             return None  # historical header / already-completed edit -> NOT live
 
         # Legacy Codex patch header: `*** Add/Update/Delete File: <path>`
@@ -172,15 +201,15 @@ class CodexAdapter(AgentAdapter):
     def dialog_is_live(self, visible_text: str) -> bool:
         """True only if the ACTIVE codex approval dialog is genuinely open.
 
-        Requires the dialog footer AND the focused-row '› 1. Yes' marker in the
-        tail of visible_text — a historical prompt or a completed (enter-pressed)
-        edit dialog lingering in scrollback is NOT live. Stricter than
-        get_pending_request (which only requires the footer).
+        Requires the dialog footer AND the focused-row '› N.' marker within the
+        LATEST dialog region (header-anchored variable window, #7938) — a fixed
+        [-400:] tail would overflow for long commands/multi-file diffs and
+        misread a live dialog as answered. Stricter than get_pending_request
+        (which only requires the footer).
         """
-        return (
-            footer_is_live(visible_text, "Press enter to confirm or esc to cancel")
-            and _ACTIVE_CHOICE_RE.search(visible_text[-400:]) is not None
-        )
+        if not footer_is_live(visible_text, "Press enter to confirm or esc to cancel"):
+            return False
+        return _ACTIVE_CHOICE_RE.search(_latest_dialog_region(visible_text)) is not None
 
     def inject_approval(self, pane_id, req_cmd):
         """Approve via 'y' (selection-independent, per Codex default keymap)."""
