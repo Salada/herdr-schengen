@@ -711,6 +711,9 @@ def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer,
     session_uuid = (
         pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
     )
+    # issue #7207: thread the pane's workspace cwd so auto-promotion can resolve
+    # the repo-local .schengen/ policy on a later human approval.
+    esc_cwd = pane_info.get("foreground_cwd") or pane_info.get("cwd") or ""
     # Capture the raw dialog/situation (tail-most 8K chars) so the host LLM can
     # later inspect exactly what was on screen without re-deriving it (ADR-008).
     snapshot = (visible_text or "").strip()[-8000:] or None
@@ -722,6 +725,7 @@ def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer,
         agent_kind=agent_kind,
         session_id=session_uuid,
         dialog_snapshot=snapshot,
+        cwd=esc_cwd,
     )
     print(
         f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).",
@@ -1165,6 +1169,7 @@ def main():
                         agent_kind=agent_kind,
                         session_id=session_uuid,
                         dialog_snapshot=visible_text,
+                        cwd=pane_info.get("foreground_cwd") or pane_info.get("cwd") or "",
                     )
                     last_processed_prompt[pane_id] = {
                         "cmd": req_cmd,

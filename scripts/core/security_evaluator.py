@@ -965,6 +965,7 @@ class DecisionLayer(str, Enum):
     PACKAGE_GUARD = "PACKAGE_GUARD"  # Package-manager 3-tuple classifier (MUTATING vs READ_ONLY)
     COMPLEXITY_TAX = "COMPLEXITY_TAX"  # Structural complexity deferral (never auto-approves)
     ORIGIN_GUARD = "ORIGIN_GUARD"  # Origin-based hard-escalate (INJECTED/EMERGENT never auto-approve)
+    FAST_TRACK_WORKSPACE_ALLOWLIST = "FAST_TRACK_WORKSPACE_ALLOWLIST"  # Repo-local .schengen/ allowlist fast-track (issue #7207)
 
 
 # INV-6: forensic / network primitives must NEVER fast-track (binary inspection / egress)
@@ -1342,6 +1343,47 @@ def classify_package_command(cmd_str: str) -> Optional[tuple[str, str, list[str]
     return (manager, action_class, packages)
 
 
+def _check_workspace_allowlist(cmd_str: str, cwd: str = "", action_type: Optional[str] = None):
+    """Check the workspace `.schengen/` allowlist (issue #7207, INV-WS-1..5).
+
+    Returns (True, reason) on a rule match for `action_type`, else None.
+    exec -> match on normalize_command(cmd_str); dialog types -> the canonical
+    target path. Runs AFTER the global denylist layers (INV-WS-2 by ordering:
+    sensitive/sandbox/SHELL_CRITICAL/gray-zone-BLOCK all return first).
+    """
+    try:
+        from core.workspace_allowlist import check_rule, discover_workspace_policy, load_policy
+
+        policy_path = discover_workspace_policy(cwd)
+        if policy_path is None:
+            return None
+        policy = load_policy(policy_path)
+        if policy is None:
+            return None
+        if action_type is None:
+            return None
+        if action_type == "exec":
+            target = normalize_command(cmd_str)
+        elif action_type == "edit_file":
+            if cmd_str.startswith("edit_file "):
+                target = cmd_str.split(" ", 1)[1].strip()
+            elif cmd_str.startswith("create_file "):
+                target = cmd_str.split(" ", 1)[1].strip()
+            else:
+                return None
+        else:
+            prefix = action_type + " "
+            if cmd_str.startswith(prefix):
+                target = cmd_str[len(prefix):].strip()
+            else:
+                return None
+        if check_rule(policy, action_type, target):
+            return True, f"Workspace allowlist ({action_type}): '{target}'"
+        return None
+    except Exception:
+        return None
+
+
 def _audit_static_shell_command(
     cmd_str: str,
     use_llm_judge: bool = False,
@@ -1390,6 +1432,10 @@ def _audit_static_shell_command(
                 f"Critical OS/Secret resource {op_type} blocked: '{target_path}'",
                 DecisionLayer.GRAY_ZONE_MATRIX,
             )
+        # issue #7207: workspace .schengen/ allowlist fast-track (after denylists)
+        ws_hit = _check_workspace_allowlist(cmd_str, cwd=cwd, action_type="edit_file")
+        if ws_hit is not None:
+            return True, ws_hit[1], DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST
         return True, f"Verified safe file {op_type}: '{target_path}'", DecisionLayer.FAST_TRACK_AST
 
     # 0a-2. Check opencode external-directory access dialog (access_directory <path>)
@@ -1414,6 +1460,10 @@ def _audit_static_shell_command(
                 f"Critical OS/Secret resource directory access blocked: '{target}'",
                 DecisionLayer.GRAY_ZONE_MATRIX,
             )
+        # issue #7207: workspace .schengen/ allowlist fast-track (after denylists)
+        ws_hit = _check_workspace_allowlist(cmd_str, cwd=cwd, action_type="access_directory")
+        if ws_hit is not None:
+            return True, ws_hit[1], DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST
         return True, f"Verified safe external directory access: '{target}'", DecisionLayer.FAST_TRACK_AST
 
     # 0a-3. Check opencode file-read dialog (read_file <path>)
@@ -1428,6 +1478,10 @@ def _audit_static_shell_command(
         gz_tier = classify_resource_tier(target_path)
         if gz_tier == ResourceTier.T4_CRITICAL:
             return False, f"Critical OS/Secret resource read blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
+        # issue #7207: workspace .schengen/ allowlist fast-track (after denylists)
+        ws_hit = _check_workspace_allowlist(cmd_str, cwd=cwd, action_type="read_file")
+        if ws_hit is not None:
+            return True, ws_hit[1], DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST
         return True, f"Verified safe file read: '{target_path}'", DecisionLayer.FAST_TRACK_AST
 
     # 0a-4. opencode doom-loop dialogs must NEVER be auto-approved.
@@ -1568,6 +1622,15 @@ def _audit_static_shell_command(
         if cloud_safe:
             return True, f"Gray-zone cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
         return False, f"Gray-zone deferred to human ({cloud_reason}):\n{guidance}", DecisionLayer.GRAY_ZONE_MATRIX
+
+    # issue #7207: workspace .schengen/ allowlist — persistent repo-local
+    # fast-track. Runs AFTER the gray-zone BLOCK (and every denylist layer
+    # above) and BEFORE the closed fast-track/novelty/package/slow paths, so
+    # INV-WS-2 holds by construction: sensitive/sandbox/SHELL_CRITICAL/
+    # gray-zone-BLOCK all return first.
+    ws_hit = _check_workspace_allowlist(cmd_str, cwd=cwd, action_type="exec")
+    if ws_hit is not None:
+        return True, ws_hit[1], DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST
 
     is_degraded = (isinstance(sc_details, dict) and sc_details.get("degraded")) or (
         isinstance(sem_details, dict) and sem_details.get("degraded")
@@ -1721,6 +1784,9 @@ def derive_taxonomy(
             mechanism = "package-read-query"
         elif layer == DecisionLayer.CLOUD_JUDGE:
             mechanism = "cloud-judge-verified"
+        elif layer == DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST:
+            # origin stays the command author (NOT forced to HUMAN).
+            mechanism = "workspace-allowlist"
         else:
             mechanism = "fast-track-verified"
     elif cmd_str == "doom_loop" or cmd_str.startswith("question") or cmd_str.startswith("unhandled_dialog "):
