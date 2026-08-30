@@ -20,6 +20,11 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   - 해결 방향:
     • `codex_adapter`의 프롬프트 활성 상태 검사 강화: "Would you like..." 문구뿐 아니라 실제 하단 활성 선택지(`› 1. Yes, proceed` 또는 `Confirm: y/n`) 존재 여부를 앵커링하여 이미 완료된 과거 스크롤백 텍스트 오인식 방지.
     • TUI `/approve` 및 pane 직접 `y` 키 입력 후 다이얼로그 해제 감지 시 `resolve_escalation(pane_id, approver=...)` 호출 즉시 보장.
+[] [Refactor/Adapter] `footer_is_live` 공용 유틸 안정화 및 엣지케이스 대응 3종 (#17 피어리뷰 후속):
+  1) tail window 동적/유연화: `tail_lines=8` 고정값으로 인해 긴 다이얼로그/스피너/줄바꿈 발생 시 실제 live 다이얼로그를 stale로 오판(over-block)하는 갭 해소 (가변 window 또는 footer 역방향 탐색 검토).
+  2) marker 잔류 오인식 방지: 종료된 다이얼로그의 footer marker가 8줄 뷰포트에 잔류할 때 여전히 live 상태로 오판하는 이슈 방지 정밀화.
+  3) tail window 경계 단위테스트: footer 위치(8줄 vs 9줄 등)에 따른 경계 조건 테스트케이스 추가.
+
 [] [Bug/Approval] Escalation #1910 & #2339 승인 발화 성공 후 실제 Pane(OpenCode w1D:p1) 명령 미승인 현상 재발 및 디버깅:
   - 현상 분석:
     • #1910에 이어 **#2339에서도 동일 현상 재발**: #2339(OpenCode `unittest tests.test_stale_escalation_eviction`)에 대해 Gatekeeper가 `APPROVE` 판정을 내리고 승인했다고 응답했으나, 10:09까지 실제 OpenCode 서브에이전트(Fixer) 다이얼로그(`Allow once / Allow always / Reject`)는 승인되지 않고 대기 상태로 유지됨.
