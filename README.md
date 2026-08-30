@@ -109,10 +109,10 @@ npx skills add ssh://git@salada-git:2222/InhouseOriented/herdr-schengen.git -g -
 
 ### Quick Commands & History CLI
 ```bash
-# 1. Start SmartGate daemon monitoring all active & future AGY + OpenCode panes
-python3 scripts/cmd/schengen_watcher.py --target auto
+# 1. Launch the interactive Gatekeeper (the TUI is the single daemon lifecycle owner)
+~/.local/share/herdr-schengen-tui-venv/bin/python3 scripts/cmd/schengen_tui.py
 
-# 2. Check live status and active Herdr panes
+# 2. Check live status (read-only diagnostics)
 python3 scripts/cmd/schengen_watcher.py --status
 
 # 3. View recent audit history with layer attribution
@@ -125,8 +125,7 @@ python3 scripts/cmd/schengen_history.py --search "git push"
 python3 scripts/cmd/schengen_history.py --list-layers
 python3 scripts/cmd/schengen_history.py --list-decisions
 
-# 6. Stop the SmartGate daemon
-python3 scripts/cmd/schengen_watcher.py --stop
+# Start, stop, and reload the daemon only through the TUI (Ctrl+T / /toggle).
 ```
 
 ---
