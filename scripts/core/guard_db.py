@@ -76,7 +76,8 @@ def init_db():
             consequence TEXT DEFAULT 'NONE', -- 'NONE' | 'DEST' | 'EXFIL' | 'INT' | 'AVAIL' | 'PERS'
             mechanism TEXT DEFAULT 'none',
             gate_state TEXT DEFAULT 'ENFORCE', -- 'ENFORCE' | 'OBSERVE' | 'DEGRADED'
-            shadow_mode INTEGER DEFAULT 0 -- 0: false, 1: true
+            shadow_mode INTEGER DEFAULT 0, -- 0: false, 1: true
+            scope_context TEXT DEFAULT 'SESSION_TRANSIENT' -- 'GLOBAL_RULE' | 'SESSION_TRANSIENT' | 'REPO_LOCAL'
         );
 
         CREATE TABLE IF NOT EXISTS pattern_stats (
@@ -108,6 +109,8 @@ def init_db():
             started_at TEXT NOT NULL,
             delivered_at TEXT,
             last_transitioned_at TEXT NOT NULL,
+            cwd TEXT, -- workspace cwd at interception (issue #7207 auto-promotion)
+            origin TEXT, -- command author origin (A/H/I/E) at interception (INV-WS-3 promotion gate)
             UNIQUE(pane_id, command_hash)
         );
 
@@ -165,6 +168,10 @@ def init_db():
             cursor.execute("ALTER TABLE audit_logs ADD COLUMN gate_state TEXT DEFAULT 'ENFORCE'")
         if "shadow_mode" not in columns:
             cursor.execute("ALTER TABLE audit_logs ADD COLUMN shadow_mode INTEGER DEFAULT 0")
+        if "scope_context" not in columns:
+            cursor.execute(
+                "ALTER TABLE audit_logs ADD COLUMN scope_context TEXT DEFAULT 'SESSION_TRANSIENT'"
+            )
 
         # Migration: Ensure session_id column exists in pending_escalations
         cursor.execute("PRAGMA table_info(pending_escalations)")
@@ -177,6 +184,10 @@ def init_db():
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN resolution TEXT")
         if "approver" not in p_columns:
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN approver TEXT")
+        if "cwd" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN cwd TEXT")
+        if "origin" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN origin TEXT")
 
         # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
@@ -397,8 +408,13 @@ def record_audit_log(
     mechanism: str = "none",
     gate_state: str = "ENFORCE",
     shadow_mode: bool = False,
+    scope_context: str = "SESSION_TRANSIENT",
 ):
-    """Record an audit entry with 2D Taxonomy and update pattern frequency statistics."""
+    """Record an audit entry with 2D Taxonomy and update pattern frequency statistics.
+
+    scope_context: 'GLOBAL_RULE' | 'SESSION_TRANSIENT' | 'REPO_LOCAL' (issue
+    #7207 — REPO_LOCAL marks workspace .schengen/ allowlist auto-promotions).
+    """
     init_db()
     norm_pattern = normalize_command(raw_command)
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -411,9 +427,9 @@ def record_audit_log(
             INSERT INTO audit_logs (
                 timestamp, pane_id, agent_kind, raw_command, normalized_pattern,
                 decision, safety_reason, decision_layer, origin, consequence,
-                mechanism, gate_state, shadow_mode
+                mechanism, gate_state, shadow_mode, scope_context
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 now_iso,
@@ -429,6 +445,7 @@ def record_audit_log(
                 mechanism,
                 gate_state,
                 1 if shadow_mode else 0,
+                scope_context,
             ),
         )
 
@@ -995,6 +1012,7 @@ def record_adjudication(
     agent_kind: str,
     action: str,
     feedback: str,
+    origin: str = "A",
 ) -> None:
     """Persist an approve/deny adjudication and its instruction for auditability.
 
@@ -1002,11 +1020,18 @@ def record_adjudication(
     pattern is recorded with a TTL so subsequent identical commands (same pane scope)
     auto-approve via the HUMAN_APPROVED fast path instead of re-escalating.
     REJECT never seeds the gate.
+
+    issue #7207: on APPROVE with a human/gatekeeper approver and AGENT/HUMAN
+    origin, the workspace .schengen/ allowlist auto-promotion hook runs
+    (skipped when no policy exists or the INV-WS-2 denylist re-assertion refuses).
     """
     init_db()
     now_iso = datetime.now(timezone.utc).isoformat()
     resolution = "APPROVED" if action == "APPROVE" else "REJECTED"
     raw_command = None
+    esc_cwd = None
+    esc_layer = None
+    esc_origin = None
     with get_db_connection() as conn:
         conn.execute(
             """
@@ -1021,13 +1046,120 @@ def record_adjudication(
                 (resolution, escalation_id),
             )
             row = conn.execute(
-                "SELECT raw_command FROM pending_escalations WHERE id = ?", (escalation_id,)
+                "SELECT raw_command, cwd, decision_layer, origin FROM pending_escalations WHERE id = ?", (escalation_id,)
             ).fetchone()
-            raw_command = row["raw_command"] if row else None
+            if row:
+                raw_command = row["raw_command"]
+                esc_cwd = row["cwd"]
+                esc_layer = row["decision_layer"]
+                esc_origin = row["origin"]
         conn.commit()
 
     if action == "APPROVE" and raw_command:
         record_human_approval_pattern(normalize_command(raw_command), scope=pane_id)
+        # issue #7207: workspace allowlist auto-promotion (human/gatekeeper
+        # approval, AGENT/HUMAN origin only; fail-safe — never breaks adjudication).
+        # Fix 4: the escalation row's intercepted origin is authoritative —
+        # INJECTED/EMERGENT never promote even on a human approve.
+        effective_origin = (esc_origin or origin or "A")
+        try:
+            _maybe_promote_workspace_rule(
+                escalation_id=escalation_id,
+                pane_id=pane_id,
+                agent_kind=agent_kind,
+                raw_command=raw_command,
+                decision_layer=esc_layer,
+                cwd=esc_cwd,
+                origin=effective_origin,
+                now_iso=now_iso,
+            )
+        except Exception:
+            pass
+
+
+def _derive_workspace_rule(raw_command: str, decision_layer: Optional[str]) -> Optional[dict]:
+    """Derive a canonical (action_type, match_type, pattern) rule for promotion.
+
+    Dialog types -> canonical (realpath) target path. exec -> the ORIGINAL raw
+    command (exact string) — NOT normalize_command — so the INV-WS-2 denylist
+    re-assertion (inside promote_rule) sees sensitive paths and absolute-path
+    tokens on the RAW text before anything is persisted (reviewer fix).
+    Returns None for unparseable dialog commands / question dialogs.
+    """
+    cmd = (raw_command or "").strip()
+    if cmd.startswith("access_directory "):
+        target = cmd[len("access_directory "):].strip()
+        canon = os.path.realpath(os.path.expanduser(target))
+        return {"action_type": "access_directory", "match_type": "prefix", "pattern": canon}
+    if cmd.startswith("edit_file ") or cmd.startswith("create_file "):
+        target = cmd.split(" ", 1)[1].strip()
+        canon = os.path.realpath(os.path.expanduser(target))
+        return {"action_type": "edit_file", "match_type": "exact", "pattern": canon}
+    if cmd.startswith("read_file "):
+        target = cmd[len("read_file "):].strip()
+        canon = os.path.realpath(os.path.expanduser(target))
+        return {"action_type": "read_file", "match_type": "exact", "pattern": canon}
+    if decision_layer in ("QUESTION", "unhandled_dialog", None):
+        return None
+    return {"action_type": "exec", "match_type": "exact", "pattern": cmd}
+
+
+def _maybe_promote_workspace_rule(
+    escalation_id: int,
+    pane_id: str,
+    agent_kind: str,
+    raw_command: str,
+    decision_layer: Optional[str],
+    cwd: Optional[str],
+    origin: str,
+    now_iso: str,
+) -> None:
+    """Auto-promote an approved escalation into the workspace .schengen/ allowlist.
+
+    Only human-tui/gatekeeper approvals with AGENT/HUMAN origin promote (the
+    approver is set to 'human-tui' by record_adjudication itself). Skips when:
+    no workspace policy, unparseable rule, or the INV-WS-2 denylist re-assertion
+    (inside promote_rule) refuses. Records a REPO_LOCAL audit row on success.
+    """
+    import os as _os
+    import uuid as _uuid
+
+    from core.workspace_allowlist import discover_workspace_policy, promote_rule
+
+    if origin not in ("A", "H"):
+        return  # INV-WS-3: INJECTED/EMERGENT never promote
+    if not cwd:
+        return
+    rule_base = _derive_workspace_rule(raw_command, decision_layer)
+    if rule_base is None:
+        return
+    policy_path = discover_workspace_policy(cwd)
+    if policy_path is None:
+        return
+    rule = {
+        "id": f"auto-{_uuid.uuid4().hex[:12]}",
+        "action_type": rule_base["action_type"],
+        "match_type": rule_base["match_type"],
+        "pattern": rule_base["pattern"],
+        "agent_scope": ["*"],
+        "created_by": "human-tui",
+        "created_at": now_iso,
+        "reason": f"Auto-promoted from {decision_layer or 'unknown'} approval (escalation #{escalation_id})",
+    }
+    promoted = promote_rule(policy_path, rule)
+    if promoted:
+        record_audit_log(
+            pane_id=pane_id,
+            raw_command=raw_command,
+            decision="ALLOWLIST_BYPASS",
+            safety_reason=f"Auto-promoted workspace rule: {rule['action_type']} {rule['pattern']}",
+            agent_kind=agent_kind,
+            decision_layer=decision_layer or "FAST_TRACK_AST",
+            origin=origin,
+            consequence="NONE",
+            mechanism="workspace-allowlist-promote",
+            scope_context="REPO_LOCAL",
+        )
 
 
 def enqueue_pending_escalation(
@@ -1038,8 +1170,17 @@ def enqueue_pending_escalation(
     agent_kind: str = "unknown",
     session_id: Optional[str] = None,
     dialog_snapshot: Optional[str] = None,
+    cwd: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> int:
-    """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once)."""
+    """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once).
+
+    cwd: the workspace cwd at interception (issue #7207) — enables the
+    auto-promotion hook on later human approval.
+    origin: the command author origin (A/H/I/E) at interception — the
+    auto-promotion gate (INV-WS-3) reads it so INJECTED/EMERGENT never promote
+    even on a human approve.
+    """
     import hashlib
 
     init_db()
@@ -1051,18 +1192,20 @@ def enqueue_pending_escalation(
         cursor.execute(
             """
             INSERT INTO pending_escalations (
-                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, last_transitioned_at
+                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, last_transitioned_at, cwd, origin
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
             ON CONFLICT(pane_id, command_hash) DO UPDATE SET
                 session_id = excluded.session_id,
                 status = 'PENDING',
                 safety_reason = excluded.safety_reason,
                 decision_layer = excluded.decision_layer,
                 dialog_snapshot = excluded.dialog_snapshot,
+                cwd = excluded.cwd,
+                origin = excluded.origin,
                 last_transitioned_at = excluded.last_transitioned_at
         """,
-            (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, dialog_snapshot, now_iso, now_iso),
+            (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, dialog_snapshot, now_iso, now_iso, cwd, origin),
         )
         last_id = cursor.lastrowid
         if not last_id:
@@ -1089,7 +1232,7 @@ def get_pending_escalations(
     """
     init_db()
     statuses = "('PENDING', 'DELIVERED')" if include_delivered else "('PENDING')"
-    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, delivered_at, last_transitioned_at FROM pending_escalations WHERE status IN {statuses}"
+    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, delivered_at, last_transitioned_at, cwd, origin FROM pending_escalations WHERE status IN {statuses}"
     params = []
     if pane_id:
         query += " AND pane_id = ?"
