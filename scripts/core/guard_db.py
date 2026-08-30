@@ -1310,31 +1310,44 @@ def record_adjudication(
             pass
 
 
-def _derive_workspace_rule(raw_command: str, decision_layer: Optional[str]) -> Optional[dict]:
-    """Derive a canonical (action_type, match_type, pattern) rule for promotion.
+def _derive_workspace_rule(raw_command: str, decision_layer: Optional[str]) -> list[dict]:
+    """Derive canonical (action_type, match_type, pattern) rules for promotion.
 
-    Dialog types -> canonical (realpath) target path. exec -> the ORIGINAL raw
-    command (exact string) — NOT normalize_command — so the INV-WS-2 denylist
-    re-assertion (inside promote_rule) sees sensitive paths and absolute-path
-    tokens on the RAW text before anything is persisted (reviewer fix).
-    Returns None for unparseable dialog commands / question dialogs.
+    Returns a LIST of rules (uniform contract for the promote loop):
+    - dialog types -> one rule per canonical (realpath) target path; a
+      newline-delimited multi-file edit_file/create_file yields ONE rule per
+      path (#7759, INV-EF-4 all-or-nothing at the promote loop).
+    - exec -> a single rule with the ORIGINAL raw command (exact string) — NOT
+      normalize_command — so the INV-WS-2 denylist re-assertion (inside
+      promote_rule) sees sensitive paths and absolute-path tokens on the RAW
+      text before anything is persisted (reviewer fix).
+    Returns [] for unparseable dialog commands / question dialogs.
     """
     cmd = (raw_command or "").strip()
     if cmd.startswith("access_directory "):
         target = cmd[len("access_directory "):].strip()
         canon = os.path.realpath(os.path.expanduser(target))
-        return {"action_type": "access_directory", "match_type": "prefix", "pattern": canon}
+        return [{"action_type": "access_directory", "match_type": "prefix", "pattern": canon}]
     if cmd.startswith("edit_file ") or cmd.startswith("create_file "):
-        target = cmd.split(" ", 1)[1].strip()
-        canon = os.path.realpath(os.path.expanduser(target))
-        return {"action_type": "edit_file", "match_type": "exact", "pattern": canon}
+        raw = cmd.split(" ", 1)[1]
+        paths = [p.strip() for p in raw.split("\n") if p.strip()]
+        if not paths:
+            return []
+        return [
+            {
+                "action_type": "edit_file",
+                "match_type": "exact",
+                "pattern": os.path.realpath(os.path.expanduser(p)),
+            }
+            for p in paths
+        ]
     if cmd.startswith("read_file "):
         target = cmd[len("read_file "):].strip()
         canon = os.path.realpath(os.path.expanduser(target))
-        return {"action_type": "read_file", "match_type": "exact", "pattern": canon}
+        return [{"action_type": "read_file", "match_type": "exact", "pattern": canon}]
     if decision_layer in ("QUESTION", "unhandled_dialog", None):
-        return None
-    return {"action_type": "exec", "match_type": "exact", "pattern": cmd}
+        return []
+    return [{"action_type": "exec", "match_type": "exact", "pattern": cmd}]
 
 
 def _maybe_promote_workspace_rule(
@@ -1352,11 +1365,13 @@ def _maybe_promote_workspace_rule(
 
     INV-AP-3: only EXPLICIT human adjudication (approver="human-tui") may
     promote — the gatekeeper LLM's approve grants no trust. Only AGENT/HUMAN
-    origins promote (INV-WS-3 / INV-AP-4). Skips when: no workspace policy,
-    unparseable rule, or the INV-WS-2 denylist re-assertion (inside
-    promote_rule) refuses. Records a REPO_LOCAL audit row on success.
+    origins promote (INV-WS-3 / INV-AP-4). INV-EF-4 (#7759): multi-rule
+    derivations (multi-file edit_file) are ALL-OR-NOTHING — every rule must
+    promote or NOTHING is persisted (any sensitive path refuses the whole
+    batch). Skips when: no workspace policy, unparseable rule, or the INV-WS-2
+    denylist re-assertion (inside promote_rule) refuses. Records a REPO_LOCAL
+    audit row on success.
     """
-    import os as _os
     import uuid as _uuid
 
     from core.workspace_allowlist import discover_workspace_policy, promote_rule
@@ -1365,24 +1380,55 @@ def _maybe_promote_workspace_rule(
         return  # INV-WS-3/INV-AP-4: INJECTED/EMERGENT never promote
     if not cwd:
         return
-    rule_base = _derive_workspace_rule(raw_command, decision_layer)
-    if rule_base is None:
+    rules = _derive_workspace_rule(raw_command, decision_layer)
+    if not rules:
         return
     policy_path = discover_workspace_policy(cwd)
     if policy_path is None:
         return
-    rule = {
-        "id": f"auto-{_uuid.uuid4().hex[:12]}",
-        "action_type": rule_base["action_type"],
-        "match_type": rule_base["match_type"],
-        "pattern": rule_base["pattern"],
-        "agent_scope": ["*"],
-        "created_by": approver,
-        "created_at": now_iso,
-        "reason": f"Auto-promoted from {decision_layer or 'unknown'} approval (escalation #{escalation_id})",
-    }
-    promoted = promote_rule(policy_path, rule)
-    if promoted:
+    # INV-EF-4 all-or-nothing: snapshot the pre-batch policy bytes so a partial
+    # batch can be rolled back byte-for-byte on ANY refusal.
+    pre_batch_raw = None
+    try:
+        if policy_path.exists():
+            pre_batch_raw = policy_path.read_bytes()
+    except Exception:
+        pre_batch_raw = None
+    rule_ids = [f"auto-{_uuid.uuid4().hex[:12]}" for _ in rules]
+    staged = []
+    for rid, base in zip(rule_ids, rules):
+        staged.append(
+            {
+                "id": rid,
+                "action_type": base["action_type"],
+                "match_type": base["match_type"],
+                "pattern": base["pattern"],
+                "agent_scope": ["*"],
+                "created_by": approver,
+                "created_at": now_iso,
+                "reason": f"Auto-promoted from {decision_layer or 'unknown'} approval (escalation #{escalation_id})",
+            }
+        )
+    promoted_all = True
+    for rule in staged:
+        if not promote_rule(policy_path, rule):
+            promoted_all = False
+            break
+    if not promoted_all:
+        # Roll back the partial batch (all-or-nothing, INV-EF-4): restore the
+        # pre-batch bytes, or remove the file this batch created.
+        from core.workspace_allowlist import restore_policy
+
+        if pre_batch_raw is not None:
+            restore_policy(policy_path, pre_batch_raw)
+        else:
+            try:
+                if policy_path.exists():
+                    policy_path.unlink()
+            except Exception:
+                pass
+        return
+    for rule in staged:
         record_audit_log(
             pane_id=pane_id,
             raw_command=raw_command,

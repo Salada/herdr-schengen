@@ -293,6 +293,58 @@ class TestWorkspaceAllowlist(unittest.TestCase):
         )
         self.assertFalse(self.policy_path.exists(), "INJECTED-origin escalation must not promote")
 
+    def test_multifile_approve_promotes_one_rule_per_path(self):
+        # #7759/INV-EF-4: a multi-file edit_file approval promotes ONE exact
+        # rule per path (all safe paths land in .schengen/allowlist.json).
+        pane = "wWS:mf1"
+        cmd = f"edit_file {self.ws}/a.py\n{self.ws}/b.py"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane,
+            raw_command=cmd,
+            safety_reason="multi edit",
+            decision_layer="GRAY_ZONE_MATRIX",
+            agent_kind="opencode",
+            cwd=str(self.ws),
+            origin="A",
+        )
+        record_adjudication(
+            escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
+            action="APPROVE", feedback="ok", origin="A", approver="human-tui",
+        )
+        self.assertTrue(self.policy_path.exists(), "multi-file approve must promote")
+        rules = load_policy(self.policy_path).get("rules") or []
+        self.assertEqual(len(rules), 2)
+        patterns = sorted(r["pattern"] for r in rules)
+        self.assertEqual(
+            patterns,
+            sorted([str((self.ws / "a.py").resolve()), str((self.ws / "b.py").resolve())]),
+        )
+        for r in rules:
+            self.assertEqual(r["action_type"], "edit_file")
+            self.assertEqual(r["match_type"], "exact")
+
+    def test_multifile_approve_with_sensitive_path_promotes_nothing(self):
+        # #7759/INV-EF-4 (all-or-nothing): ONE sensitive path in a multi-file
+        # edit refuses the WHOLE batch — nothing is promoted.
+        pane = "wWS:mf2"
+        sensitive = f"{self.ws}/id_" + "rsa"
+        cmd = f"edit_file {self.ws}/ok.py\n{sensitive}"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane,
+            raw_command=cmd,
+            safety_reason="multi edit",
+            decision_layer="GRAY_ZONE_MATRIX",
+            agent_kind="opencode",
+            cwd=str(self.ws),
+            origin="A",
+        )
+        record_adjudication(
+            escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
+            action="APPROVE", feedback="ok", origin="A", approver="human-tui",
+        )
+        # the policy file was created by the batch, then rolled back -> gone
+        self.assertFalse(self.policy_path.exists(), "sensitive multi-file edit must promote NOTHING")
+
 
 if __name__ == "__main__":
     unittest.main()

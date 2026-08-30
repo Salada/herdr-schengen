@@ -39,6 +39,16 @@ _OPTION_ROW_RE = re.compile(r"^›?\s*\d+\.\s")
 # the first char of the pane read).
 _ACTIVE_CHOICE_RE = re.compile(r"^\s*›\s*\d+\.", re.MULTILINE)
 
+# #7759: current Codex edit-dialog destination lines (`Destination: <path>` /
+# `File: <path>`). Tolerates a leading/trailing ratatui frame border (`│`, `├`,
+# `└`, `─`, ...) and leading indentation; IGNORECASE for `destination:`/`file:`.
+# MULTILINE anchors each capture to a single line so every destination is
+# extracted individually (multi-file edits stay multi-capture).
+_EDIT_DEST_RE = re.compile(
+    r"^[│├└─┌┬┐┤┴┼\s]*(?:Destination|File):\s*(.+?)\s*[│├└─┌┬┐┤┴┼]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def _extract_codex_question_text(text: str):
     """Extract the free-text question body from a codex input-request dialog.
@@ -142,11 +152,16 @@ class CodexAdapter(AgentAdapter):
                 return f"edit_file {edits[0][1].strip()}"
             return "edit_file"  # delete or multi-file -> fail-closed
 
-        # Current Codex CLI format: `Destination: <path>` / `File: <path>`
-        dests = re.findall(r"^(?:Destination|File):\s*(.+?)\s*$", region, re.MULTILINE)
+        # Current Codex CLI format: `Destination: <path>` / `File: <path>`.
+        # #7759: every destination line is captured (multi-file edits survive as
+        # newline-delimited paths); a single destination is returned verbatim.
+        # Pathless -> bare `edit_file` (fail-closed, INV-EF-1).
+        dests = [d.strip() for d in _EDIT_DEST_RE.findall(region)]
         if len(dests) == 1:
-            return f"edit_file {dests[0].strip()}"
-        return "edit_file"  # multi-file or pathless -> fail-closed (unchanged #52 semantics)
+            return f"edit_file {dests[0]}"
+        if len(dests) > 1:
+            return "edit_file " + "\n".join(dests)   # multi-file, newline-delimited
+        return "edit_file"                            # pathless -> fail-closed
 
         # Permissions: Would you like to grant these permissions?
         if "Would you like to grant these permissions?" in visible_text:
