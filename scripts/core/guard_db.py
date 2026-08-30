@@ -93,7 +93,11 @@ def init_db():
             pattern_regex TEXT NOT NULL UNIQUE,
             description TEXT,
             created_at TEXT NOT NULL,
-            is_active INTEGER DEFAULT 1
+            is_active INTEGER DEFAULT 1,
+            created_by TEXT DEFAULT 'human-tui', -- CUD provenance (issue #91)
+            updated_at TEXT,
+            revoked_at TEXT,
+            revoked_by TEXT
         );
 
         CREATE TABLE IF NOT EXISTS pending_escalations (
@@ -188,6 +192,21 @@ def init_db():
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN cwd TEXT")
         if "origin" not in p_columns:
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN origin TEXT")
+
+        # Migration: user_allowlist CUD columns (issue #91). created_by
+        # backfills to 'human-tui' (correct: always human-reviewed); existing
+        # rows keep id/pattern_regex/description/created_at/is_active; is_active
+        # is NOT touched and nothing is deleted (INV-PL-5).
+        cursor.execute("PRAGMA table_info(user_allowlist)")
+        ua_columns = [c[1] for c in cursor.fetchall()]
+        if "created_by" not in ua_columns:
+            cursor.execute("ALTER TABLE user_allowlist ADD COLUMN created_by TEXT DEFAULT 'human-tui'")
+        if "updated_at" not in ua_columns:
+            cursor.execute("ALTER TABLE user_allowlist ADD COLUMN updated_at TEXT")
+        if "revoked_at" not in ua_columns:
+            cursor.execute("ALTER TABLE user_allowlist ADD COLUMN revoked_at TEXT")
+        if "revoked_by" not in ua_columns:
+            cursor.execute("ALTER TABLE user_allowlist ADD COLUMN revoked_by TEXT")
 
         # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
@@ -487,24 +506,56 @@ def get_pattern_analysis() -> list[dict]:
 
 
 def check_persisted_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
-    """Check if command matches any human-persisted allowlist regex."""
+    """Check if command matches any human-persisted allowlist regex.
+
+    Reviewer fix (fail-open closure): the match is a FULL match
+    (``re.fullmatch``), NOT a substring ``re.search``. A rule must match the
+    ENTIRE command string, so ``/allow-last``'s ``re.escape(raw_command)`` is an
+    exact-literal contract: ``git\\ status`` matches ONLY ``git status``, never
+    ``git status && rm -rf /`` — a compound command with a dangerous suffix can
+    never be allowlisted past the denylist (INV-PL-2 / denylist non-bypass).
+    """
     init_db()
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT pattern_regex, description FROM user_allowlist WHERE" " is_active = 1")
         for row in cursor.fetchall():
             pat = row["pattern_regex"]
-            if re.search(pat, cmd_str):
+            if re.fullmatch(pat, cmd_str):
                 return True, f"Matched User Allowlist: {row['description'] or pat}"
     return False, None
 
 
-def add_to_allowlist(pattern_regex: str, description: str = ""):
-    """Add a verified pattern to the persistent allowlist with safety validation."""
+# INV-PL-4: the "matches-everything" family is fully rejected at write time
+# (reviewer-expanded; the len<3 floor is unchanged — that is a separate item).
+_DANGEROUS_CATCH_ALLS = {
+    ".*",
+    ".+",
+    "^.*$",
+    "^.+$",
+    ".*?",
+    ".+?",
+    "^.*",
+    ".*$",
+    "(?s).",
+    "..",
+    r"\A.\Z",
+    "(?:.)",
+    ".|.*",
+    "(?s:.)",
+}
+
+
+def add_to_allowlist(pattern_regex: str, description: str = "", created_by: str = "human-tui"):
+    """Add a verified pattern to the persistent allowlist with safety validation.
+
+    UPSERT (id-preserving, issue #91): re-adding an existing — even revoked —
+    pattern reactivates it while preserving its id and original created_at
+    (INV-PL-5). Audits a GLOBAL_RULE create row (INV-PL-3).
+    """
     init_db()
     pat_stripped = pattern_regex.strip()
-    dangerous_catch_alls = {".*", ".+", "^.*$", "^.+$", ".*?", ".+?", "^.*", ".*$"}
-    if pat_stripped in dangerous_catch_alls or len(pat_stripped) < 3:
+    if pat_stripped in _DANGEROUS_CATCH_ALLS or len(pat_stripped) < 3:
         raise ValueError(f"Overbroad or dangerous allowlist pattern rejected: '{pattern_regex}'")
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -512,12 +563,141 @@ def add_to_allowlist(pattern_regex: str, description: str = ""):
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT OR REPLACE INTO user_allowlist (pattern_regex, description, created_at, is_active)
-            VALUES (?, ?, ?, 1)
+            INSERT INTO user_allowlist (pattern_regex, description, created_at, is_active, created_by)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(pattern_regex) DO UPDATE SET
+                is_active = 1,
+                description = excluded.description,
+                updated_at = excluded.created_at,
+                created_by = excluded.created_by,
+                revoked_at = NULL,
+                revoked_by = NULL
         """,
-            (pattern_regex, description, now_iso),
+            (pattern_regex, description, now_iso, created_by),
         )
         conn.commit()
+
+    # INV-PL-3: audited GLOBAL_RULE create (origin=H, decision_layer=ALLOWLIST).
+    record_audit_log(
+        pane_id="tui",
+        raw_command=pattern_regex,
+        decision="ALLOWLIST_BYPASS",
+        safety_reason=f"Added allowlist rule: {pattern_regex}",
+        agent_kind=str(created_by or "human-tui"),
+        decision_layer="ALLOWLIST",
+        origin="H",
+        consequence="NONE",
+        mechanism="allowlist-create",
+        scope_context="GLOBAL_RULE",
+    )
+
+
+def update_allowlist_rule(rule_id, pattern_regex=None, description=None, created_by="human-tui") -> int:
+    """Update an ACTIVE allowlist rule (pattern and/or description).
+
+    Preserves the original created_at/created_by (INV-PL-5); stamps updated_at.
+    Re-runs catch-all validation on a NEW pattern_regex (INV-PL-4). Returns the
+    affected rowcount (0 = unknown/revoked id -> idempotent no-op). Audits a
+    GLOBAL_RULE update row (INV-PL-3).
+    """
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if pattern_regex is not None:
+        pat_stripped = str(pattern_regex).strip()
+        if pat_stripped in _DANGEROUS_CATCH_ALLS or len(pat_stripped) < 3:
+            raise ValueError(f"Overbroad or dangerous allowlist pattern rejected: '{pattern_regex}'")
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE user_allowlist SET
+                pattern_regex = COALESCE(?, pattern_regex),
+                description = COALESCE(?, description),
+                updated_at = ?
+            WHERE id = ? AND is_active = 1
+        """,
+            (pattern_regex, description, now_iso, rule_id),
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        row = conn.execute(
+            "SELECT pattern_regex FROM user_allowlist WHERE id = ?", (rule_id,)
+        ).fetchone()
+        pat = row["pattern_regex"] if row else (pattern_regex or f"#{rule_id}")
+
+    if affected:
+        record_audit_log(
+            pane_id="tui",
+            raw_command=pat,
+            decision="ALLOWLIST_BYPASS",
+            safety_reason=f"Updated allowlist rule #{rule_id}",
+            agent_kind=str(created_by or "human-tui"),
+            decision_layer="ALLOWLIST",
+            origin="H",
+            consequence="NONE",
+            mechanism="allowlist-update",
+            scope_context="GLOBAL_RULE",
+        )
+    return affected
+
+
+def revoke_allowlist_rule(rule_id, revoked_by="human-tui") -> int:
+    """Soft-delete (revoke) an ACTIVE allowlist rule — never DELETEs (INV-PL-5).
+
+    Revocation is immediate: check_persisted_allowlist already filters
+    is_active=1, so a revoked rule stops matching with NO cache (INV-PL-2).
+    Returns the affected rowcount (0 = unknown/revoked id -> idempotent no-op).
+    Audits a GLOBAL_RULE revoke row (INV-PL-3).
+    """
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE user_allowlist SET
+                is_active = 0,
+                revoked_at = ?,
+                revoked_by = ?
+            WHERE id = ? AND is_active = 1
+        """,
+            (now_iso, revoked_by, rule_id),
+        )
+        affected = cursor.rowcount
+        conn.commit()
+        row = conn.execute(
+            "SELECT pattern_regex FROM user_allowlist WHERE id = ?", (rule_id,)
+        ).fetchone()
+        pat = row["pattern_regex"] if row else f"#{rule_id}"
+
+    if affected:
+        record_audit_log(
+            pane_id="tui",
+            raw_command=pat,
+            decision="MANUAL_DELEGATED",
+            safety_reason=f"Revoked allowlist rule #{rule_id}",
+            agent_kind=str(revoked_by or "human-tui"),
+            decision_layer="ALLOWLIST",
+            origin="H",
+            consequence="NONE",
+            mechanism="allowlist-revoke",
+            scope_context="GLOBAL_RULE",
+        )
+    return affected
+
+
+def list_allowlist_rules(include_revoked: bool = False) -> list[dict]:
+    """List allowlist rules, oldest first. Active-only by default."""
+    init_db()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, pattern_regex, description, is_active, created_by, created_at, updated_at, revoked_at, revoked_by "
+            "FROM user_allowlist WHERE is_active = 1 OR ? ORDER BY id ASC",
+            (1 if include_revoked else 0,),
+        )
+        return [dict(r) for r in cursor.fetchall()]
 
 
 def get_recent_audit_logs(
