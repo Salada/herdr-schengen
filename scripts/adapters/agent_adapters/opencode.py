@@ -334,6 +334,15 @@ class OpenCodeAdapter(AgentAdapter):
 
     blocked_markers = ("Permission required", "Allow once", "Allow always")
 
+    def dialog_is_live(self, visible_text: str) -> bool:
+        """True only if the ACTIVE (bottom) opencode permission dialog is live.
+
+        classify_dialog_stage is rfind-anchored to the LATEST "Permission required"
+        header, so this is stricter than get_pending_request (which may fall back
+        to a stale structured-channel event for a resolved dialog).
+        """
+        return self.classify_dialog_stage(visible_text) == "permission"
+
     def classify_dialog_stage(self, visible_text: str) -> str:
         """Classify the opencode dialog stage: 'always_confirm' | 'reject' | 'permission' | 'unknown'.
 

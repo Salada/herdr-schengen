@@ -1006,6 +1006,53 @@ def set_batch_approval_config(enabled=None, ttl_seconds=None) -> dict:
     return get_batch_approval_config()
 
 
+_PANE_DIRECT_DEFAULTS = {"pane_direct_eviction_enabled": True, "pane_direct_confirm_polls": 2}
+
+
+def get_pane_direct_config() -> dict:
+    """Pane-direct auto-eviction knobs, backed by guard_config. Missing keys -> defaults.
+
+    pane_direct_eviction_enabled: _parse_bool. pane_direct_confirm_polls: int
+    clamp [1, 5] (consecutive not-live polls required before a PD-C debounced
+    eviction self-approves a stale escalation).
+    """
+    init_db()
+    cfg = dict(_PANE_DIRECT_DEFAULTS)
+    with get_db_connection() as conn:
+        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
+            k, v = row["key"], row["value"]
+            if k == "pane_direct_eviction_enabled":
+                cfg[k] = _parse_bool(v)
+            elif k == "pane_direct_confirm_polls":
+                try:
+                    cfg[k] = max(1, min(5, int(float(v))))
+                except (TypeError, ValueError):
+                    pass
+    return cfg
+
+
+def set_pane_direct_config(enabled=None, confirm_polls=None) -> dict:
+    """Human-only write path; upsert guard_config (mirror set_batch_approval_config)."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        if enabled is not None:
+            conn.execute(
+                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("pane_direct_eviction_enabled", "true" if _parse_bool(enabled) else "false", now_iso),
+            )
+        if confirm_polls is not None:
+            clamped = max(1, min(5, int(float(confirm_polls))))
+            conn.execute(
+                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("pane_direct_confirm_polls", str(clamped), now_iso),
+            )
+        conn.commit()
+    return get_pane_direct_config()
+
+
 def record_adjudication(
     escalation_id: int,
     pane_id: str,
@@ -1328,8 +1375,15 @@ def resolve_escalation(
     resolution_status: str = "RESOLVED",
     is_approval: bool = False,
     approver: Optional[str] = None,
+    resolution: Optional[str] = None,
 ):
-    """Mark escalation(s) as resolved or cancelled after user/agent action (ACK)."""
+    """Mark escalation(s) as resolved or cancelled after user/agent action (ACK).
+
+    `resolution` (optional, COALESCE-semantics) records the post-escalation
+    disposition (APPROVED/REJECTED) WITHOUT overwriting an existing value when
+    left None — pane-direct auto-eviction uses it to stamp APPROVED provenance
+    without clobbering a prior human/gatekeeper disposition.
+    """
     init_db()
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_db_connection() as conn:
@@ -1349,28 +1403,31 @@ def resolve_escalation(
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver)
+                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver),
+                    resolution = COALESCE(?, resolution)
                 WHERE id = ?
             """,
-                (resolution_status, now_iso, approver, escalation_id),
+                (resolution_status, now_iso, approver, resolution, escalation_id),
             )
         elif command_hash:
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver)
+                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver),
+                    resolution = COALESCE(?, resolution)
                 WHERE pane_id = ? AND command_hash = ? AND status IN ('PENDING', 'DELIVERED')
             """,
-                (resolution_status, now_iso, approver, pane_id, command_hash),
+                (resolution_status, now_iso, approver, resolution, pane_id, command_hash),
             )
         else:
             cursor.execute(
                 """
                 UPDATE pending_escalations
-                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver)
+                SET status = ?, last_transitioned_at = ?, approver = COALESCE(?, approver),
+                    resolution = COALESCE(?, resolution)
                 WHERE pane_id = ? AND status IN ('PENDING', 'DELIVERED')
             """,
-                (resolution_status, now_iso, approver, pane_id),
+                (resolution_status, now_iso, approver, resolution, pane_id),
             )
         conn.commit()
 

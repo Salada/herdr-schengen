@@ -52,6 +52,12 @@ class AgentAdapter:
         source override this."""
         return self.parse_permission_request(visible_text)
 
+    def dialog_is_live(self, visible_text: str) -> bool:
+        """True only if the ACTIVE (bottom/focused) dialog anchor is present in the
+        tail of visible_text — genuinely open, not a historical prompt in scrollback.
+        Stricter than get_pending_request. Conservative default: False."""
+        return False
+
     def channel_approve(self, pane_id: str, req_cmd: str):
         """Try a structured-channel approval bound to an exact permission_id.
 
