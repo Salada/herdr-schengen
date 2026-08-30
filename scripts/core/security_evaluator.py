@@ -1363,7 +1363,9 @@ def _check_workspace_allowlist(cmd_str: str, cwd: str = "", action_type: Optiona
         if action_type is None:
             return None
         if action_type == "exec":
-            target = normalize_command(cmd_str)
+            # Fix 1 (reviewer): match the RAW command text (exact), not a
+            # normalized form — promoted exec rules store the original command.
+            target = cmd_str.strip()
         elif action_type == "edit_file":
             if cmd_str.startswith("edit_file "):
                 target = cmd_str.split(" ", 1)[1].strip()

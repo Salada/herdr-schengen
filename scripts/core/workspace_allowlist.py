@@ -130,6 +130,12 @@ def _denylist_blocks(action_type: str, canon: str) -> bool:
 
     Lazy imports avoid a circular import (security_evaluator imports this
     module). Returns True when the target must be denied even if listed.
+
+    Reviewer fix: for `exec` the check runs on the RAW command text (so
+    sensitive paths stay visible to the regexes) and ANY absolute-path token
+    (`/...` or `~/...`) refuses the rule fail-closed — a pathful exec command
+    can never promote or match, even if the sensitive path was otherwise
+    invisible (e.g. after normalization collapsed it to `<PATH>`).
     """
     try:
         from core.security_evaluator import (
@@ -144,16 +150,23 @@ def _denylist_blocks(action_type: str, canon: str) -> bool:
         return True
     if _BROAD_WILDCARD_RE.search(canon):
         return True
-    if action_type != "exec":
-        if canon == "/" or canon == "//":
-            return True
-        try:
-            from core.gray_zone_evaluator import ResourceTier, classify_resource_tier
-
-            if classify_resource_tier(canon) == ResourceTier.T4_CRITICAL:
+    if action_type == "exec":
+        # Fix 1: exec rules must be pathless — any absolute path token is
+        # refused (fail-closed), so a sensitive-path command can never
+        # promote or match.
+        for tok in str(canon).split():
+            if tok.startswith("/") or tok.startswith("~/"):
                 return True
-        except Exception:
-            pass
+        return False
+    if canon == "/" or canon == "//":
+        return True
+    try:
+        from core.gray_zone_evaluator import ResourceTier, classify_resource_tier
+
+        if classify_resource_tier(canon) == ResourceTier.T4_CRITICAL:
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -175,18 +188,22 @@ def _is_overbroad_pattern(pattern: str) -> bool:
 def check_rule(policy, action_type: str, target: str) -> bool:
     """Return True if `target` matches a rule for `action_type`.
 
-    INV-WS-2 denylist re-assertion runs FIRST — sensitive paths, sandbox-ish
-    broad wildcards, T4-critical targets and root '/' always deny, even when a
-    rule lists them. INV-WS-1: path targets must live under the policy's
-    workspace_root. For `exec`, the target is a normalized command string.
+    INV-WS-2 denylist re-assertion runs FIRST — sensitive paths, broad
+    wildcards, T4-critical targets and root '/' always deny, even when a rule
+    lists them (for `exec` on the RAW command text, with absolute-path tokens
+    refused). INV-WS-1: the policy must declare a valid, non-overbroad
+    workspace_root and path targets must live under it — applied uniformly to
+    ALL action_types (exec rules are confined by discovery: the policy only
+    surfaces for a cwd inside that workspace). Over-broad patterns (Fix 3)
+    never match at read time.
     """
     rules = (policy or {}).get("rules") or []
     if not rules:
         return False
     if action_type == "exec":
-        from core.guard_db import normalize_command
-
-        canon = normalize_command(target)
+        # Fix 1: match on the RAW command (exact), not a normalized form, so
+        # promoted exact rules stay consistent and sensitive paths are visible.
+        canon = str(target).strip()
     else:
         try:
             canon = os.path.realpath(os.path.expanduser(str(target)))
@@ -197,11 +214,13 @@ def check_rule(policy, action_type: str, target: str) -> bool:
     if _denylist_blocks(action_type, canon):
         return False
 
-    # INV-WS-1: path targets must stay under the workspace root.
+    # INV-WS-1 (uniform): the policy must declare a valid, non-overbroad
+    # workspace_root. Path targets must also live under it; exec rules are
+    # confined by discovery (the policy only surfaces for cwd under its root).
+    ws_root = str((policy or {}).get("workspace_root") or "").rstrip("/")
+    if not ws_root or _is_overbroad_pattern(ws_root):
+        return False
     if action_type != "exec":
-        ws_root = str((policy or {}).get("workspace_root") or "").rstrip("/")
-        if not ws_root:
-            return False
         if canon != ws_root and not canon.startswith(ws_root + "/"):
             return False
 
@@ -211,6 +230,9 @@ def check_rule(policy, action_type: str, target: str) -> bool:
         mt = r.get("match_type")
         pat = r.get("pattern")
         if not pat:
+            continue
+        # Fix 3: over-broad catch-all patterns never match at read time.
+        if _is_overbroad_pattern(pat):
             continue
         if mt == "exact":
             if canon == pat:

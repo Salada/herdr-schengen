@@ -174,6 +174,125 @@ class TestWorkspaceAllowlist(unittest.TestCase):
         # check_rule treats it as absent
         self.assertFalse(check_rule(load_policy(self.policy_path), "access_directory", self.ws_resolved))
 
+    # --- Reviewer fixes (blocking findings on the exec path) ---
+
+    def test_exec_promotion_sensitive_command_denied(self):
+        # Fix 1: promotion uses the RAW command + denylist on raw text — a
+        # sensitive-path exec command must NEVER promote (INV-WS-2).
+        pane = "wWS:x1"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane,
+            raw_command="cat /home/x/.ssh/id_rsa",
+            safety_reason="secret read",
+            decision_layer="SECRET_GUARD",
+            agent_kind="opencode",
+            cwd=str(self.ws),
+            origin="A",
+        )
+        record_adjudication(
+            escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
+            action="APPROVE", feedback="ok", origin="A",
+        )
+        # denylist on raw text refuses -> no policy file is created
+        self.assertFalse(self.policy_path.exists(), "sensitive exec command must not promote")
+
+    def test_exec_promotion_pathless_command(self):
+        # Fix 1: a pathless exec command DOES promote as an exact raw-command rule.
+        pane = "wWS:x2"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane,
+            raw_command="make build",
+            safety_reason="complex",
+            decision_layer="COMPLEXITY_TAX",
+            agent_kind="opencode",
+            cwd=str(self.ws),
+            origin="A",
+        )
+        record_adjudication(
+            escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
+            action="APPROVE", feedback="ok", origin="A",
+        )
+        self.assertTrue(self.policy_path.exists(), "pathless exec command should promote")
+        policy = load_policy(self.policy_path)
+        rules = policy.get("rules") or []
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0]["action_type"], "exec")
+        self.assertEqual(rules[0]["match_type"], "exact")
+        self.assertEqual(rules[0]["pattern"], "make build")
+        # exact raw match fast-tracks
+        safe, reason, layer = audit_shell_command("make build", cwd=str(self.ws))
+        self.assertTrue(safe, reason)
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
+        # a different command with a path is NOT matched (exact + pathful denial)
+        safe2, reason2, layer2 = audit_shell_command("make build /tmp/x", cwd=str(self.ws))
+        self.assertNotEqual(layer2, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
+
+    def test_exec_rule_workspace_confined(self):
+        # Fix 2: an exec rule in workspace A never matches when cwd is in B.
+        self.write_policy([
+            {"id": "r1", "action_type": "exec", "match_type": "exact",
+             "pattern": "make build", "agent_scope": ["*"], "created_by": "t",
+             "created_at": "", "reason": "t"},
+        ])
+        # workspace A (self.ws) matches
+        safe_a, _, layer_a = audit_shell_command("make build", cwd=str(self.ws))
+        self.assertTrue(safe_a)
+        self.assertEqual(layer_a, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
+        # workspace B: no policy -> confined (no cross-workspace leakage)
+        ws_b = Path(tempfile.mkdtemp())
+        try:
+            safe_b, _, layer_b = audit_shell_command("make build", cwd=str(ws_b))
+            self.assertNotEqual(layer_b, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
+            # workspace B with its OWN policy (different rule) also never matches
+            b_policy = ws_b / ".schengen" / "allowlist.json"
+            b_policy.parent.mkdir()
+            b_policy.write_text(
+                json.dumps({"version": 1, "workspace_root": str(ws_b.resolve()),
+                            "rules": [{"id": "rB", "action_type": "exec", "match_type": "exact",
+                                       "pattern": "make clean", "agent_scope": ["*"],
+                                       "created_by": "t", "created_at": "", "reason": "t"}]})
+            )
+            safe_b2, _, layer_b2 = audit_shell_command("make build", cwd=str(ws_b))
+            self.assertNotEqual(layer_b2, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
+        finally:
+            shutil.rmtree(str(ws_b), ignore_errors=True)
+
+    def test_overbroad_pattern_not_matched_at_read(self):
+        # Fix 3: `//` / `/` / `.*` patterns written directly into the JSON must
+        # not match at read time.
+        self.write_policy([
+            {"id": "r1", "action_type": "access_directory", "match_type": "prefix",
+             "pattern": "/", "agent_scope": ["*"], "created_by": "t", "created_at": "", "reason": "t"},
+            {"id": "r2", "action_type": "read_file", "match_type": "glob",
+             "pattern": ".*", "agent_scope": ["*"], "created_by": "t", "created_at": "", "reason": "t"},
+        ])
+        safe, reason, layer = audit_shell_command(f"access_directory {self.ws}", cwd=str(self.ws))
+        self.assertTrue(safe)
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+        safe2, reason2, layer2 = audit_shell_command(f"read_file {self.ws}/x.txt", cwd=str(self.ws))
+        self.assertTrue(safe2)
+        self.assertEqual(layer2, DecisionLayer.FAST_TRACK_AST)
+
+    def test_injected_origin_escalation_does_not_promote(self):
+        # Fix 4: the escalation row's intercepted origin is authoritative — an
+        # INJECTED-origin escalation must NEVER promote even on a human approve.
+        pane = "wWS:x3"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane,
+            raw_command="make build",
+            safety_reason="complex",
+            decision_layer="COMPLEXITY_TAX",
+            agent_kind="opencode",
+            cwd=str(self.ws),
+            origin="I",
+        )
+        # human approve passes origin="A" but the escalation row says "I"
+        record_adjudication(
+            escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
+            action="APPROVE", feedback="ok", origin="A",
+        )
+        self.assertFalse(self.policy_path.exists(), "INJECTED-origin escalation must not promote")
+
 
 if __name__ == "__main__":
     unittest.main()

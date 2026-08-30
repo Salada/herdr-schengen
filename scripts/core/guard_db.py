@@ -110,6 +110,7 @@ def init_db():
             delivered_at TEXT,
             last_transitioned_at TEXT NOT NULL,
             cwd TEXT, -- workspace cwd at interception (issue #7207 auto-promotion)
+            origin TEXT, -- command author origin (A/H/I/E) at interception (INV-WS-3 promotion gate)
             UNIQUE(pane_id, command_hash)
         );
 
@@ -185,6 +186,8 @@ def init_db():
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN approver TEXT")
         if "cwd" not in p_columns:
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN cwd TEXT")
+        if "origin" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN origin TEXT")
 
         # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
@@ -1028,6 +1031,7 @@ def record_adjudication(
     raw_command = None
     esc_cwd = None
     esc_layer = None
+    esc_origin = None
     with get_db_connection() as conn:
         conn.execute(
             """
@@ -1042,18 +1046,22 @@ def record_adjudication(
                 (resolution, escalation_id),
             )
             row = conn.execute(
-                "SELECT raw_command, cwd, decision_layer FROM pending_escalations WHERE id = ?", (escalation_id,)
+                "SELECT raw_command, cwd, decision_layer, origin FROM pending_escalations WHERE id = ?", (escalation_id,)
             ).fetchone()
             if row:
                 raw_command = row["raw_command"]
                 esc_cwd = row["cwd"]
                 esc_layer = row["decision_layer"]
+                esc_origin = row["origin"]
         conn.commit()
 
     if action == "APPROVE" and raw_command:
         record_human_approval_pattern(normalize_command(raw_command), scope=pane_id)
         # issue #7207: workspace allowlist auto-promotion (human/gatekeeper
         # approval, AGENT/HUMAN origin only; fail-safe — never breaks adjudication).
+        # Fix 4: the escalation row's intercepted origin is authoritative —
+        # INJECTED/EMERGENT never promote even on a human approve.
+        effective_origin = (esc_origin or origin or "A")
         try:
             _maybe_promote_workspace_rule(
                 escalation_id=escalation_id,
@@ -1062,7 +1070,7 @@ def record_adjudication(
                 raw_command=raw_command,
                 decision_layer=esc_layer,
                 cwd=esc_cwd,
-                origin=origin,
+                origin=effective_origin,
                 now_iso=now_iso,
             )
         except Exception:
@@ -1072,8 +1080,11 @@ def record_adjudication(
 def _derive_workspace_rule(raw_command: str, decision_layer: Optional[str]) -> Optional[dict]:
     """Derive a canonical (action_type, match_type, pattern) rule for promotion.
 
-    Dialog types -> canonical (realpath) target path; everything else -> exec
-    with the normalized command. Returns None for unparseable dialog commands.
+    Dialog types -> canonical (realpath) target path. exec -> the ORIGINAL raw
+    command (exact string) — NOT normalize_command — so the INV-WS-2 denylist
+    re-assertion (inside promote_rule) sees sensitive paths and absolute-path
+    tokens on the RAW text before anything is persisted (reviewer fix).
+    Returns None for unparseable dialog commands / question dialogs.
     """
     cmd = (raw_command or "").strip()
     if cmd.startswith("access_directory "):
@@ -1090,7 +1101,7 @@ def _derive_workspace_rule(raw_command: str, decision_layer: Optional[str]) -> O
         return {"action_type": "read_file", "match_type": "exact", "pattern": canon}
     if decision_layer in ("QUESTION", "unhandled_dialog", None):
         return None
-    return {"action_type": "exec", "match_type": "exact", "pattern": normalize_command(cmd)}
+    return {"action_type": "exec", "match_type": "exact", "pattern": cmd}
 
 
 def _maybe_promote_workspace_rule(
@@ -1160,11 +1171,15 @@ def enqueue_pending_escalation(
     session_id: Optional[str] = None,
     dialog_snapshot: Optional[str] = None,
     cwd: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> int:
     """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once).
 
     cwd: the workspace cwd at interception (issue #7207) — enables the
     auto-promotion hook on later human approval.
+    origin: the command author origin (A/H/I/E) at interception — the
+    auto-promotion gate (INV-WS-3) reads it so INJECTED/EMERGENT never promote
+    even on a human approve.
     """
     import hashlib
 
@@ -1177,9 +1192,9 @@ def enqueue_pending_escalation(
         cursor.execute(
             """
             INSERT INTO pending_escalations (
-                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, last_transitioned_at, cwd
+                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, last_transitioned_at, cwd, origin
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
             ON CONFLICT(pane_id, command_hash) DO UPDATE SET
                 session_id = excluded.session_id,
                 status = 'PENDING',
@@ -1187,9 +1202,10 @@ def enqueue_pending_escalation(
                 decision_layer = excluded.decision_layer,
                 dialog_snapshot = excluded.dialog_snapshot,
                 cwd = excluded.cwd,
+                origin = excluded.origin,
                 last_transitioned_at = excluded.last_transitioned_at
         """,
-            (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, dialog_snapshot, now_iso, now_iso, cwd),
+            (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, dialog_snapshot, now_iso, now_iso, cwd, origin),
         )
         last_id = cursor.lastrowid
         if not last_id:
@@ -1216,7 +1232,7 @@ def get_pending_escalations(
     """
     init_db()
     statuses = "('PENDING', 'DELIVERED')" if include_delivered else "('PENDING')"
-    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, delivered_at, last_transitioned_at, cwd FROM pending_escalations WHERE status IN {statuses}"
+    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, delivered_at, last_transitioned_at, cwd, origin FROM pending_escalations WHERE status IN {statuses}"
     params = []
     if pane_id:
         query += " AND pane_id = ?"
