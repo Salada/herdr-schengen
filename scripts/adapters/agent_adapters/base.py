@@ -5,6 +5,10 @@ agent kind (e.g. codex, cursor) means adding a new adapter module — no changes
 schengen_watcher.py (Open/Closed Principle).
 """
 
+from typing import Optional
+
+from adapters.herdr_client import get_pane_text
+
 # Sentinel `reason` returned by `inject_approval` when the live permission dialog
 # trampolined to a DIFFERENT request than `req_cmd` while the caller was evaluating
 # (e.g. opencode's "Access external directory" prompt advances to the "Shell command"
@@ -57,6 +61,19 @@ class AgentAdapter:
         tail of visible_text — genuinely open, not a historical prompt in scrollback.
         Stricter than get_pending_request. Conservative default: False."""
         return False
+
+    def is_truncated(self, visible_text: str) -> bool:
+        """True if the visible pane text shows a truncation/fold marker."""
+        return False
+
+    def expand_dialog(self, pane_id: str) -> Optional[str]:
+        """Return the expanded full dialog text, or None on failure.
+
+        Default: full-scrollback read (NO keystroke) — this protects opencode /
+        codex from an unnecessary/disruptive ctrl+f / ctrl+a expansion.
+        """
+        text = get_pane_text(pane_id, lines=500, full_dump=True)
+        return text or None
 
     def channel_approve(self, pane_id: str, req_cmd: str):
         """Try a structured-channel approval bound to an exact permission_id.
