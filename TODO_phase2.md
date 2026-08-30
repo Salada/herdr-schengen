@@ -2,17 +2,24 @@
 > 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
 > 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
 
-1. [Epic 잔여 — 최고 맥락] Fail-closed 편향 전환 M5/M7 (M3 complexity tax 완료 PR #139)
+1. 🚨 [긴급 최우선 — OpenCode 상시 계류 해소] Test Runner Fast-Track 허용 & Complexity Tax(2>&1 overcount) 상호작용 해결 (사례: Escalation #2555 / Audit #7160)
+   - 현상: OpenCode가 코드 수정 후 반복 실행하는 `HERDR_ENV=1 ... python3 -m unittest discover -s tests 2>&1 | grep -E ...`가 `complexity=8 > 6`으로 판정되어 `COMPLEXITY_TAX` 레이어에서 매번 인간에게 계류/차단됨.
+   - 원인:
+     (1) Test Runner Fast-Track(`_is_fast_track_test_runner`)이 `2>&1 | grep ...` 파이프라인 결합 시 매칭되지 않거나 Complexity Tax보다 후순위에 위치.
+     (2) `2>&1`의 `&`가 분리자로 잘못 인식되어 복잡도 점수 오버카운트(+1).
+   - 조치: Test Runner 좁은 Fast-Track 파이프라인 확장 및 Complexity Tax 게이트 사전 통과(Pre-emptive Fast-Track) 보장.
+
+2. [Epic 잔여 — 최고 맥락] Fail-closed 편향 전환 M5/M7 (M3 complexity tax 완료 PR #139)
    - M5 origin weighting(INV-12: Origin enum 단일 사용, INJECTED/EMERGENT hard-escalate), M7 anti-fatigue(INV-13).
    - 맥락: INV-1..13 불변식 + @oracle verdict(MODIFY) + 결정 레이어 순서(security_evaluator.py `_audit_static_shell_command`).
    - M3 non-blocking 후속: (1) `2>&1` over-count('&' separator) (2) herestring(`<<<`) under-count (3) 산술확장 over-count (4) `get_complexity_tax_config()` 비-allowlist 명령마다 DB 2회 조회 → read-once 캐시 (5) `complexity_mode='judge'` dead-config(M6 예약).
-2. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
+3. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
    - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
-3. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction
+4. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction
    - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`.
-4. [Architecture] Persistent Allowlist CUD(#91) + Test Runner Fast-Track(#137 item 3, 이번 세션 구현 중)
+5. [Architecture] Persistent Allowlist CUD(#91) + 単独 sed -n allowlist(#6935)
    - 맥락: fail-closed allowlist(fast-track closed enum) + TUI /allow /revoke + INV-PL-1..3.
-5. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), UX 상태전이, 카피라이팅, 설정 모달 등.
+
 
 Bug (HIGHEST PRIORITY — handoff 후 최우선):
 [x] TUI가 terminal resize를 감지 못함: terminal 크기가 바뀌어도 작게 유지됨. (PR #94)
