@@ -2,23 +2,17 @@
 > 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
 > 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
 
-1. 🚨 [긴급 최우선 — OpenCode 상시 계류 해소] Test Runner Fast-Track 허용 & Complexity Tax(2>&1 overcount) 상호작용 해결 (사례: Escalation #2555 / Audit #7160)
-   - 현상: OpenCode가 코드 수정 후 반복 실행하는 `HERDR_ENV=1 ... python3 -m unittest discover -s tests 2>&1 | grep -E ...`가 `complexity=8 > 6`으로 판정되어 `COMPLEXITY_TAX` 레이어에서 매번 인간에게 계류/차단됨.
-   - 원인:
-     (1) Test Runner Fast-Track(`_is_fast_track_test_runner`)이 `2>&1 | grep ...` 파이프라인 결합 시 매칭되지 않거나 Complexity Tax보다 후순위에 위치.
-     (2) `2>&1`의 `&`가 분리자로 잘못 인식되어 복잡도 점수 오버카운트(+1).
-   - 조치: Test Runner 좁은 Fast-Track 파이프라인 확장 및 Complexity Tax 게이트 사전 통과(Pre-emptive Fast-Track) 보장.
-
-2. [Epic 잔여 — 최고 맥락] Fail-closed 편향 전환 M5/M7 (M3 complexity tax 완료 PR #139)
-   - M5 origin weighting(INV-12: Origin enum 단일 사용, INJECTED/EMERGENT hard-escalate), M7 anti-fatigue(INV-13).
-   - 맥락: INV-1..13 불변식 + @oracle verdict(MODIFY) + 결정 레이어 순서(security_evaluator.py `_audit_static_shell_command`).
-   - M3 non-blocking 후속: (1) `2>&1` over-count('&' separator) (2) herestring(`<<<`) under-count (3) 산술확장 over-count (4) `get_complexity_tax_config()` 비-allowlist 명령마다 DB 2회 조회 → read-once 캐시 (5) `complexity_mode='judge'` dead-config(M6 예약).
-3. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
+1. [Epic 잔여 — 유일한 최종 마일스톤] Fail-closed 편향 전환 M7 (Anti-Fatigue 배치 집계 & One-Key Approve, INV-13)
+   - M1~M6 완료 (M1 AST, M2 Novelty, M3 Complexity Tax, M4 Package, M5 Origin Weighting, M6 Cloud Judge Confidence).
+   - 맥락: INV-13 anti-fatigue(배치 집계 + scope+TTL 캐싱 + one-key approve)는 피로도 경감의 핵심 축.
+2. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
    - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
-4. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction
-   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`.
-5. [Architecture] Persistent Allowlist CUD(#91) + 単独 sed -n allowlist(#6935)
-   - 맥락: fail-closed allowlist(fast-track closed enum) + TUI /allow /revoke + INV-PL-1..3.
+3. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction / M6 cloud-judge / #2555 redirect
+   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, cloud_judge cache-key.
+4. [Architecture] Workspace별 `.schengen/` 영속 Allowlist & 기계적 자동승인 프로모션(#7207) + Persistent CUD(#91) + 単独 sed -n(#6935)
+   - 맥락: fail-closed allowlist(fast-track closed enum) + `.schengen/allowlist.json` + TUI /allow /revoke + INV-WS-1..2.
+5. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), UX 상태전이, 카피라이팅, 설정 모달 등.
+
 
 
 Bug (HIGHEST PRIORITY — handoff 후 최우선):
@@ -50,10 +44,11 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
 
 [x] [Bug/Approval] Escalation #1910 & #2339 승인 발화 성공 후 실제 Pane(OpenCode w1D:p1) 명령 미승인 현상 (PR #137 완료):
   - 해결: (1) `approve_escalation` inject-first / record-after 트랜잭션 순서 확립 (2) `inject_approval` unknown-stage fail-closed (3) `_norm_req_cmd` 수술적 정규화 + CHANNEL_TTL 30s→3600s 확장 (4) defer vs hard-failure 에러 구분.
-[] [Refactor/Channel] OpenCode 권한 채널 및 테스트 러너 Fast-Track 후속 3종 (#137 피어리뷰 후속):
+[x] [Refactor/Channel] OpenCode 권한 채널 및 테스트 러너 Fast-Track 후속 3종 (PR #137, PR #142 완료):
   1) Stale event 회귀 테스트: '다른 ask 발생, 동일 command string' 상황에서 CHANNEL_TTL 3600 안전성 고정 단위테스트 추가.
   2) `_norm_req_cmd` 공백 붕괴 유의: soft-wrap으로 path/token이 newline 분할될 때의 동작 정합성 및 향후 렌더러 변경 시 주의점 문서화.
-  3) Test Runner Fast-Track 허용: `python3 -m unittest` 등 로컬 테스트 러너의 false-positive 과에스컬레이션 방지를 위해 `opencode.jsonc` 좁은 allow 규칙 또는 watcher allowlist 등록.
+  3) [x] Test Runner Fast-Track 허용 (PR #142): `python3 -m unittest` 및 `2>&1 | grep` 파이프라인 Fast-Track + Complexity Tax 사전 통과 완료 (#2555 해소).
+
 [] [Task/Allowlist] 단독 실행 읽기 전용 sed(`sed -n '<range>p' <file>`) Fast-Track Allowlist 등록 (#6935 등 Codex 다빈도 패턴):
   - 현상 및 원인:
     • Codex 에이전트가 파일/스킬 문서 열람을 위해 `sed -n '1,260p' /path/to/file`을 빈번히 실행하나, 현재 `security_evaluator.py`의 `READONLY_PIPELINE_COMMANDS`에는 `sed`가 포함되어 있으나 단독 명령 allowlist인 `FAST_TRACK_SAFE_COMMANDS`에는 `sed`가 누락되어 있어 파이프라인(`|`) 없는 단독 `sed -n`이 `NOT_ALLOWLISTED`로 fail-closed 에스컬레이션됨.
@@ -114,11 +109,17 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   2) Herestring(`<<<`) under-count 보강: `_COMPLEXITY_REDIR_RE`에 `<<<` 리다이렉션 패턴 추가.
   3) 산술확장(`$((...))`) vs 커맨드 치환(`$(...)`): 산술확장이 커맨드 치환으로 오인식되어 과계산되는 갭 정밀화 (fail-closed 무해).
   4) `get_complexity_tax_config()` in-memory 캐싱: 비-allowlist 명령마다 SQLite `init_db` 및 `SELECT` 2회 반복 조회를 1회 캐시/read-once로 최적화.
-  5) `complexity_mode='judge'` 모드 M6 Cloud Judge 라우팅 예약 연계.
+  5) `complexity_mode='judge'` 모드 M6 Cloud Judge 라우팅 연계 완료.
 
+[] [Refactor/CloudJudge] Cloud Judge Confidence & Complexity Mode 안정화 4종 (M6 피어리뷰 후속):
+  1) Judge 모드 gray-zone guidance(`format_decision_guidance`) 유실 방지: judge-mode context 병합 검토.
+  2) Cloud-Judge 캐시 키에 `confidence_threshold` 포함: 런타임 threshold 변경 시 TTL 만료 전까지 스테일되는 현상 방지.
+  3) `set_cloud_judge_config` clamp 하한선 상향: 0.5 하한이 약하므로 0.7 상향 검토.
+  4) LLM Inspector(`audit_dynamic_substitution_with_llm`)의 의도적 confidence 무-게이트 범위 명문화.
 
-
-
+[] [Refactor/TestRunner] Test Runner 파이프라인 정규식 대칭화 2종 (#2555 피어리뷰 후속):
+  1) fd-redirect 스트립 대칭화: `2>&1` 외 `1>&2`, `&>` 미커버 갭 해소.
+  2) 공백 포함 엣지케이스: `2 >&1` 등 스페이스 포함 시 미스트립(over-block) 방어.
 
 
 
@@ -173,8 +174,9 @@ Epic:
      미등록 매니저(yarn/pnpm/bun/nix/go install)·READ 쿼리 네트워크(brew search/npm view) 라우팅.
     [milestone 순서]
      1) [x] narrow AST + catch-all 제거 (PR #126) 2) [x] novelty/history gate + scope/TTL (PR #128) 3) [x] complexity (PR #139)
-     4) [x] package manager (PR #131) 5) [ ] origin weighting(마지막) 6) [ ] cloud judge confidence 상향
+     4) [x] package manager (PR #131) 5) [x] origin weighting (PR #141) 6) [x] cloud judge confidence (PR #143)
     7) [ ] anti-fatigue batch 집계 (INV-13 잔여, 2b)
+
 
 TASKS:
 [] context compact 구현
