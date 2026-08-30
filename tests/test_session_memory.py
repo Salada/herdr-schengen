@@ -126,8 +126,12 @@ class TestPaneSessionMemory(unittest.TestCase):
         # Memory must not exist before human approval
         self.assertIsNone(check_pane_approval(pane_id, cmd, db_path=self.db_path))
 
-        # 2. Human operator resolves/approves escalation
-        resolve_escalation(pane_id=pane_id, escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
+        # 2. Human operator resolves/approves escalation (INV-AP-2: session
+        # memory seeds only on EXPLICIT human adjudication, approver="human-tui")
+        resolve_escalation(
+            pane_id=pane_id, escalation_id=esc_id, resolution_status="RESOLVED",
+            is_approval=True, approver="human-tui",
+        )
 
         # 3. Check pane memory: must now be populated
         res = check_pane_approval(pane_id, cmd, db_path=self.db_path)

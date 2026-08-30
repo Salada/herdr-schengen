@@ -126,11 +126,16 @@ def format_resolution_badge(resolution: Optional[str], short: bool = False) -> s
 
 
 def format_approver_badge(approver: Optional[str], decision: str = "") -> str:
-    """Render WHO approved/rejected an escalation: machine / human-tui / other."""
+    """Render WHO approved/rejected an escalation: machine / human-tui /
+    gatekeeper / pane-direct / other (INV-AP-1 accurate provenance)."""
     if decision in ("AUTO_APPROVED", "ALLOWLIST_BYPASS"):
         return "[dim]machine[/]"
     if approver == "human-tui":
         return "[cyan]human-tui[/]"
+    if approver == "gatekeeper":
+        return "[magenta]gatekeeper[/]"
+    if approver == "pane-direct":
+        return "[yellow]pane-direct[/]"
     if approver == "other":
         return "[dim]other[/]"
     return "[dim]—[/]"
@@ -1440,9 +1445,23 @@ class SchengenTUIApp(App):
                 if "APPROVE" in dec:
                     badge = "[green]OK[/]"
                 elif resolution == "APPROVED":
-                    badge = "[green]AP·👤[/]" if approver == "human-tui" else "[green]AP·❓[/]"
+                    if approver == "human-tui":
+                        badge = "[green]AP·👤[/]"
+                    elif approver == "gatekeeper":
+                        badge = "[green]AP·🤖[/]"
+                    elif approver == "pane-direct":
+                        badge = "[green]AP·⌨️[/]"
+                    else:
+                        badge = "[green]AP·❓[/]"
                 elif resolution == "REJECTED":
-                    badge = "[red]RJ·👤[/]" if approver == "human-tui" else "[red]RJ·❓[/]"
+                    if approver == "human-tui":
+                        badge = "[red]RJ·👤[/]"
+                    elif approver == "gatekeeper":
+                        badge = "[red]RJ·🤖[/]"
+                    elif approver == "pane-direct":
+                        badge = "[red]RJ·⌨️[/]"
+                    else:
+                        badge = "[red]RJ·❓[/]"
                 elif resolution == "UNANSWERED":
                     badge = "[yellow]UA[/]"
                 else:
