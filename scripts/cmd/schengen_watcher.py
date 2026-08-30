@@ -617,6 +617,42 @@ def _inject_runtime_path() -> None:
 
 NON_BLOCKED_STATUSES = ("working", "idle", "done")
 
+# Fail-closed reason when a truncated dialog could not be expanded (INV-EX-3).
+TRUNCATED_DIALOG_REASON = "Truncated dialog could not be expanded; requires human review"
+
+
+def maybe_expand_truncated_dialog(adapter, pane_id, visible_text, req_cmd):
+    """Expand a truncated/folded dialog so the AST sees the FULL request (#2099).
+
+    Returns (visible_text, req_cmd, truncated_unrecoverable):
+    - on successful expansion: (expanded_text, expanded_req, False) — the caller
+      substitutes these into the request tuple and the evaluate closure
+      (INV-EX-2: a truncated req_cmd never reaches the AST).
+    - on failure (expand returned nothing, still truncated, or the expanded text
+      parses no request): (visible_text, req_cmd, True) — the caller evaluates
+      fail-closed (INV-EX-3).
+
+    Single bounded attempt per poll — NO retry loop (INV-EX-4). Only invoked
+    after the pane-direct liveness / question checks (INV-EX-5).
+    """
+    if not adapter.is_truncated(visible_text):
+        return visible_text, req_cmd, False  # INV-EX-1: nothing truncated
+    expanded_text = adapter.expand_dialog(pane_id)
+    if expanded_text and not adapter.is_truncated(expanded_text):
+        expanded_req = adapter.get_pending_request(pane_id, expanded_text)
+        if expanded_req:
+            return expanded_text, expanded_req, False
+    return visible_text, req_cmd, True
+
+
+def truncated_evaluate_result():
+    """Fail-closed evaluate result for an unexpandable truncated dialog.
+
+    Short-circuits BEFORE check_persisted_allowlist / audit_shell_command_with_
+    taxonomy so a partial/truncated command is never AST-evaluated (INV-EX-2/3).
+    """
+    return False, TRUNCATED_DIALOG_REASON, DecisionLayer.NOT_ALLOWLISTED
+
 
 def should_evict_pane_direct(cached, pane_info, visible_text, req_cmd, adapter):
     """Returns (evict: bool, reason: str). cached is the last_processed_prompt entry
@@ -1291,9 +1327,20 @@ def main():
 
                 target_cwd = pane_info.get("foreground_cwd") or pane_info.get("cwd") or os.getcwd()
 
+                # Dialog expansion (issue #2099): a truncated/folded dialog must be
+                # expanded so the AST evaluator sees the FULL request (INV-EX-2).
+                # Single bounded attempt per poll (INV-EX-4). Runs only after the
+                # pane-direct liveness and question checks (INV-EX-5); a failed or
+                # still-truncated expansion evaluates fail-closed (INV-EX-3).
+                visible_text, req_cmd, truncated_unrecoverable = maybe_expand_truncated_dialog(
+                    adapter, pane_id, visible_text, req_cmd
+                )
+
                 # INV-CONC-1/2: submit silently; approval/escalation is handled
                 # only from the completion drain at the next poll.
                 def evaluate(req=req_cmd, cwd=target_cwd, kind=agent_kind, scope=pane_id):
+                    if truncated_unrecoverable:
+                        return truncated_evaluate_result()  # INV-EX-3: fail-closed
                     is_whitelisted, wl_reason = check_persisted_allowlist(req)
                     if is_whitelisted:
                         tax = derive_taxonomy(req, DecisionLayer.ALLOWLIST, True, wl_reason or "", origin=Origin.HUMAN)

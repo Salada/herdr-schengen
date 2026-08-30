@@ -1,9 +1,10 @@
 """Pane-direct adjudication auto-eviction + Codex edit_file stale-pending tests.
 
 Covers `should_evict_pane_direct` / `pane_direct_maybe_evict` (PD-A / PD-B / PD-C
-debounce) and the Codex adapter's live-region edit anchoring. Uses a clean temp
-DB (patch guard_db.DB_PATH + init_db) and a mock adapter with a fake
-`dialog_is_live` so no Herdr CLI is required.
+debounce), the Codex adapter's live-region edit anchoring, and the truncated-
+dialog expansion flow (issue #2099: AGY ctrl+g / read-only default expand).
+Uses a clean temp DB (patch guard_db.DB_PATH + init_db) and mock adapters so no
+Herdr CLI is required.
 """
 
 import sys
@@ -18,7 +19,9 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import core.guard_db as guard_db
+from adapters.agent_adapters.agy import AgyAdapter
 from adapters.agent_adapters.codex import CodexAdapter
+from adapters.agent_adapters.opencode import OpenCodeAdapter
 from core.guard_db import (
     enqueue_pending_escalation,
     get_escalation_approver,
@@ -28,10 +31,14 @@ from core.guard_db import (
     normalize_command,
     resolve_escalation,
 )
+from core.security_evaluator import DecisionLayer
 from cmd.schengen_watcher import (
+    TRUNCATED_DIALOG_REASON,
     _not_live_streak,
+    maybe_expand_truncated_dialog,
     pane_direct_maybe_evict,
     should_evict_pane_direct,
+    truncated_evaluate_result,
 )
 
 
@@ -337,6 +344,138 @@ class TestPaneDirectEviction(unittest.TestCase):
         self.assertFalse(evict2)
         self.assertEqual(reason2, "still live")
         self.assertNotIn(pane_id, _not_live_streak)
+
+
+class _FakeExpandAdapter:
+    """Adapter stub driving the watcher's truncation-expand flow (#2099).
+
+    is_truncated is content-driven (marker presence, mirroring the real agy
+    fold marker); expand_dialog / get_pending_request are scripted. The expand
+    call count asserts the single-bounded-attempt invariant (INV-EX-4).
+    """
+
+    def __init__(self, expanded_text=None, expanded_req=None, trunc_marker="⋯"):
+        self.expanded_text = expanded_text
+        self.expanded_req = expanded_req
+        self.trunc_marker = trunc_marker
+        self.expand_calls = 0
+
+    def is_truncated(self, visible_text):
+        return self.trunc_marker in visible_text
+
+    def expand_dialog(self, pane_id):
+        self.expand_calls += 1
+        return self.expanded_text
+
+    def get_pending_request(self, pane_id, visible_text):
+        return self.expanded_req
+
+
+class TestDialogExpansion(unittest.TestCase):
+    """Truncated-dialog expansion flow (issue #2099, INV-EX-1..5)."""
+
+    # ---- adapter primitives ----------------------------------------------
+
+    def test_agy_is_truncated_detects_fold_marker(self):
+        adapter = AgyAdapter()
+        self.assertTrue(adapter.is_truncated("⋯ 3 lines hidden"))
+        self.assertTrue(adapter.is_truncated("⋯ lines hidden"))
+        self.assertTrue(adapter.is_truncated("Requesting permission for: rm -rf /\n⋯5 lines hidden"))
+        self.assertFalse(adapter.is_truncated("Requesting permission for: rm -rf /\nDo you want to proceed?\n> 1. Yes"))
+
+    def test_agy_expand_dialog_sends_ctrl_g_then_full_read(self):
+        adapter = AgyAdapter()
+        full_text = "Requesting permission for: rm -rf /tmp/x\nDo you want to proceed?\n> 1. Yes"
+        with patch("adapters.agent_adapters.agy.run_cmd", return_value="") as mock_run, patch(
+            "adapters.agent_adapters.agy.get_pane_text", return_value=full_text
+        ) as mock_read:
+            result = adapter.expand_dialog("w1D:p1")
+        self.assertEqual(result, full_text)
+        # ctrl+g FIRST (materializes the fold), THEN the full-scrollback read.
+        mock_run.assert_called_once_with(["herdr", "agent", "send-keys", "w1D:p1", "ctrl+g"])
+        mock_read.assert_called_once_with("w1D:p1", lines=500, full_dump=True)
+
+    def test_default_expand_dialog_read_only_no_keystroke(self):
+        # Regression: the DEFAULT expand (opencode/codex) must never send a
+        # disruptive ctrl+f / ctrl+a — only a full-scrollback read.
+        full_text = "Permission required\n$ ls\nAllow once"
+        with patch("adapters.agent_adapters.base.get_pane_text", return_value=full_text) as mock_read, patch(
+            "adapters.herdr_client.run_cmd"
+        ) as mock_run:
+            result = OpenCodeAdapter().expand_dialog("w1D:p2")
+        self.assertEqual(result, full_text)
+        mock_run.assert_not_called()  # NO keystroke
+        mock_read.assert_called_once_with("w1D:p2", lines=500, full_dump=True)
+
+        with patch("adapters.agent_adapters.base.get_pane_text", return_value=full_text) as mock_read2, patch(
+            "adapters.herdr_client.run_cmd"
+        ) as mock_run2:
+            result2 = CodexAdapter().expand_dialog("w1D:p2")
+        self.assertEqual(result2, full_text)
+        mock_run2.assert_not_called()
+        mock_read2.assert_called_once_with("w1D:p2", lines=500, full_dump=True)
+
+    # ---- watcher expand flow ---------------------------------------------
+
+    def test_expand_none_or_empty_treated_as_failure(self):
+        adapter = _FakeExpandAdapter(expanded_text=None)
+        text, req, unrecoverable = maybe_expand_truncated_dialog(
+            adapter, "w1D:p3", "⋯ 3 lines hidden", "partial-cmd"
+        )
+        self.assertTrue(unrecoverable)  # INV-EX-3: fail-closed
+        self.assertEqual(req, "partial-cmd")  # truncated req NEVER swapped in
+        self.assertEqual(adapter.expand_calls, 1)
+
+        adapter_empty = _FakeExpandAdapter(expanded_text="")
+        _text, req2, unrecoverable2 = maybe_expand_truncated_dialog(
+            adapter_empty, "w1D:p3", "⋯ 3 lines hidden", "partial-cmd"
+        )
+        self.assertTrue(unrecoverable2)
+
+    def test_watcher_expand_success_threads_expanded_req(self):
+        adapter = _FakeExpandAdapter(
+            expanded_text="full dialog text", expanded_req="rm -rf /tmp/full"
+        )
+        text, req, unrecoverable = maybe_expand_truncated_dialog(
+            adapter, "w1D:p5", "⋯ 3 lines hidden", "rm -rf /tmp/trun"
+        )
+        self.assertFalse(unrecoverable)
+        self.assertEqual(req, "rm -rf /tmp/full")  # evaluate receives the EXPANDED req_cmd
+        self.assertEqual(text, "full dialog text")  # expanded text becomes the snapshot
+        self.assertEqual(adapter.expand_calls, 1)
+
+    def test_watcher_expand_failure_evaluates_fail_closed(self):
+        adapter = _FakeExpandAdapter(expanded_text=None)
+        _text, req, unrecoverable = maybe_expand_truncated_dialog(
+            adapter, "w1D:p6", "⋯ 3 lines hidden", "partial-cmd"
+        )
+        self.assertTrue(unrecoverable)
+        # The watcher's evaluate closure short-circuits to truncated_evaluate_result()
+        # BEFORE any allowlist/AST check (INV-EX-2/3).
+        result = truncated_evaluate_result()
+        self.assertFalse(result[0])
+        self.assertEqual(result[1], TRUNCATED_DIALOG_REASON)
+        self.assertEqual(result[1], "Truncated dialog could not be expanded; requires human review")
+        self.assertEqual(result[2], DecisionLayer.NOT_ALLOWLISTED)
+
+    def test_watcher_still_truncated_single_attempt_no_retry(self):
+        # Expanded text is STILL truncated -> fail-closed, ONE expand attempt.
+        adapter = _FakeExpandAdapter(expanded_text="⋯ 2 lines hidden")
+        _text, req, unrecoverable = maybe_expand_truncated_dialog(
+            adapter, "w1D:p7", "⋯ 3 lines hidden", "partial-cmd"
+        )
+        self.assertTrue(unrecoverable)  # INV-EX-3
+        self.assertEqual(adapter.expand_calls, 1)  # INV-EX-4: no retry loop
+
+    def test_non_truncated_never_expands(self):
+        adapter = _FakeExpandAdapter()
+        text, req, unrecoverable = maybe_expand_truncated_dialog(
+            adapter, "w1D:p8", "full dialog text", "full-cmd"
+        )
+        self.assertFalse(unrecoverable)
+        self.assertEqual(req, "full-cmd")
+        self.assertEqual(text, "full dialog text")
+        self.assertEqual(adapter.expand_calls, 0)  # expand_dialog NOT called (no regression)
 
 
 if __name__ == "__main__":

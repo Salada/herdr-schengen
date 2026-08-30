@@ -1,8 +1,9 @@
 """AGY (Antigravity) adapter — permission prompt parsing and key injection."""
 
 import re
+from typing import Optional
 
-from adapters.herdr_client import run_cmd
+from adapters.herdr_client import get_pane_text, run_cmd
 
 from adapters.agent_adapters.base import AgentAdapter, footer_is_live, register
 
@@ -56,6 +57,26 @@ class AgyAdapter(AgentAdapter):
             or bool(re.search(r">\s*\d+\.", tail))
             or bool(re.search(r"\[[Yy]/[Nn]\]", tail))
         )
+
+    def is_truncated(self, visible_text: str) -> bool:
+        """True if the AGY dialog body is folded ("⋯ N lines hidden" marker).
+
+        AGY renders a fold marker for long command/script bodies. A truncated
+        req_cmd must NEVER reach the AST evaluator (INV-EX-2) — the watcher
+        expands first (issue #2099).
+        """
+        return bool(re.search(r"⋯\s*(?:\d+\s*)?lines?\s*hidden", visible_text))
+
+    def expand_dialog(self, pane_id: str) -> Optional[str]:
+        """Expand the AGY fold via ctrl+g, then return the full dialog text.
+
+        AGY's "⋯ lines hidden" fold is NOT in-buffer until the key materializes
+        it, so send `ctrl+g` FIRST, then do a full-scrollback read. Returns None
+        on read failure so the watcher fails closed (INV-EX-3).
+        """
+        run_cmd(["herdr", "agent", "send-keys", pane_id, "ctrl+g"])
+        text = get_pane_text(pane_id, lines=500, full_dump=True)
+        return text or None
 
     def parse_permission_request(self, visible_text):
         """Extract command/script/file-edit/survey from diverse AGY approval dialogs."""
