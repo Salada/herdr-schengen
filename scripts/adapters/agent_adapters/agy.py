@@ -13,6 +13,17 @@ from adapters.agent_adapters.base import AgentAdapter, footer_is_live, register
 # watcher surfaces it as a pending escalation (parity with opencode/codex #56).
 _QUESTION_RE = re.compile(r"Question\s+\d+/\d+:\s*(.+)")
 
+# #7771: every AGY approval-dialog header/footer anchor. dialog_is_live treats
+# ANY of these as a live dialog — err toward "live" because the false-positive
+# cost is a recoverable stuck escalation while the false-negative cost is a
+# fake pane-direct APPROVED on a still-blocked agent.
+_LIVE_TAIL_MARKERS = (
+    "Requesting permission for:", "Do you want to proceed?", "Execute command?",
+    "Do you want to run", "Accept this file edit?", "Accept this change?",
+    "Pending edit", "Allow creation of this file?", "Allow creation",
+    "Yes, allow creation",
+)
+
 
 @register
 class AgyAdapter(AgentAdapter):
@@ -39,22 +50,25 @@ class AgyAdapter(AgentAdapter):
     )
 
     def dialog_is_live(self, visible_text: str) -> bool:
-        """True only if an ACTIVE agy approval dialog anchor is present in the tail.
+        """True if an ACTIVE agy approval dialog anchor is present in the tail.
 
-        AGY dialogs render their live option rows/footers ("esc Skip", "> 1. Yes",
-        "[y/N]", "Press enter to continue", "[0] Skip") at the BOTTOM of the pane;
-        a completed dialog's anchors scroll out of the tail window. Tail-anchored
-        mirror of codex/opencode dialog_is_live so pane-direct eviction never
-        fires on a scrollback artifact. The focused-option anchor matches ANY
-        numbered row ('> 1. Yes', '> 2. No', …) — the liveness signal is the
-        PRESENCE of the focus marker, not which option is selected (INV-PD-1).
+        Tail-anchored superset of every AGY dialog marker (headers, footers,
+        option rows, focus marker). Errs toward "live": a false positive is a
+        recoverable stuck escalation, but a false negative is a fake pane-direct
+        APPROVED on a still-blocked agent (#7771). Only a CLEARED dialog — none
+        of the anchors in the tail — reports False.
         """
         tail = visible_text[-400:]
+        tail_block = "\n".join(visible_text.splitlines()[-8:])
         return (
             footer_is_live(visible_text, "esc Skip")
             or footer_is_live(visible_text, "Press enter to continue")
+            or footer_is_live(visible_text, "Do you want to proceed?")
+            or footer_is_live(visible_text, "↑/↓ Navigate")
+            or any(m in tail for m in _LIVE_TAIL_MARKERS)
             or "[0] Skip" in tail
             or bool(re.search(r">\s*\d+\.", tail))
+            or bool(re.search(r"^\s*\d+\.\s+Yes\b", tail_block, re.MULTILINE))
             or bool(re.search(r"\[[Yy]/[Nn]\]", tail))
         )
 

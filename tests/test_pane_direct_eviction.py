@@ -479,5 +479,122 @@ class TestDialogExpansion(unittest.TestCase):
         self.assertEqual(adapter.expand_calls, 0)  # expand_dialog NOT called (no regression)
 
 
+class TestDialogLivenessPrecision(unittest.TestCase):
+    """Anchor-completeness + variable-window liveness (#7771 AGY / #7938 Codex).
+
+    A live agent dialog must NEVER be misread as not-live: the AGY anchor set
+    is a tail-anchored superset of every dialog marker, and the Codex focused-
+    row search uses a header-anchored variable window (no fixed [-400:] tail
+    that a long command or trailing scrollback can overflow).
+    """
+
+    # ---- AGY (#7771): anchor completeness ---------------------------------
+
+    def test_agy_dialog_is_live_standard_prompt(self):
+        # Standard "Requesting permission for: ... Do you want to proceed?" with
+        # plain "1. Yes" (NO '>' focus marker) must still be LIVE.
+        text = (
+            "Requesting permission for: rm -rf /tmp/x\n"
+            "Do you want to proceed?\n"
+            "1. Yes\n"
+            "2. No\n"
+        )
+        self.assertTrue(AgyAdapter().dialog_is_live(text))
+
+    def test_agy_dialog_is_live_all_patterns(self):
+        cases = [
+            "Pending edit\n────────────\n/tmp/file.py\nAccept this file edit?",   # file-edit dialog
+            "Allow creation of this file?\n/path/to/new.py",                      # file-create dialog
+            "Do you want to run 'sudo reboot'?",                                  # exec-quote dialog
+            "How's the CLI experience so far?\n[0] Skip",                         # survey dialog
+            "> 1. Yes\n> 2. No",                                                 # focused option row
+            "Execute command?\nrm -rf /tmp/y\n[y/N]",                            # execute prompt
+        ]
+        for t in cases:
+            self.assertTrue(AgyAdapter().dialog_is_live(t), f"expected live: {t!r}")
+
+    def test_agy_dialog_is_live_false_when_cleared(self):
+        # A cleared dialog — none of the anchors in the tail — is NOT live.
+        cleared = (
+            "rm -rf /tmp/x\n"
+            "command completed successfully\n"
+            "next output line\n"
+            "more scrollback\n"
+        )
+        self.assertFalse(AgyAdapter().dialog_is_live(cleared))
+
+    # ---- Codex (#7938): variable tail window ------------------------------
+
+    def test_codex_dialog_is_live_long_command(self):
+        # A long command body PLUS trailing scrollback pushes the '› 1. Yes'
+        # marker beyond a fixed [-400:] tail window — the header-anchored
+        # region search must still report LIVE.
+        body = "echo " + "x" * 500
+        text = (
+            "Would you like to run the following command?\n"
+            f"  $ {body}\n"
+            "› 1. Yes, proceed (y)\n"
+            "  2. No, and tell Codex what to do differently (esc)\n"
+            "Press enter to confirm or esc to cancel\n"
+            + "out: " + "z" * 500 + "\n"  # trailing output after the dialog
+        )
+        # Sanity: the marker is genuinely outside the last 400 chars.
+        self.assertNotIn("› 1. Yes", text[-400:])
+        self.assertTrue(CodexAdapter().dialog_is_live(text))
+
+    def test_codex_dialog_is_live_boundary(self):
+        # Marker near the tail-window boundary (inside it) — still live.
+        text = (
+            "Would you like to run the following command?\n"
+            "  $ echo hi\n"
+            "› 1. Yes, proceed (y)\n"
+            "  2. No, and tell Codex what to do differently (esc)\n"
+            "Press enter to confirm or esc to cancel\n"
+            + "out: " + "z" * 250 + "\n"
+        )
+        self.assertIn("› 1. Yes", text[-400:])
+        self.assertTrue(CodexAdapter().dialog_is_live(text))
+
+    def test_codex_dialog_is_live_short_still_live(self):
+        text = (
+            "Would you like to run the following command?\n"
+            "  $ echo hi\n"
+            "› 1. Yes, proceed (y)\n"
+            "  2. No, and tell Codex what to do differently (esc)\n"
+            "Press enter to confirm or esc to cancel\n"
+        )
+        self.assertTrue(CodexAdapter().dialog_is_live(text))
+
+    def test_codex_dialog_is_live_completed_false(self):
+        # Footer present but the focused-row '›' marker is GONE (completed
+        # dialog lingering in scrollback) -> NOT live.
+        text = (
+            "Would you like to run the following command?\n"
+            "  $ echo hi\n"
+            "  1. Yes, proceed (y)\n"
+            "  2. No, and tell Codex what to do differently (esc)\n"
+            "Press enter to confirm or esc to cancel\n"
+        )
+        self.assertFalse(CodexAdapter().dialog_is_live(text))
+
+    def test_codex_edit_long_diff_still_live(self):
+        # A multi-file edit dialog with a LONG diff body + trailing scrollback:
+        # the live-region search must still find the marker and parse the
+        # destination (old fixed [-400:] window would return None).
+        diff = "".join(f"  + line {i} of the diff\n" for i in range(60))
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "Destination: /repo/scripts/core/x.py\n\n"
+            + diff
+            + "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel\n"
+            + "out: " + "q" * 500 + "\n"
+        )
+        self.assertNotIn("› 1. Yes", text[-400:])
+        adapter = CodexAdapter()
+        self.assertEqual(adapter.parse_permission_request(text), "edit_file /repo/scripts/core/x.py")
+        self.assertTrue(adapter.dialog_is_live(text))
+
+
 if __name__ == "__main__":
     unittest.main()
