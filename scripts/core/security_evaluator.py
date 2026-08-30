@@ -1093,6 +1093,57 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     return True
 
 
+# INV-TEST-1: Narrow test-runner fast-track (documented code-execution exception).
+# A test runner EXECUTES code (unittest/pytest import and run test modules),
+# unlike the read-only commands in the allowlist above. It is fast-tracked ONLY
+# under this tight scope so the gatekeeper's own test suite can run without
+# escalating, while `python3`/`pytest` remain non-general:
+#   * binary: `python3 -m unittest` (optionally a venv `bin/python3`) or `pytest`
+#     (optionally `bin/pytest`)
+#   * target: discovery scoped to this repo's `tests/` dir (`discover -s tests`),
+#     a specific `tests.<module>` unit, or `pytest` with `tests/...` (or bare `pytest`)
+#   * hard-rejects: `-c`, bare script paths, `-m <other>` modules, sudo/su, shell
+#     metacharacters, redirection/heredoc, command substitution, and the
+#     forensic/network primitives in _FORENSIC_NETWORK_BIN_RE.
+# HOLE (documented, intentionally NOT test-enforced): `python3 -m unittest` runs
+# arbitrary code inside the test modules under tests/. The narrow scope confines
+# execution to this repo's own test suite; it does NOT make `python3`/`pytest` a
+# general safe command, and an edited/malicious test module under tests/ would
+# still execute. Human review remains the backstop for anything outside this
+# exact shape.
+def _is_fast_track_test_runner(cmd_str: str) -> bool:
+    if re.search(r"\$\(|`", cmd_str):
+        return False
+    if re.search(r">>?|<<?", cmd_str):
+        return False
+    if _FORENSIC_NETWORK_BIN_RE.search(cmd_str):
+        return False
+    if re.search(r"(^|\s)(sudo|su)(\s|$)", cmd_str):
+        return False
+    rest = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+", "", cmd_str).strip()
+    tokens = rest.split()
+    if not tokens:
+        return False
+    binary = tokens[0]
+    if binary == "pytest" or binary.endswith("/bin/pytest"):
+        return len(tokens) == 1 or all(t == "tests" or t.startswith("tests/") for t in tokens[1:])
+    if binary != "python3" and not binary.endswith("/bin/python3"):
+        return False
+    if len(tokens) < 3 or tokens[1] != "-m" or tokens[2] != "unittest":
+        return False
+    args = tokens[3:]
+    if not args:
+        return False
+    if args[0] == "discover":
+        for i, a in enumerate(args):
+            if a in ("-s", "--start-directory"):
+                if i + 1 < len(args):
+                    return args[i + 1].rstrip("/") in ("tests", "./tests")
+                return False
+        return False
+    return args[0] == "tests" or args[0].startswith("tests.")
+
+
 # INV-8..11: package-manager 3-tuple classifier (MUTATING vs READ_ONLY)
 PACKAGE_MANAGERS = {"brew", "npm", "pip", "pip3", "cargo", "apt", "apt-get", "pnpm", "yarn"}
 
@@ -1372,6 +1423,10 @@ def _audit_static_shell_command(
     # provably-benign commands (no metacharacters, no forensic/network binaries).
     if _is_fast_track_allowlisted(cmd_str):
         return True, f"Fast-track verified safe: '{cmd_str}'", DecisionLayer.FAST_TRACK_AST
+
+    # INV-TEST-1: narrow test-runner fast-track (documented code-execution exception)
+    if _is_fast_track_test_runner(cmd_str):
+        return True, f"Fast-track test runner (narrow): '{cmd_str}'", DecisionLayer.FAST_TRACK_AST
 
     # INV-3: novelty/history gate — a canonical pattern with prior HUMAN approval
     # (scoped to pane + cwd, within TTL) auto-approves, instead of re-escalating.

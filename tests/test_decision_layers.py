@@ -825,5 +825,47 @@ class TestHistoryAndDiagnostics(unittest.TestCase):
             self.assertEqual(row["shadow_mode"], 1)
 
 
+class TestFastTrackTestRunner(unittest.TestCase):
+    """INV-TEST-1: narrow test-runner fast-track (documented code-execution exception).
+
+    Only the gatekeeper's own test-suite shape auto-approves: `python3 -m unittest`
+    scoped to `tests/` (or a `tests.*` unit) and `pytest` scoped to `tests/...`
+    (or bare `pytest`). Everything else (`-c`, script paths, other -m modules,
+    sudo, metacharacters/redirection, unscoped discovery) stays fail-closed.
+    NOTE: the documented HOLE (arbitrary code inside a tests/ module executes)
+    is intentionally NOT test-enforced — see the docstring in
+    `_is_fast_track_test_runner`.
+    """
+
+    def test_test_runner_forms_fast_track(self):
+        safe_cmds = (
+            "HERDR_ENV=1 ~/.local/share/herdr-schengen-tui-venv/bin/python3 -m unittest discover -s tests",
+            "python3 -m unittest discover -s tests",
+            "python3 -m unittest discover -s ./tests -v",
+            "python3 -m unittest tests.test_decision_layers",
+            "pytest tests/test_decision_layers.py",
+            "pytest",
+        )
+        for cmd in safe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_non_test_runner_forms_stay_fail_closed(self):
+        unsafe_cmds = (
+            'python3 -c "print(1)"',  # -c payload
+            "python3 some_script.py",  # bare script path
+            "python3 -m pip install requests",  # other -m module
+            "python3 -m unittest discover -s /etc",  # unscoped discovery dir
+            "sudo python3 -m unittest discover -s tests",  # sudo
+            "python3 -m unittest discover -s tests > /tmp/out",  # redirection
+            "python3 -m unittest discover -s tests && rm -rf /",  # metachar + mutation
+            "python3 -m unittest discover",  # no -s tests scope
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
+
 if __name__ == "__main__":
     unittest.main()
