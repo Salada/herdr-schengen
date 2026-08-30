@@ -1589,9 +1589,10 @@ def _audit_static_shell_command(
         return tax
 
     # INV-3: novelty/history gate — a canonical pattern with prior HUMAN approval
-    # (scoped to pane + cwd, within TTL) auto-approves, instead of re-escalating.
+    # (scoped to pane, within TTL) auto-approves, instead of re-escalating.
+    # M7: the gate key dropped the cwd dimension — seed and query now match.
     canonical = normalize_command(cmd_str)
-    if has_human_approval_pattern(canonical, scope=scope, cwd=cwd):
+    if has_human_approval_pattern(canonical, scope=scope):
         return True, f"Human-approved pattern (session): '{canonical}'", DecisionLayer.HUMAN_APPROVED
 
     # INV-8..11: package-manager 3-tuple classifier (READ_ONLY fast-track, MUTATING escalate)
