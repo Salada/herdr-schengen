@@ -53,6 +53,7 @@ from core.guard_db import (
     enqueue_pending_escalation,
     get_pattern_analysis,
     get_pane_direct_config,
+    get_pending_escalations,
     get_recent_audit_logs,
     get_state_file_paths,
     init_db,
@@ -87,6 +88,12 @@ _RELOAD_REQUESTED = False
 # Pane-direct PD-C debounce counter: consecutive not-live polls per pane_id.
 # Module-scope so the pure decision helper and the poll loop share one counter.
 _not_live_streak: dict[str, int] = {}
+
+# QUESTION residual sweep (issue #2800): consecutive not-live question reads per
+# pane_id. A QUESTION escalation whose dialog cleared (user answered in the
+# pane) is resolved ANSWERED after pane_direct_confirm_polls consecutive
+# not-live reads; a live question read resets the counter.
+_question_not_live_streak: dict[str, int] = {}
 
 # Host binary dirs that may be missing from the daemon's inherited PATH (e.g.
 # launched from a bare shell) but are required for SAST tools (shellcheck /
@@ -645,6 +652,82 @@ def maybe_expand_truncated_dialog(adapter, pane_id, visible_text, req_cmd):
     return visible_text, req_cmd, True
 
 
+def resolve_cleared_dialog(pane_id: str, cached_clear: Optional[dict]) -> None:
+    """Resolve a cleared-dialog cache entry with correct provenance (#2800).
+
+    - UNSAFE entry: the user answered the permission dialog directly in the
+      pane -> pane-direct APPROVED.
+    - QUESTION entry (cached cmd startswith "question"): the user answered the
+      question in the pane -> pane-direct ANSWERED (INV-Q-1: never APPROVED).
+    - Safe non-question entry: plain dialog-clear resolution (approver=other).
+    """
+    if not cached_clear:
+        return
+    is_q = str(cached_clear.get("cmd", "")).startswith("question")
+    if not cached_clear.get("is_safe", True):
+        resolve_escalation(pane_id=pane_id, resolution="APPROVED", approver="pane-direct")
+    elif is_q:
+        resolve_escalation(pane_id=pane_id, resolution="ANSWERED", approver="pane-direct")
+    else:
+        resolve_escalation(pane_id=pane_id, approver="other")
+
+
+def sweep_answered_questions(confirm_polls: int = 2) -> int:
+    """Debounced QUESTION residual sweep — resolve questions answered in-pane.
+
+    A QUESTION escalation whose dialog cleared (the user answered it directly
+    in the agent pane) must not stay PENDING forever (#2800). Runs once per
+    poll cycle, INDEPENDENT of target_panes (a question dialog may sit on a
+    pane that find_blocked_panes would skip). Per-pane debounce:
+    - agent_status == "blocked" -> skip, reset counter (INV-Q-4).
+    - adapter None -> skip (fail-closed, never evict).
+    - question_is_live(text) -> reset counter (still live, INV-Q-3).
+    - otherwise increment `_question_not_live_streak`; on reaching
+      confirm_polls resolve escalation_id as ANSWERED/pane-direct (INV-Q-5).
+    Returns the number of escalations resolved this sweep.
+    """
+    confirm_polls = max(1, int(confirm_polls))
+    resolved = 0
+    for q_esc in get_pending_escalations():
+        if q_esc.get("decision_layer") != "QUESTION":
+            continue
+        q_pane = q_esc.get("pane_id")
+        if not q_pane:
+            continue
+        q_info = get_pane_info(q_pane)
+        if not q_info:
+            continue
+        if q_info.get("agent_status") == "blocked":
+            _question_not_live_streak.pop(q_pane, None)
+            continue  # INV-Q-4: blocked -> never evict
+        q_adapter = get_adapter(q_info.get("agent", ""))
+        if q_adapter is None:
+            continue
+        try:
+            q_text = get_pane_text(q_pane, lines=80)
+        except Exception:
+            continue  # fail-closed: unknown -> keep pending
+        if q_adapter.question_is_live(q_text):
+            _question_not_live_streak.pop(q_pane, None)
+            continue  # INV-Q-3: still live
+        streak = _question_not_live_streak.get(q_pane, 0) + 1
+        _question_not_live_streak[q_pane] = streak
+        if streak >= confirm_polls:  # INV-Q-5: debounced
+            resolve_escalation(
+                pane_id=q_pane,
+                escalation_id=q_esc.get("id"),
+                resolution="ANSWERED",
+                approver="pane-direct",
+            )
+            _question_not_live_streak.pop(q_pane, None)
+            resolved += 1
+            print(
+                f"♻️ [QUESTION-ANSWERED] Pane {q_pane}: question dialog cleared; resolved ANSWERED (escalation #{q_esc.get('id')}).",
+                flush=True,
+            )
+    return resolved
+
+
 def truncated_evaluate_result():
     """Fail-closed evaluate result for an unexpandable truncated dialog.
 
@@ -1175,6 +1258,18 @@ def main():
                     else:
                         target_panes = [args.target]
 
+            # QUESTION residual sweep (#2800): resolve QUESTION escalations whose
+            # dialog cleared (answered in-pane) as ANSWERED. Runs once per loop,
+            # INDEPENDENT of target_panes — a question dialog may sit on a pane
+            # that find_blocked_panes would not report. Debounced with the same
+            # pane_direct_confirm_polls knob (INV-Q-5); blocked panes are never
+            # evicted (INV-Q-4); live question reads reset the counter.
+            try:
+                sweep_confirm_polls = int(get_pane_direct_config().get("pane_direct_confirm_polls", 2))
+            except Exception:
+                sweep_confirm_polls = 2
+            sweep_answered_questions(confirm_polls=sweep_confirm_polls)
+
             if not target_panes:
                 idle_count += 1
                 if args.auto_exit and idle_count > config["auto_exit_idle_cycles"]:
@@ -1213,13 +1308,9 @@ def main():
                     # Prompt is no longer active; reset last_processed_prompt for this pane
                     cached_clear = last_processed_prompt.get(pane_id)
                     if cached_clear:
-                        if not cached_clear.get("is_safe", True):
-                            # UNSAFE escalation whose dialog is gone: the user
-                            # answered it DIRECTLY in the pane — record pane-direct
-                            # provenance (approver + APPROVED resolution).
-                            resolve_escalation(pane_id=pane_id, resolution="APPROVED", approver="pane-direct")
-                        else:
-                            resolve_escalation(pane_id=pane_id, approver="other")
+                        # UNSAFE -> APPROVED pane-direct; QUESTION -> ANSWERED
+                        # pane-direct (#2800); safe non-question -> other.
+                        resolve_cleared_dialog(pane_id, cached_clear)
                         last_processed_prompt.pop(pane_id, None)
                         _not_live_streak.pop(pane_id, None)
                     if inspector.active_human and inspector.active_human[0] == pane_id:
