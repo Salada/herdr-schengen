@@ -314,23 +314,44 @@ Idea / Research:
           • 🤖 `MACHINE`
           • ❓ `OTHER`
 
-[] [Task/UX] Gatekeeper 인간 위임(Delegation to Human) 메시지 가시성 및 구조화 포매팅 강화
-   - Context & Problem:
-     - Gatekeeper가 조사를 마치고 자체 승인이 불가능하여 최종 결정을 인간 지휘관에게 위임할 때, `Investigation and execution completed.`와 같은 모호하고 평이한 단문이 출력되어 인간에게 판단 위임 사실 및 권장 액션이 명확히 인지되지 못함.
-   - Solution & Structured Formatting Design:
-     1. 모호한 단문 대체: 단순 완료 메시지 대신 **구조화된 인간 위임 카드(Delegation Card)** 출력:
+[] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅 및 카피라이팅 혁신 (Designer & Marketer Persona 협업)
+   - Context & Problem (사례: #2348 등):
+     - Gatekeeper가 인간 지휘관에게 승인/거절 판단을 요청할 때, 메시지가 평이한 텍스트로 흘러가거나 승인 요청이라는 긴급성과 결정 옵션이 한눈에 들어오지 않음.
+   - Designer & Marketer Persona 통합 기획:
+     1. 🎨 [Designer Persona: 시각적 계층화 및 박스형 카드 레이아웃]
+        - 터미널 채팅 영역 내 명확한 시각적 구분을 위한 박스형 카드 프레임(`╭─`, `│`, `╰─`) 적용.
+        - 정보 3단계 청킹(Chunking):
+          • 헤더: `🚨 [ESCALATION #2348] Commander Decision Required` (경고색/강조 배지)
+          • 본문: 타겟 Pane/Agent + 정돈된 실행 명령 스니펫 + 1줄 판정 유보 사유(Gray-zone/Denylist 근거)
+          • 액션 바: 승인(Green) vs 거절(Rose) vs 영속허용(Cyan)의 시각적 분리
+     2. 📣 [Marketer Persona: 능동적 카피라이팅 & Zero-Friction CTA]
+        - 수동적 서술("조사 완료") 제거 → 지휘관의 결정을 명확히 촉구하는 액션 중심 카피:
+          *"Commander, autonomous inspection cannot guarantee safety for this command. Your authorization is required."*
+        - 즉시 복사/실행 가능한 간결한 단축 명령어(CTA) 제시:
+          • `[✔ Approve]` 👉 `/approve 2348` (또는 `/a 2348`)
+          • `[✖ Reject]` 👉 `/reject 2348 [reason]` (또는 `/r 2348 [reason]`)
+          • `[🔒 Always Allow]` 👉 `/allow 2348` (영속 allowlist 등록)
+     3. 📐 [최종 출력 렌더링 목업 (Rich Markdown / ANSI Card)]:
         ```text
-        🚨 [bold red]▶ [Human Delegation] Escalation #<id> requires Commander Adjudication[/]
-        • [bold white]Target Pane:[/] <pane_id> (<agent>)
-        • [bold white]Command:[/] `<command>`
-        • [bold yellow]Investigation Summary:[/]
-          - Checked: <검토 대상 파일 및 호출 경로 요약>
-          - Risk / Gray-Zone: <자율 승인 불가 사유 및 리스크 요인>
-        👉 [bold cyan]Action Required:[/] Type [bold yellow]/approve <id>[/] to allow, or [bold yellow]/reject <id> [reason][/] to deny.
+        ╭── 🚨 DECISION REQUIRED ──────────────── Escalation #2348 ──╮
+        │ 🌐 Target   : w1D:p5X (agy)                                 │
+        │ 💻 Command  : python3 -c "import sqlite3..."                 │
+        │ ⚠️ Reason   : Read-only SQLite query on sensitive DB file   │
+        ├─────────────────────────────────────────────────────────────┤
+        │ 💡 Gatekeeper Assessment:                                   │
+        │   - Safe SELECT query observed, but fail-closed on DB file. │
+        │   - Zero filesystem mutation risk.                          │
+        ├─────────────────────────────────────────────────────────────┤
+        │ 👉 TAKE ACTION:                                             │
+        │   [✔ Approve]       : /approve 2348                         │
+        │   [✖ Reject]        : /reject 2348 [reason]                 │
+        │   [🔒 Always Allow] : /allow 2348                           │
+        ╰─────────────────────────────────────────────────────────────╯
         ```
-     2. Gatekeeper System Prompt & TUI Formatter 연동:
-        - `scripts/tools/schengen_agent_llm.py` 내 Gatekeeper 시스템 지침에 위임 시 구조화된 서식(Fact-sheet + Risk assessment + CTA) 생성 강제.
-        - TUI 마크다운/리치 렌더러에서 위임 메시지를 시각적 박스 또는 강조 테두리로 렌더링.
+     4. Implementation Points:
+        - `scripts/tools/schengen_agent_llm.py` 시스템 프롬프트에 승인 요청 시 위 카드 포맷 생성 강제.
+        - TUI 채팅 렌더러(`_write_markdown`)에서 카드 테두리 및 액션 바 ANSI 하이라이팅 지원.
+
 
 
 
