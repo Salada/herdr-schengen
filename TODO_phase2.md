@@ -43,7 +43,12 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
        - 이미 Pane에서 처리되어 사라진 경우, 사용자 화면에 알림을 띄우지 않고 큐에서 즉시 자동 퇴출(Silent Eviction).
     3. Event-Driven State Channel (선택):
        - Herdr 에이전트 상태 이벤트(Status Change Notification)를 리스닝하여 폴링 타이머 대기 없이 즉각적인 큐 클리어 트리거.
+[] [Refactor/Eviction] Stale Escalation Eviction 로직 정밀화 3종 (#33 피어리뷰 후속):
+  1) 에이전트 상태 문자열 대소문자 무시: `_should_evict_stale_escalation`의 `blocked` vs `working/idle/done` 매칭에 `.lower()` 또는 공용 상태 상수 적용 (Herdr 상태 케이싱 차이로 인한 eviction 누락 방지).
+  2) 해소 상태값 표준화 및 검증: `resolve_escalation`의 `RESOLVED` vs `CANCELLED` 처리 경로 일관성 점검 및 `approver="pane-direct"` 다운스트림 정상 연동 확인.
+  3) 명령 일치성(Command-Match) 검사 추가: `pane_id` 단독 키 매칭 외에 `raw_command` 동일성 확인을 추가하여, 다이얼로그 내용이 다른 미승인 명령으로 교체된 경우의 오퇴출 방지.
 [x] [Bug/SAST] Daemon 실행 환경 PATH 누락으로 인한 SAST(shellcheck/semgrep) Degraded 과에스컬레이션 버그 (PR #132): `_inject_runtime_path()`로 런타임 bin 디렉터리 주입 완료.
+
 [x] [Bug/Adapter] Codex Adapter edit-dialog 포맷 불일치(`Destination:` vs `*** Update File:`)로 인한 Fail-closed 오차단 버그 (PR #133): `Destination:` 및 `File:` 정규식 템플릿 지원 완료.
 [] [Refactor/Codex] Codex edit-dialog 파서 정밀화 3종 (#52 피어리뷰 후속):
   1) `Destination:` 우선 요구 및 `File:` 과포괄(다이얼로그 내 임의의 File: 라인 캡처) 방지 정밀 매칭.
