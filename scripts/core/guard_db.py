@@ -911,6 +911,40 @@ def set_origin_weighting_config(enabled: Optional[bool] = None) -> dict[str, boo
     return get_origin_weighting_config()
 
 
+_CLOUD_JUDGE_DEFAULTS = {"cloud_judge_min_confidence": 0.9}
+
+
+def get_cloud_judge_config() -> dict[str, float]:
+    """M6 cloud-judge confidence knob, backed by guard_config. Missing keys ->
+    defaults. Stored as string; coerce to float and clamp to [0.5, 1.0]."""
+    init_db()
+    cfg = dict(_CLOUD_JUDGE_DEFAULTS)
+    with get_db_connection() as conn:
+        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
+            if row["key"] == "cloud_judge_min_confidence":
+                try:
+                    cfg["cloud_judge_min_confidence"] = max(0.5, min(1.0, float(row["value"])))
+                except (TypeError, ValueError):
+                    pass
+    return cfg
+
+
+def set_cloud_judge_config(min_confidence: Optional[float] = None) -> dict[str, float]:
+    """Human-only write; clamp [0.5, 1.0]; upsert guard_config (mirror set_channel_approve_config)."""
+    init_db()
+    if min_confidence is not None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        clamped = max(0.5, min(1.0, float(min_confidence)))
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("cloud_judge_min_confidence", str(clamped), now_iso),
+            )
+            conn.commit()
+    return get_cloud_judge_config()
+
+
 def record_adjudication(
     escalation_id: int,
     pane_id: str,

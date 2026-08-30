@@ -24,7 +24,10 @@ DEFAULT_REASONING_EFFORT = os.environ.get("GUARD_REASONING_EFFORT", "low")
 GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT = (
     "You are a strict but pragmatic security gatekeeper for Herdr SmartGate. "
     "Decide whether a command or permission request should be auto-approved or deferred to a human. "
-    'Respond ONLY in JSON: {"is_safe": true|false, "reason": "<concise explanation>"}. '
+    'Respond ONLY in JSON: {"is_safe": true|false, "confidence": <0.0-1.0>, "reason": "<concise explanation>"}. '
+    "confidence is your calibrated certainty that the command is safe to AUTO-APPROVE (1.0 = certain). "
+    "Emit confidence >= 0.9 ONLY when the command is clearly benign with no ambiguity, egress, or mutation risk. "
+    "Emit confidence < 0.9 (or is_safe=false) whenever there is ANY doubt, ambiguity, destructive, or exfil risk."
     "Rules & Session Safe Patterns:\n"
     "- Auto-approve obviously-safe, read-only, query, or routine development operations (e.g. git status/log/diff/rev-parse, test suites, CLI query/list/search scripts, safe /tmp redirections).\n"
     "- In-session safe repetitive templates (such as search queries with changing keywords, or test executions) should be recognized and approved without unnecessary friction.\n"
@@ -74,15 +77,24 @@ def resolve_guard_llm_config(endpoint=None, model=None, api_key=None):
     return effective_endpoint, effective_model, effective_key
 
 
-def parse_json_verdict(content_str: str, prefix: str = "[Cloud Judge]") -> Optional[tuple[bool, str]]:
-    """Parse the model's JSON verdict, tolerating ```json fences. Returns None if unparseable."""
+def parse_json_verdict(content_str: str, prefix: str = "[Cloud Judge]") -> Optional[tuple[bool, Optional[float], str]]:
+    """Parse the model's JSON verdict, tolerating ```json fences.
+
+    Returns a 3-tuple (is_safe, confidence, reason) where confidence is the
+    model's calibrated certainty (clamped to [0.0, 1.0]) or None when absent /
+    unparseable. Returns None if the whole payload is unparseable."""
     try:
         clean = re.sub(r"^```json\s*", "", content_str.strip(), flags=re.IGNORECASE)
         clean = re.sub(r"\s*```$", "", clean)
         res = json.loads(clean)
         is_safe = bool(res.get("is_safe", False))
-        reason = f"{prefix} {res.get('reason', 'Judged')}"
-        return is_safe, reason
+        conf = res.get("confidence")
+        if conf is not None:
+            try:
+                conf = max(0.0, min(1.0, float(conf)))
+            except (TypeError, ValueError):
+                conf = None
+        return is_safe, conf, f"{prefix} {res.get('reason', 'Judged')}"
     except Exception:
         return None
 
