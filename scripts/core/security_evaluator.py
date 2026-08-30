@@ -962,8 +962,9 @@ _FORENSIC_NETWORK_BIN_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Issue #6935: sed in-place write-back flags (must never fast-track)
-_SED_INPLACE_RE = re.compile(r"(^|\s)(-i|--in-place)(\s|$)")
+# Issue #6935: sed is a language — enumerate SAFE forms as a closed whitelist.
+_SED_INPLACE_RE = re.compile(r"(^|\s)-i(?:[A-Za-z0-9.]*)?(\s|$)|--in-place")
+_SED_SAFE_SCRIPT_RE = re.compile(r"^\s*(\d+|\d+\s*,\s*\d+|\$)?\s*!?\s*p\s*$")
 
 # INV-5: explicit closed enumeration of provably-benign read-only commands
 FAST_TRACK_SAFE_COMMANDS = {
@@ -1033,9 +1034,11 @@ def _is_readonly_pipeline_segment(seg: str) -> bool:
         return False
     if cmd not in READONLY_PIPELINE_COMMANDS:
         return False
-    # in-place sed mutation must never fast-track
-    if cmd == "sed" and re.search(r"(^|\s)(-i|--in-place)(\s|$)", seg):
-        return False
+    # sed is a language: override the loose READONLY membership with the strict
+    # read-only whitelist (_is_readonly_sed) so e/w/s///w/-i forms in a pipeline
+    # never fast-track.
+    if cmd == "sed":
+        return _is_readonly_sed(seg)
     # sensitive path in any argument -> fail-closed
     if SENSITIVE_FILE_PATTERN.search(seg) or SENSITIVE_DIRECTORY_PATTERN.search(seg):
         return False
@@ -1095,7 +1098,7 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
 
     # Standalone read-only sed (issue #6935): `sed -n '<addr>p' <file>`
     if cmd_str.startswith("sed "):
-        return _is_standalone_readonly_sed(cmd_str)
+        return _is_readonly_sed(cmd_str)
 
     tokens = cmd_str.split()
     if not tokens or tokens[0] not in FAST_TRACK_SAFE_COMMANDS:
@@ -1108,24 +1111,28 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     return True
 
 
-def _is_standalone_readonly_sed(cmd_str: str) -> bool:
-    """Standalone read-only `sed -n '<addr>p' <file>` (issue #6935).
+def _is_readonly_sed(seg: str) -> bool:
+    """Read-only sed whitelist (issue #6935): ONLY `sed -n '<addr>p' <file>`.
 
-    `sed -n` prints selected lines to STDOUT only; the ONLY mutating forms are
-    `-i`/`--in-place` (in-place write-back) and the `w <file>` write command,
-    both hard-rejected. INV-SENS-1/2: sensitive targets and broad/root wildcards
-    fail closed. Redirection/command-substitution are already hard-rejected by
-    the caller (_is_fast_track_allowlisted) before this runs.
+    A blacklist (reject -i/w) is incomplete: sed scripts can EXECUTE (e), WRITE
+    files (w, s///w), READ files (r), and edit in place (-i, -i.suffix). Whitelist
+    instead — require the `-n` flag and a script that is exactly a numeric /
+    range / `$` address with an optional `!` negate and a single `p` (print).
+    Anything else (e, w, s, r, i/a/c insert-append-change, d, =, y, n, ...) rejects.
+    INV-SENS-1/2: sensitive targets and broad/root wildcards fail closed.
     """
-    if not re.match(r"^sed\s+-n\b", cmd_str):
+    if not re.match(r"^sed\s+-n\b", seg):
         return False
-    if _SED_INPLACE_RE.search(cmd_str):
+    if _SED_INPLACE_RE.search(seg):
         return False
-    if re.search(r"(^|[\s;|&])w\s+[^\s;|&]", cmd_str):
-        return False  # sed `w <file>` write command
-    if SENSITIVE_FILE_PATTERN.search(cmd_str) or SENSITIVE_DIRECTORY_PATTERN.search(cmd_str):
+    m = re.search(r"-n\s+(['\"])([^'\"]*)\1", seg)
+    if not m:
         return False
-    if _BROAD_WILDCARD_RE.search(cmd_str):
+    if not _SED_SAFE_SCRIPT_RE.match(m.group(2)):
+        return False
+    if SENSITIVE_FILE_PATTERN.search(seg) or SENSITIVE_DIRECTORY_PATTERN.search(seg):
+        return False
+    if _BROAD_WILDCARD_RE.search(seg):
         return False
     return True
 

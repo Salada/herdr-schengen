@@ -1053,29 +1053,45 @@ class TestOriginWeighting(unittest.TestCase):
 
 
 class TestStandaloneReadOnlySed(unittest.TestCase):
-    """Issue #6935: standalone read-only `sed -n '<addr>p' <file>` fast-track.
+    """Issue #6935: read-only `sed -n '<addr>p' <file>` fast-track (whitelist).
 
-    `sed -n` prints to STDOUT only; the mutating forms (`-i`/`--in-place`
-    write-back, `w <file>` write command) and sensitive/broad targets must all
-    stay fail-closed.
+    sed is a language: ONLY `sed -n` with a script that is exactly a numeric /
+    range / `$` address + optional `!` + `p` (print) fast-tracks. Anything else
+    (e, w, s///w, r, i/a/c, d, -i/-i.suffix) and sensitive/broad targets stay
+    fail-closed, in both the standalone and pipeline paths.
     """
 
     def test_readonly_sed_n_fast_tracks(self):
         safe_cmds = (
             "sed -n '1,260p' /Users/kyjbusan/code/herdr-schengen/scripts/core/security_evaluator.py",
             "sed -n '1,10p' docs/setup.md",
+            "sed -n '10p' docs/setup.md",
+            "sed -n '1,10!p' file.txt",
         )
         for cmd in safe_cmds:
             safe, reason, layer = audit_shell_command(cmd)
             self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
             self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
-    def test_sed_mutating_forms_stay_fail_closed(self):
+    def test_sed_script_language_forms_stay_fail_closed(self):
+        # sed is a mini-language: execute / write / delete / substitute / no -n
+        # must all reject (whitelist is the closed set above).
+        unsafe_cmds = (
+            "sed -n '1e touch /tmp/pwned' file.txt",  # GNU sed `e` executes shell
+            "sed -n '1,10w ~/.bashrc' file.txt",  # adjacent `w` write
+            "sed -n 's/x/y/w /tmp/out' file.txt",  # s///w write flag
+            "sed -n '1,10d' file.txt",  # delete
+            "sed 's/foo/bar/' file.txt",  # no -n (not matched)
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
+    def test_sed_inplace_forms_stay_fail_closed(self):
         unsafe_cmds = (
             "sed -i 's/foo/bar/' file.txt",  # in-place write-back
             "sed -n '1,10p' file.txt -i",  # -i flag anywhere
-            "sed -n '1,10p' file.txt w out.txt",  # `w <file>` write command
-            "sed 's/foo/bar/' file.txt",  # no -n (not matched)
+            "sed -n -i.bak 's/foo/bar/' file.txt",  # -i with attached suffix
             "sed -n '1,10p' file.txt > /tmp/out",  # redirection
         )
         for cmd in unsafe_cmds:
@@ -1092,6 +1108,21 @@ class TestStandaloneReadOnlySed(unittest.TestCase):
         ):
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed (sensitive), got safe=True: {reason}")
+
+    def test_sed_pipeline_path_hardened(self):
+        # The pipeline path must use the same strict whitelist (reviewer finding):
+        # execute/write sed forms in a pipeline never fast-track, while the safe
+        # print form still does.
+        unsafe_cmds = (
+            "cat a.txt | sed '1e id'",  # execute in pipeline
+            "cat a.txt | sed 's/x/y/w out.txt'",  # write in pipeline
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+        safe, reason, layer = audit_shell_command("sed -n '1,260p' file.txt | head -5")
+        self.assertTrue(safe, f"Expected whitelist pipeline fast-track safe, got: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
 
 if __name__ == "__main__":
