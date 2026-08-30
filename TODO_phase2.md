@@ -2,19 +2,20 @@
 > 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
 > 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
 > **🎉 Epic Fail-closed 편향 전환 M1~M7 전면 완료 (PR #126~PR #144)**
-> **🎉 Pane-Direct Auto-Eviction & Codex edit_file Stale 해소 완료 (PR #146, INV-PD-1..3)**
+> **🎉 핵심 아키텍처 4종 완료: Approver Provenance(PR #147) / Persistent CUD(PR #150) / Codex edit_file(PR #151) / AGY·OpenCode 전개(PR #152)**
 
-1. [정합성/보안 기반] Approver Provenance 오귀속 분리 (Gatekeeper-LLM vs Human-TUI vs Machine)
-   - 맥락: `adjudication_log` 및 `pending_escalations.approver`에 `⚡ GATEKEEPER` vs `👤 HUMAN` vs `🤖 MACHINE` vs `❓ OTHER` 명확 분리. #91 Persistent CUD의 신뢰 프로모션 필수 전제.
-2. 🚨 [긴급 승격 — Codex 마찰 해소] Codex `edit_file` 파서 정밀화 & 경로 누락(Bare `edit_file`) 방지 (사례: #7759)
-   - 현상: Codex 편집 다이얼로그에서 다중 파일(`len(dests)>1`) 또는 선행 공백/박스 문자로 인해 타겟 경로가 유실된 bare `edit_file`이 추출되어 매번 `NOT_ALLOWLISTED` 차단 및 `.schengen/` 프로모션 불가.
-   - 조치: (1) `^\s*(?:│\s*)?(?:Destination|File):` 인덴트/프레임 허용 (2) `re.IGNORECASE` (3) 다중 파일 워크스페이스 경로 검증 지원.
-3. [Architecture] Persistent Allowlist CUD(#91) — 전역 TUI /allow /revoke + 런타임 핫리로드
-   - 맥락: fail-closed allowlist(fast-track closed enum) + `.schengen/allowlist.json` 전역 보완 + INV-PL-1..3.
-4. [Quick-Win 자율성] AGY `ctrl+g` / OpenCode `ctrl+f` 전개 자율 검증 (#2099 & 장문 커밋)
-   - 맥락: 에디터/풀스크린 모드 전개 ➔ 전체 원문 획득 ➔ 100% AST 검증 및 자율 승인.
-5. [UX/몰입도] Inspector 병렬성(Concurrency 10) & 단일 순차 큐 + '인간 개입 필수(Action Required)' 3단 패널 시각화
-6. [피어리뷰 후속 종합] #137 회귀 / #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207 / #146
+### 🎯 확정된 4-Sprint 진행 로드맵
+
+1. 🚨 **[Sprint 1 — P0 긴급 버그 일괄]** Liveness/Auto-Eviction 정밀화 (보안 회귀 #7771 + 블로커 #2800)
+   - 1a) `#7771` (보안 회귀 최우선): AGY `dialog_is_live()` 앵커 전면 보강 + TUI pre-render 즉시 승인 방지(Debounce/상태전이 가드) ➔ 가짜 `pane-direct` 승인 박멸 (`INV-PD-4`).
+   - 1b) `#2800` (블로킹 해소): TUI pre-render `is_question` 예외 제거 + Watcher QUESTION 소멸 시 auto-evict (`resolution="ANSWERED"`).
+2. 🎨 **[Sprint 2 — 관측성 & 인터랙션 극대화]** Action Required 3단 패널 + Queue Taxonomy + Universal Deep-Link
+   - Top Banner(붉은 점멸) + Radar 상태 카드 + 채팅창 결재 카드 + 큐 4단계 배지 + `[#ID]` 원클릭 Audit 점프.
+3. 🧹 **[Sprint 3 — 코드베이스 위생 & 테스트 수렴]** 피어리뷰 후속 일괄 수렴
+   - #137 회귀 / #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207 / #146 등 종합 정리.
+4. ⚙️ **[Sprint 4 — 대형 동시성 엔진]** [EPIC] Parallel Silent Inspection & Single-Slot Deferred UI
+   - M1(WAL/Lock) ➔ M2(ThreadPool 10) ➔ M3(DeferredHumanQueue) ➔ M4(Pre-Display Purge).
+
 
 
 
@@ -102,15 +103,9 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   3) 명령 일치성(Command-Match) 검사 추가: `pane_id` 단독 키 매칭 외에 `raw_command` 동일성 확인을 추가하여, 다이얼로그 내용이 다른 미승인 명령으로 교체된 경우의 오퇴출 방지.
 [x] [Bug/SAST] Daemon 실행 환경 PATH 누락으로 인한 SAST(shellcheck/semgrep) Degraded 과에스컬레이션 버그 (PR #132): `_inject_runtime_path()`로 런타임 bin 디렉터리 주입 완료.
 
-[] [Refactor/Codex] Codex edit-dialog 파서 정밀화 및 경로 누락(Bare `edit_file`) 방지 (#52 후속 및 #7759 해소):
-  - 현상 및 원인 (사례: #7759 등):
-    • Codex 편집 모달에서 경로가 누락된 단독 `edit_file`이 추출되어 `NOT_ALLOWLISTED` fail-closed 차단 및 `.schengen/` 프로모션 불가 현상 반복.
-    • 원인: `Destination:`/`File:` 앞 선행 공백/박스 문자(`│`) 미매칭 또는 다중 파일 패치(`len(dests) > 1`) 발생 시 단독 `edit_file`로 축소 반환.
-  - 조치:
-    1) 인덴트 및 프레임 허용 정규식: `r"^\s*(?:│\s*)?(?:Destination|File):\s*(.+?)\s*$"`
-    2) `re.IGNORECASE` 적용으로 대소문자 변종 완벽 포용.
-    3) 다중 파일 워크스페이스 검증: 여러 파일 수정 시 모든 대상 파일 경로를 추출(`edit_file <p1> <p2>...`)하여 각각 민감 경로(Denylist) 검증을 거친 후 안전 시 승인/프로모션 지원.
-    4) 중복 `.strip()` 제거 및 단위테스트 보강.
+[x] [Refactor/Codex] Codex edit-dialog 파서 정밀화 및 경로 누락(Bare `edit_file`) 방지 (PR #151 완료, INV-EF-1..5):
+  - 해결: (1) `^\s*(?:│\s*)?(?:Destination|File):` 인덴트/프레임 허용 (2) `re.IGNORECASE` 대소문자 포용 (3) 다중 파일 워크스페이스 검증 및 bare `edit_file` 누락 방지.
+
 
 [x] [Prerequisite/Host] 호스트 머신 semgrep 바이너리 미설치로 인한 SAST DEGRADED 해소: semgrep 1.175.0 설치(/opt/homebrew/bin/semgrep) 및 기능 스캔/SAST BLOCK 정상 탐지 검증 완료. shellcheck+semgrep 모두 READY.
 [] [Task/Dependency] semgrep 필수 디펜던시(Required Dependency) 체계적 관리 및 자동화 방안 수립:
@@ -240,28 +235,9 @@ TASKS:
    - TUI audit table/detail 모달에 approver 배지 표시 (예: 🤖 / 👤 / ❓)
     - Reject/Unknown도 동일 적용 (reject: machine-no-autoreject / human-tui / other)
 
-Idea / Research:
-[] [Idea] TUI 런타임 핫 리로드(Hot-reloadable) Persistent Allowlist & 동적 Policy CUD 생명주기 관리
-   - Context & Problem:
-     - 현재 fail-closed 강화(INV-1/2)로 인해 안전하고 반복적인 명령/파일 작업(예: Codex `edit_file`, 워크스페이스 내 빌드·테스트 스크립트 등)도 매번 에스컬레이션되어 에이전트의 자율성(Autonomy) 및 작업 지속성이 저해됨.
-     - 특히 Codex `edit_file` 등은 세션 인메모리(transient)에서만 승인되고, 영속적(Persistent) 관점의 룰 관리가 부재함.
-     - 인간이 TUI 화면(승인 전/중) 또는 Gatekeeper Tool Call 인터페이스를 통해 영속적 allowlist를 동적으로 정의하고, 데몬 재시작 없이 런타임에 핫 리로드(Hot-reload)할 수 있는 체계가 필요함.
-     - 동시에 False Positive로 잘못 승인된 룰을 철회(Revoke)하거나 Stale 룰을 정리할 수 있는 완전한 CUD(Create, Update, Delete) 사이클이 요구됨.
-   - Architecture & Key Requirements:
-     1. Hot-Reloadable Config & Tool Call Surface:
-        - TUI UX: 승인 모달에서 "Always Allow & Persist", 전용 Policy 관리 모달, 또는 Gatekeeper LLM Tool Call(`add_allowlist_rule`, `update_allowlist_rule`, `revoke_allowlist_rule`)을 통해 동적 반영.
-        - Runtime Sync: SQLite/JSON 설정 변경 시 Inotify/Watcher 또는 config 버저닝을 통해 데몬/Watcher에 무중단 핫 리로드.
-     2. Policy Schema & CUD Lifecycle:
-        - Rule Schema: `{ id, pattern/AST, target_agent (all|codex|opencode|agy), scope (repo|cwd|pane|global), action_type (exec|edit_file|network), ttl/expiry, status (ACTIVE|REVOKED), created_by (human-tui|tool), reason, created_at }`
-        - Create: 인간 승인 또는 Gatekeeper의 타당성 검증을 거친 영속 룰 생성.
-        - Update: 적용 스코프(세션 → repo 전체 등) 확장 또는 조건 조정.
-        - Delete / Revoke: False Positive 발생 시 즉시 상태를 REVOKED로 전환하여 fail-closed 에스컬레이션으로 즉시 원복.
-     3. Codex `edit_file` & Safe File Mutations 전용 연계:
-        - 저장소 내부 안전한 파일 수정 패턴(예: `TODO_*.md`, `docs/*`, 테스트 대상 소스 경로 등)에 대해 AST/경로 검증 후 영속 allowlist 매칭 지원.
-     4. Fail-Closed 불변식 (Invariants):
-        - INV-PL-1 (Human Provenance): 오직 인간 TUI 입력 또는 인간이 승인한 Gatekeeper Tool Call에 의해서만 영속 룰 CUD 가능 (Untrusted 피감시 에이전트의 임의 룰 주입 원천 차단).
-        - INV-PL-2 (Revocation Immediacy): REVOKED 처리된 룰은 모든 캐시/메모리에서 즉시 무효화되어 fallback fail-closed 경로로 진입.
-        - INV-PL-3 (Audit Trail): 모든 CUD 변경 이력은 `audit_log` 및 `adjudication_log`에 영구 기록.
+[x] [Idea] TUI 런타임 핫 리로드(Hot-reloadable) Persistent Allowlist & 동적 Policy CUD 생명주기 관리 (PR #150 완료, INV-PL-1..5):
+   - 해결: (1) TUI `/allow`, `/revoke` 명령어 및 Gatekeeper `register_allowlist` tool call (2) SQLite `user_allowlist` 테이블 기반 동적 CUD (3) 런타임 무중단 핫리로드 및 INV-PL-1..5 불변식 완결.
+
 
 [] [Idea/Audit] System Auto-Approval의 스코프 맥락(Session-Specific vs Global/Stateless) 감사 메타데이터 명시화
    - Context & Objective:
@@ -427,23 +403,8 @@ Idea / Research:
      3. [Phase 3: 자율 판정 통과 시 (Auto-Approved)]:
         - 인간 화면에 어떤 방해/경고도 남기지 않고 조용히 `[green]✔ Auto-Approved[/]` 처리 후 큐 클리어.
 
-[] [Bug/Audit] 승인 주체(Approver Provenance) 오귀속 수정: 시스템/Gatekeeper LLM 자동 승인과 인간 직접 승인(Human TUI) 엄격 분리
-   - Context & Problem:
-     - PR #125 구현에서 Gatekeeper LLM의 Tool Call에 의한 자동 승인과 인간의 TUI 직접 입력(`/approve`)이 둘 다 `human-tui`로 묶여 기록됨.
-     - 이로 인해 실제 인간이 승인하지 않은 시스템/AI 자율 승인 건조차 로그/UI에 `👤 human-tui`로 표기되어 감사 신뢰도 및 상황 파악에 심각한 왜곡 발생.
-   - Solution & Provenance Classification:
-     1. 세분화된 Provenance 분류 체계:
-        - `👤 human` (또는 `human-tui`): 인간 사용자가 TUI 인풋 창에서 직접 `/approve`를 입력하거나 버튼을 클릭한 경우에만 엄격 한정.
-        - `⚡ gatekeeper-llm` (또는 `system-agent`): TUI 내 Gatekeeper LLM이 Tool Call(`approve_escalation`)을 통해 자율적으로 승인한 경우.
-        - `🤖 machine-guard` (또는 `system-ast`): Watcher 데몬이 Fast-Track AST/Allowlist로 자동 승인한 경우.
-        - `❓ other`: PTY 직접 입력 등 출처 불명인 잔여 경로.
-     2. Implementation Points:
-        - `adjudication_log.action` 및 `pending_escalations.approver` 컬럼에 `gatekeeper-llm` vs `human` 명시적 구분자 저장.
-        - TUI Audit Ledger 테이블 및 Detail 모달 배지 갱신:
-          • 👤 `HUMAN`
-          • ⚡ `GATEKEEPER`
-          • 🤖 `MACHINE`
-          • ❓ `OTHER`
+[x] [Bug/Audit] 승인 주체(Approver Provenance) 오귀속 수정: 시스템/Gatekeeper LLM 자동 승인과 인간 직접 승인(Human TUI) 엄격 분리 (PR #147 완료, INV-AP-1..6):
+   - 해결: `adjudication_log.action` 및 `pending_escalations.approver`에 `⚡ GATEKEEPER` vs `👤 HUMAN` vs `🤖 MACHINE` vs `❓ OTHER` 명확 분리 및 신뢰 프로모션 불변식 확립.
 
 [] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅 및 카피라이팅 혁신 (Designer & Marketer Persona 협업)
    - Context & Problem (사례: OpenCode 대기 중 TUI 모호성 방치 등):
@@ -488,33 +449,9 @@ Idea / Research:
         - TUI 채팅 렌더러(`_write_markdown`), 상단 배너 및 사이드 패널의 상태 머신 실시간 동기화.
 
 
-[] [Task/Feature] AGY 장문/생략 명령(⋯ lines hidden) 발생 시 `ctrl+g` 전개(Expand)를 통한 전문 자율 검증 체계 구현
-   - Context & Problem (사례: #2099 등):
-     - AGY 다이얼로그에서 긴 스크립트(`python3 -c ...` 등)가 실행될 때 `⋯ (14 lines hidden)` 형태로 축약되어 표시됨.
-     - Gatekeeper/Inspector가 축약된 본문을 다 보지 못해 "Hidden lines were not fully verifiable" 사유로 불필요하게 인간에게 에스컬레이션하거나 전문 확인을 요청함.
-   - Key Insight & Architecture:
-     1. AGY `ctrl+g` 단축키 자율 전개:
-        - AGY 승인 모달은 `ctrl+g` 키를 통해 전체 스크립트를 에디터/전개 모드로 열람 가능.
-        - Gatekeeper/Inspector가 `⋯ lines hidden` 감지 시, `herdr agent send-keys <pane_id> ctrl+g`를 자율 호출하여 전체 원문을 읽어오고 파싱.
-     2. 완전한 AST/보안 검사 후 자율 승인:
-        - 전개된 100% 원문 전체에 대해 AST 파싱, 민감 파일 접근, 위험 명령어 검사를 완결.
-        - 안전성이 입증되면 인간 개입 없이 `AUTO_APPROVED` 자율 승인 완료 (에디터 모드 해제 후 `1. Yes` 전송).
-     3. Invariants:
-        - INV-AGY-1: 축약된 생략 줄(`⋯ lines hidden`)이 존재하는 상태에서 내용 미확인 채로 임의 통과(Fail-Open) 금지.
-        - INV-AGY-2: `ctrl+g` 전개 실패 또는 원문 읽기 불가 시에만 안전하게 Fail-Closed 에스컬레이션.
+[x] [Task/Feature] AGY 장문/생략 명령(⋯ lines hidden) 발생 시 `ctrl+g` 전개 및 OpenCode `ctrl+f` 풀스크린 전개 자율 검증 (PR #152 완료, INV-EX-1..5):
+   - 해결: `adapter.expand_dialog` 인터페이스를 통해 AGY(`ctrl+g`), OpenCode(`ctrl+f`), Codex(`ctrl+a`) 전개 ➔ 100% 전문 AST 검증 및 자율 승인 완료.
 
-[] [Task/Feature] OpenCode 장문 Git 커밋 메시지/스크립트 단서 부족 시 `ctrl+f` 풀스크린 전개 자율 조사 Tool Call 구현
-   - Context & Problem:
-     - OpenCode에서 긴 git 커밋 메시지(`git commit -m "$(cat <<'EOF' ... EOF)"`)나 다줄 복합 스크립트 실행 시, 다이얼로그 뷰포트 내 텍스트가 잘리거나 스크롤되어 Gatekeeper LLM / Inspector가 메시지 전문 및 동적 치환 내용을 온전히 확인하지 못하고 단서 부족으로 불필요하게 에스컬레이션되는 현상 발생.
-   - Solution & Adapter Tool Call Architecture:
-     1. OpenCode `ctrl+f` 풀스크린 전개 활용:
-        - OpenCode 모달은 하단에 `ctrl+f fullscreen` 단축키를 제공하여 화면 전체 높이로 다이얼로그 내용을 전개 가능.
-     2. Gatekeeper 자율 전개 Tool Call (`expand_opencode_dialog` 또는 공용 `expand_dialog`):
-        - Gatekeeper LLM이 텍스트 절단이나 단서 부족 감지 시, `herdr agent send-keys <pane_id> ctrl+f`를 직접 호출하여 풀스크린 다이얼로그의 전체 메시지 본문을 획득.
-     3. 100% 전문 안전성 검증 후 자율 판정:
-        - Commit message 및 Heredoc 전체에 대해 AST/민감 경로/인젝션 위험을 완벽히 검증한 후, `approve_escalation`으로 자율 승인 진행.
-     4. 에이전트 어댑터별 다이얼로그 전개 표준 인터페이스 통합:
-        - `adapter.expand_dialog(pane_id)`: AGY(`ctrl+g`), OpenCode(`ctrl+f`), Codex(`ctrl+a`).
 
 
 
