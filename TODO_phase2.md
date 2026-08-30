@@ -230,6 +230,22 @@ Idea / Research:
         - `audit_logs` 테이블에 `scope_context` 컬럼 추가 (또는 `mechanism` 컬럼 값 표준화: `fast-track:global`, `session-memory:pane_id`, `allowlist:repo`).
         - TUI Audit Table 및 Detail Modal에 스코프 태그/배지 노출 (예: `[🤖 AUTO: Session]` vs `[🤖 AUTO: Global]`).
 
+[] [Task/Architecture] Workspace별 `.schengen/` 기반 영속 Allowlist & 승인 후 기계적 지속 자동승인(Auto-Promotion) 체계 구축 (사례: #7207 access_directory):
+   - Context & Problem (사례: #7207 `access_directory /path/to/worktree` 등):
+     - 워크스페이스 외부 경로(worktree, 공유 디렉터리, 라이브러리) 접근이나 반복 명령에 대해, 1회 승인된 이후에도 세션이 바뀌거나 캐시가 만료되면 다시 에스컬레이션되는 비효율 발생.
+   - Solution & Architecture Design:
+     1. Workspace-Local 정책 저장소 (`<workspace>/.schengen/`):
+        - 프로젝트 루트마다 `.schengen/allowlist.json` (또는 `directory_whitelist.json`) 파일 유지.
+        - 워크스페이스 범위에서 허용된 외부 디렉터리 경로 및 안전 패턴을 저장 (VCS 커밋 또는 로컬 ignore 선택 가능).
+     2. 지속 승인 프로모션 파이프라인 (Auto-Promotion Pipeline):
+        - [1차 진입]: 최초 `access_directory` 또는 특정 명령 발생 시 ➔ Gatekeeper LLM / Human Commander에게 에스컬레이션.
+        - [승인 및 영속화]: 인간 또는 고신뢰 판정으로 승인 완료 시 ➔ 해당 워크스페이스의 `.schengen/allowlist.json`에 영속 룰 자동 등록.
+        - [2차 이후 기계적 즉시 통과]: 이후 동일 경로/패턴 요청 시 ➔ 에스컬레이션 전 단계인 결정론적 AST/경로 검사기에서 `.schengen/`을 먼저 조회하여 **0.1s 미만 기계적 자동 승인(`decision_layer=FAST_TRACK_WORKSPACE_ALLOWLIST`)**으로 직행.
+     3. 불변식 (Invariants):
+        - INV-WS-1 (Scope Confinement): `.schengen/` 정책은 해당 워크스페이스 작업에만 국한 적용.
+        - INV-WS-2 (Denylist Overrides Whitelist): 시스템 민감 경로(`~/.ssh`, `~/.aws`, 루트 `/`)는 `.schengen/`에 기재되어 있어도 절대 허용 불가 (Hard Fail-Closed).
+
+
 
 [x] [Task/Feature] 에스컬레이션 로그(#1800~) 기반 Fast-Track 후보군 발굴 (PR #129: sub-task 1·2 완료 — 읽기전용 파이프라인 fast-track + 민감 Denylist)
    - 잔여: sub-task 3 (TUI Slash Command / Tool Call: /allow, /allow-last, /revoke) → Persistent Allowlist CUD(#91)와 통합 추진
