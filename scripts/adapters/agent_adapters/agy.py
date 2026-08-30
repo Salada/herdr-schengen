@@ -63,9 +63,10 @@ class AgyAdapter(AgentAdapter):
 
         AGY renders a fold marker for long command/script bodies. A truncated
         req_cmd must NEVER reach the AST evaluator (INV-EX-2) — the watcher
-        expands first (issue #2099).
+        expands first (issue #2099). Accept both ellipsis codepoints (U+22EF
+        midline ⋯ and U+2026 horizontal …) for the fold marker.
         """
-        return bool(re.search(r"⋯\s*(?:\d+\s*)?lines?\s*hidden", visible_text))
+        return bool(re.search(r"[⋯…]\s*(?:\d+\s*)?lines?\s*hidden", visible_text))
 
     def expand_dialog(self, pane_id: str) -> Optional[str]:
         """Expand the AGY fold via ctrl+g, then return the full dialog text.

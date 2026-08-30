@@ -380,6 +380,7 @@ class TestDialogExpansion(unittest.TestCase):
         adapter = AgyAdapter()
         self.assertTrue(adapter.is_truncated("⋯ 3 lines hidden"))
         self.assertTrue(adapter.is_truncated("⋯ lines hidden"))
+        self.assertTrue(adapter.is_truncated("… 3 lines hidden"))  # U+2026 horizontal ellipsis
         self.assertTrue(adapter.is_truncated("Requesting permission for: rm -rf /\n⋯5 lines hidden"))
         self.assertFalse(adapter.is_truncated("Requesting permission for: rm -rf /\nDo you want to proceed?\n> 1. Yes"))
 
