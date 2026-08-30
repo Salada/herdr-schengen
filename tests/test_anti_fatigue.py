@@ -157,7 +157,7 @@ class TestAntiFatigue(unittest.TestCase):
         esc_id = enqueue_pending_escalation(
             pane_id, raw_cmd, "pkg", "NOT_ALLOWLISTED", "agy"
         )
-        record_adjudication(escalation_id=esc_id, pane_id=pane_id, agent_kind="agy", action="APPROVE", feedback="ok")
+        record_adjudication(escalation_id=esc_id, pane_id=pane_id, agent_kind="agy", action="APPROVE", feedback="ok", approver="human-tui")
         # M7 fix: the key drops the cwd dimension, so the query matches the seed.
         self.assertTrue(has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id))
         # E2E: the HUMAN_APPROVED fast-path actually fires (dead pre-fix).

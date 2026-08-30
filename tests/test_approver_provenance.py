@@ -2,8 +2,16 @@
 """Approver Provenance Tests for Schengen Guardian.
 
 Verifies the ``approver`` column on ``pending_escalations``:
-- ``human-tui`` set by ``record_adjudication`` (gatekeeper LLM APPROVE/REJECT)
-- ``machine`` / ``other`` set by ``resolve_escalation`` (auto-approve vs dialog-clear)
+- ``gatekeeper`` set by ``record_adjudication`` (gatekeeper LLM APPROVE/REJECT)
+  — the fail-closed, least-privileged default: records provenance but NEVER
+  seeds the novelty gate and NEVER auto-promotes workspace rules (INV-AP-2/3)
+- ``human-tui`` set ONLY by explicit human adjudication
+  (``record_adjudication(approver="human-tui")`` / TUI batch approve) — the
+  only provenance that seeds novelty + auto-promotes
+- ``pane-direct`` set by ``resolve_escalation`` (pane-direct auto-eviction) —
+  non-granting (INV-AP-6)
+- ``machine`` / ``other`` set by ``resolve_escalation`` (auto-approve vs
+  dialog-clear)
 - ``other`` backfilled by ``cleanup_escalations`` on unresolved (UNANSWERED) rows
 - surfaced through ``get_escalation_approver`` and ``get_recent_audit_logs``
 """
@@ -25,6 +33,8 @@ from core.guard_db import (
     enqueue_pending_escalation,
     get_escalation_approver,
     get_recent_audit_logs,
+    has_human_approval_pattern,
+    normalize_command,
     record_adjudication,
     record_audit_log,
     resolve_escalation,
@@ -74,6 +84,7 @@ class TestApproverProvenance(unittest.TestCase):
             agent_kind="agy",
             action="APPROVE",
             feedback="Safe for test environment",
+            approver="human-tui",
         )
         row = self._get_row(esc_id)
         self.assertEqual(row["resolution"], "APPROVED")
@@ -93,6 +104,7 @@ class TestApproverProvenance(unittest.TestCase):
             agent_kind="agy",
             action="REJECT",
             feedback="Dangerous",
+            approver="human-tui",
         )
         row = self._get_row(esc_id)
         self.assertEqual(row["resolution"], "REJECTED")
@@ -125,6 +137,7 @@ class TestApproverProvenance(unittest.TestCase):
             agent_kind="agy",
             action="APPROVE",
             feedback="OK",
+            approver="human-tui",
         )
         # Resolve WITHOUT an approver: COALESCE(NULL, approver) must keep human-tui
         resolve_escalation(pane_id="w1D:p5")
@@ -161,6 +174,7 @@ class TestApproverProvenance(unittest.TestCase):
             agent_kind="agy",
             action="REJECT",
             feedback="No",
+            approver="human-tui",
         )
         # Cleanup must keep the prior human-tui approver (resolution already set)
         cleanup_escalations(pane_id="w1D:p5", new_status="STALE_EXPIRED")
@@ -205,6 +219,131 @@ class TestApproverProvenance(unittest.TestCase):
         self.assertTrue(any(l["raw_command"] == raw_command for l in logs))
         target = next(l for l in logs if l["raw_command"] == raw_command)
         self.assertEqual(target["approver"], "other")
+
+    # --- INV-AP-1..6: gatekeeper vs human-tui vs pane-direct provenance ---
+
+    def test_gatekeeper_approve_sets_gatekeeper_approver(self):
+        # INV-AP-1: the fail-closed default (gatekeeper LLM) records
+        # approver="gatekeeper" — accurate, least-privileged provenance.
+        esc_id = enqueue_pending_escalation(
+            pane_id="w1D:gk1",
+            raw_command="make build",
+            safety_reason="Complex build",
+            decision_layer="COMPLEXITY_TAX",
+            agent_kind="opencode",
+        )
+        record_adjudication(
+            escalation_id=esc_id, pane_id="w1D:gk1", agent_kind="opencode",
+            action="APPROVE", feedback="ok",
+        )
+        row = self._get_row(esc_id)
+        self.assertEqual(row["resolution"], "APPROVED")
+        self.assertEqual(row["approver"], "gatekeeper")
+
+    def test_gatekeeper_approve_does_not_seed_novelty(self):
+        # INV-AP-2: the gatekeeper LLM's approve must NOT seed the novelty gate.
+        pane_id = "w1D:gk2"
+        raw_cmd = "make build"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=raw_cmd, safety_reason="cx",
+            decision_layer="COMPLEXITY_TAX", agent_kind="opencode",
+        )
+        record_adjudication(
+            escalation_id=esc_id, pane_id=pane_id, agent_kind="opencode",
+            action="APPROVE", feedback="ok",
+        )
+        self.assertFalse(
+            has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id),
+            "gatekeeper approve must not seed the novelty gate",
+        )
+
+    def test_gatekeeper_approve_does_not_promote_workspace(self):
+        # INV-AP-3: the gatekeeper LLM's approve must NOT auto-promote; only an
+        # explicit human adjudication (approver="human-tui") may promote.
+        pane_id = "w1D:gk3"
+        raw_cmd = "make build"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=raw_cmd, safety_reason="cx",
+            decision_layer="COMPLEXITY_TAX", agent_kind="opencode", cwd="/tmp",
+        )
+        with patch("core.guard_db._maybe_promote_workspace_rule") as mock_promote:
+            record_adjudication(
+                escalation_id=esc_id, pane_id=pane_id, agent_kind="opencode",
+                action="APPROVE", feedback="ok",
+            )
+        mock_promote.assert_not_called()
+
+        esc_id2 = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command="make clean", safety_reason="cx",
+            decision_layer="COMPLEXITY_TAX", agent_kind="opencode", cwd="/tmp",
+        )
+        with patch("core.guard_db._maybe_promote_workspace_rule") as mock_promote:
+            record_adjudication(
+                escalation_id=esc_id2, pane_id=pane_id, agent_kind="opencode",
+                action="APPROVE", feedback="ok", approver="human-tui",
+            )
+        mock_promote.assert_called_once()
+
+    def test_human_tui_approve_seeds_novelty_and_promotes(self):
+        # INV-AP-2/3: explicit human adjudication seeds the novelty gate AND
+        # invokes the workspace promotion hook.
+        pane_id = "w1D:ht1"
+        raw_cmd = "make build"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=raw_cmd, safety_reason="cx",
+            decision_layer="COMPLEXITY_TAX", agent_kind="opencode", cwd="/tmp",
+        )
+        with patch("core.guard_db._maybe_promote_workspace_rule") as mock_promote:
+            record_adjudication(
+                escalation_id=esc_id, pane_id=pane_id, agent_kind="opencode",
+                action="APPROVE", feedback="ok", approver="human-tui",
+            )
+        self.assertTrue(
+            has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id),
+            "human-tui approve must seed the novelty gate",
+        )
+        mock_promote.assert_called_once()
+
+    def test_pane_direct_does_not_seed_or_promote(self):
+        # INV-AP-6: pane-direct auto-eviction stamps APPROVED provenance but
+        # grants NO trust — never seeds novelty, never promotes.
+        pane_id = "w1D:pd1"
+        raw_cmd = "make build"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=raw_cmd, safety_reason="cx",
+            decision_layer="COMPLEXITY_TAX", agent_kind="opencode", cwd="/tmp",
+        )
+        with patch("core.guard_db._maybe_promote_workspace_rule") as mock_promote:
+            resolve_escalation(
+                pane_id=pane_id, escalation_id=esc_id, resolution_status="RESOLVED",
+                approver="pane-direct", resolution="APPROVED",
+            )
+        row = self._get_row(esc_id)
+        self.assertEqual(row["status"], "RESOLVED")
+        self.assertEqual(row["resolution"], "APPROVED")
+        self.assertEqual(row["approver"], "pane-direct")
+        self.assertFalse(
+            has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id),
+            "pane-direct must not seed the novelty gate",
+        )
+        mock_promote.assert_not_called()
+
+    def test_reject_never_seeds_regardless_of_approver(self):
+        # REJECT never seeds the gate — even for an explicit human approver.
+        pane_id = "w1D:rj1"
+        raw_cmd = "make build"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=raw_cmd, safety_reason="cx",
+            decision_layer="COMPLEXITY_TAX", agent_kind="opencode",
+        )
+        record_adjudication(
+            escalation_id=esc_id, pane_id=pane_id, agent_kind="opencode",
+            action="REJECT", feedback="no", approver="human-tui",
+        )
+        self.assertFalse(
+            has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id),
+            "reject must never seed the novelty gate",
+        )
 
 
 if __name__ == "__main__":

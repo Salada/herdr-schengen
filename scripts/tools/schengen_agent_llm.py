@@ -376,7 +376,7 @@ def approve_batch_escalations(feedback: str = "Approved in batch via TUI") -> Di
             is_approval=True,
             approver="human-tui",
         )
-        record_adjudication(esc_id, pane, kind, "APPROVE", safe_feedback)
+        record_adjudication(esc_id, pane, kind, "APPROVE", safe_feedback, approver="human-tui")
         resolved.append(esc_id)
     return {"status": "ok", "resolved": resolved, "deferred": deferred}
 
@@ -407,8 +407,10 @@ def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dic
                 if send_instruction and safe_feedback:
                     subprocess.run(["herdr", "pane", "send-text", pane, f"# [SECURITY GATEKEEPER]: {safe_feedback}"], capture_output=True, timeout=5.0)
                     subprocess.run(["herdr", "pane", "send-keys", pane, "enter"], capture_output=True, timeout=5.0)
-            resolve_escalation(pane_id=pane, escalation_id=esc_id, resolution_status="CANCELLED")
-            record_adjudication(esc_id, pane, kind, "REJECT", safe_feedback)
+            resolve_escalation(
+                pane_id=pane, escalation_id=esc_id, resolution_status="CANCELLED", approver="human-tui"
+            )
+            record_adjudication(esc_id, pane, kind, "REJECT", safe_feedback, approver="human-tui")
             resolved.append(esc_id)
         except Exception:
             deferred.append(esc_id)
@@ -521,8 +523,11 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                 }, ensure_ascii=False)
 
             # Only a VERIFIED injection success records the adjudication (FIX 1).
+            # INV-AP-1/2/3: the gatekeeper LLM's approve records provenance as
+            # "gatekeeper" (least-privileged) — it never seeds the novelty gate
+            # and never auto-promotes workspace rules.
             resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
-            record_adjudication(esc_id, target_pane, agent_kind, "APPROVE", feedback)
+            record_adjudication(esc_id, target_pane, agent_kind, "APPROVE", feedback, approver="gatekeeper")
 
             if send_instruction and feedback:
                 subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
@@ -557,7 +562,7 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             target_pane = esc_row.get("pane_id") if esc_row else ""
 
             resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="CANCELLED")
-            record_adjudication(esc_id, target_pane, "", "REJECT", feedback)
+            record_adjudication(esc_id, target_pane, "", "REJECT", feedback, approver="gatekeeper")
 
             cfg = get_instruction_delivery_config()
             send_instruction = bool(cfg.get("send_reject_instruction", True))

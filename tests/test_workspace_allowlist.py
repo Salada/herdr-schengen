@@ -141,7 +141,7 @@ class TestWorkspaceAllowlist(unittest.TestCase):
         self.assertFalse(self.policy_path.exists())
         record_adjudication(
             escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
-            action="APPROVE", feedback="ok", origin="A",
+            action="APPROVE", feedback="ok", origin="A", approver="human-tui",
         )
         self.assertTrue(self.policy_path.exists(), "auto-promotion must write the policy file")
         policy = load_policy(self.policy_path)
@@ -191,7 +191,7 @@ class TestWorkspaceAllowlist(unittest.TestCase):
         )
         record_adjudication(
             escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
-            action="APPROVE", feedback="ok", origin="A",
+            action="APPROVE", feedback="ok", origin="A", approver="human-tui",
         )
         # denylist on raw text refuses -> no policy file is created
         self.assertFalse(self.policy_path.exists(), "sensitive exec command must not promote")
@@ -210,7 +210,7 @@ class TestWorkspaceAllowlist(unittest.TestCase):
         )
         record_adjudication(
             escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
-            action="APPROVE", feedback="ok", origin="A",
+            action="APPROVE", feedback="ok", origin="A", approver="human-tui",
         )
         self.assertTrue(self.policy_path.exists(), "pathless exec command should promote")
         policy = load_policy(self.policy_path)
@@ -289,7 +289,7 @@ class TestWorkspaceAllowlist(unittest.TestCase):
         # human approve passes origin="A" but the escalation row says "I"
         record_adjudication(
             escalation_id=esc_id, pane_id=pane, agent_kind="opencode",
-            action="APPROVE", feedback="ok", origin="A",
+            action="APPROVE", feedback="ok", origin="A", approver="human-tui",
         )
         self.assertFalse(self.policy_path.exists(), "INJECTED-origin escalation must not promote")
 

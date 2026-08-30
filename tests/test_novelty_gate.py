@@ -123,7 +123,7 @@ class TestNoveltyGate(unittest.TestCase):
             decision_layer="NOT_ALLOWLISTED",
             agent_kind="agy",
         )
-        record_adjudication(escalation_id=esc_id, pane_id=pane_id, agent_kind="agy", action="APPROVE", feedback="ok")
+        record_adjudication(escalation_id=esc_id, pane_id=pane_id, agent_kind="agy", action="APPROVE", feedback="ok", approver="human-tui")
         self.assertTrue(has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id))
 
     def test_adjudication_reject_does_not_seed_gate(self):
@@ -136,7 +136,7 @@ class TestNoveltyGate(unittest.TestCase):
             decision_layer="NOT_ALLOWLISTED",
             agent_kind="agy",
         )
-        record_adjudication(escalation_id=esc_id, pane_id=pane_id, agent_kind="agy", action="REJECT", feedback="no")
+        record_adjudication(escalation_id=esc_id, pane_id=pane_id, agent_kind="agy", action="REJECT", feedback="no", approver="human-tui")
         self.assertFalse(has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id))
 
     # --- TTL expiry ---

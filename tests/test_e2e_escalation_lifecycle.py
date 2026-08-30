@@ -210,7 +210,7 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
         esc_id = cur.lastrowid
         conn.commit()
         conn.close()
-        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved. Safe.")
+        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved. Safe.", approver="human-tui")
 
         adj = guard_db.get_adjudications_for_audit("w1D:p1", "rm -rf /tmp/x")
         self.assertEqual(len(adj), 1)
@@ -222,7 +222,7 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
         self.assertEqual(guard_db.get_adjudications_for_audit("w1D:p1", "echo hello"), [])
 
     def test_record_adjudication_inserts_row(self):
-        guard_db.record_adjudication(123, "w1D:p1", "opencode", "APPROVE", "Approved. Safe.")
+        guard_db.record_adjudication(123, "w1D:p1", "opencode", "APPROVE", "Approved. Safe.", approver="human-tui")
         conn = guard_db.get_db_connection()
         rows = conn.execute("SELECT id, escalation_id, pane_id, action, feedback FROM adjudication_log").fetchall()
         self.assertEqual(len(rows), 1)
@@ -236,7 +236,7 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
             "w1D:p1", "rm -rf /tmp/x", "destructive", "GRAY_ZONE", agent_kind="opencode"
         )
         self.assertIsNone(guard_db.get_escalation_resolution("w1D:p1", "rm -rf /tmp/x"))
-        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved.")
+        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved.", approver="human-tui")
         self.assertEqual(guard_db.get_escalation_resolution("w1D:p1", "rm -rf /tmp/x"), "APPROVED")
 
     def test_question_escalation_roundtrip(self):
@@ -272,7 +272,7 @@ class TestInstructionDeliveryConfig(unittest.TestCase):
         esc_id = guard_db.enqueue_pending_escalation(
             "w1D:p1", "rm -rf /tmp/x", "destructive", "GRAY_ZONE", agent_kind="opencode"
         )
-        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved.")
+        guard_db.record_adjudication(esc_id, "w1D:p1", "opencode", "APPROVE", "Approved.", approver="human-tui")
         logs = guard_db.get_recent_audit_logs(limit=5)
         matching = [l for l in logs if l["raw_command"] == "rm -rf /tmp/x"]
         self.assertTrue(matching)

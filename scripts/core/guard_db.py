@@ -1060,17 +1060,18 @@ def record_adjudication(
     action: str,
     feedback: str,
     origin: str = "A",
+    approver: str = "gatekeeper",
 ) -> None:
     """Persist an approve/deny adjudication and its instruction for auditability.
 
-    A human APPROVE also seeds the novelty gate (INV-3): the escalation's canonical
-    pattern is recorded with a TTL so subsequent identical commands (same pane scope)
-    auto-approve via the HUMAN_APPROVED fast path instead of re-escalating.
-    REJECT never seeds the gate.
-
-    issue #7207: on APPROVE with a human/gatekeeper approver and AGENT/HUMAN
-    origin, the workspace .schengen/ allowlist auto-promotion hook runs
-    (skipped when no policy exists or the INV-WS-2 denylist re-assertion refuses).
+    The ``approver`` provenance is OVERWRITTEN (authoritative final
+    disposition), NOT COALESCE'd. The fail-closed default is ``gatekeeper``
+    (the gatekeeper LLM) — the LEAST-privileged provenance: it records the
+    disposition but NEVER seeds the novelty gate and NEVER auto-promotes
+    workspace .schengen/ rules (INV-AP-2/3). Only an EXPLICIT human
+    adjudication passes ``approver="human-tui"``, which seeds the novelty gate
+    (INV-3) and may auto-promote (issue #7207, human/gatekeeper + AGENT/HUMAN
+    origin only). REJECT never seeds the gate regardless of approver.
     """
     init_db()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1089,8 +1090,8 @@ def record_adjudication(
         )
         if escalation_id:
             conn.execute(
-                "UPDATE pending_escalations SET resolution = ?, approver = 'human-tui' WHERE id = ?",
-                (resolution, escalation_id),
+                "UPDATE pending_escalations SET resolution = ?, approver = ? WHERE id = ?",
+                (resolution, approver, escalation_id),
             )
             row = conn.execute(
                 "SELECT raw_command, cwd, decision_layer, origin FROM pending_escalations WHERE id = ?", (escalation_id,)
@@ -1102,12 +1103,16 @@ def record_adjudication(
                 esc_origin = row["origin"]
         conn.commit()
 
-    if action == "APPROVE" and raw_command:
+    # INV-AP-2/3: ONLY an explicit human adjudication (approver="human-tui")
+    # seeds the novelty gate or auto-promotes workspace rules. The gatekeeper
+    # LLM's approve records provenance but grants NO trust.
+    if action == "APPROVE" and raw_command and approver == "human-tui":
         record_human_approval_pattern(normalize_command(raw_command), scope=pane_id)
-        # issue #7207: workspace allowlist auto-promotion (human/gatekeeper
-        # approval, AGENT/HUMAN origin only; fail-safe — never breaks adjudication).
-        # Fix 4: the escalation row's intercepted origin is authoritative —
-        # INJECTED/EMERGENT never promote even on a human approve.
+        # issue #7207: workspace allowlist auto-promotion (explicit human
+        # approval, AGENT/HUMAN origin only; fail-safe — never breaks
+        # adjudication). Fix 4: the escalation row's intercepted origin is
+        # authoritative — INJECTED/EMERGENT never promote even on a human
+        # approve.
         effective_origin = (esc_origin or origin or "A")
         try:
             _maybe_promote_workspace_rule(
@@ -1118,6 +1123,7 @@ def record_adjudication(
                 decision_layer=esc_layer,
                 cwd=esc_cwd,
                 origin=effective_origin,
+                approver=approver,
                 now_iso=now_iso,
             )
         except Exception:
@@ -1159,14 +1165,16 @@ def _maybe_promote_workspace_rule(
     decision_layer: Optional[str],
     cwd: Optional[str],
     origin: str,
+    approver: str,
     now_iso: str,
 ) -> None:
     """Auto-promote an approved escalation into the workspace .schengen/ allowlist.
 
-    Only human-tui/gatekeeper approvals with AGENT/HUMAN origin promote (the
-    approver is set to 'human-tui' by record_adjudication itself). Skips when:
-    no workspace policy, unparseable rule, or the INV-WS-2 denylist re-assertion
-    (inside promote_rule) refuses. Records a REPO_LOCAL audit row on success.
+    INV-AP-3: only EXPLICIT human adjudication (approver="human-tui") may
+    promote — the gatekeeper LLM's approve grants no trust. Only AGENT/HUMAN
+    origins promote (INV-WS-3 / INV-AP-4). Skips when: no workspace policy,
+    unparseable rule, or the INV-WS-2 denylist re-assertion (inside
+    promote_rule) refuses. Records a REPO_LOCAL audit row on success.
     """
     import os as _os
     import uuid as _uuid
@@ -1174,7 +1182,7 @@ def _maybe_promote_workspace_rule(
     from core.workspace_allowlist import discover_workspace_policy, promote_rule
 
     if origin not in ("A", "H"):
-        return  # INV-WS-3: INJECTED/EMERGENT never promote
+        return  # INV-WS-3/INV-AP-4: INJECTED/EMERGENT never promote
     if not cwd:
         return
     rule_base = _derive_workspace_rule(raw_command, decision_layer)
@@ -1189,7 +1197,7 @@ def _maybe_promote_workspace_rule(
         "match_type": rule_base["match_type"],
         "pattern": rule_base["pattern"],
         "agent_scope": ["*"],
-        "created_by": "human-tui",
+        "created_by": approver,
         "created_at": now_iso,
         "reason": f"Auto-promoted from {decision_layer or 'unknown'} approval (escalation #{escalation_id})",
     }
