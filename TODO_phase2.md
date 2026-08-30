@@ -1,17 +1,16 @@
 ## Handoff — Next Pick (맥락 보존 우선순위)
 > 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
 > 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
+> **🎉 Epic Fail-closed 편향 전환 M1~M7 마일스톤 전면 완료 (PR #126~PR #144)**
 
-1. [Epic 잔여 — 유일한 최종 마일스톤] Fail-closed 편향 전환 M7 (Anti-Fatigue 배치 집계 & One-Key Approve, INV-13)
-   - M1~M6 완료 (M1 AST, M2 Novelty, M3 Complexity Tax, M4 Package, M5 Origin Weighting, M6 Cloud Judge Confidence).
-   - 맥락: INV-13 anti-fatigue(배치 집계 + scope+TTL 캐싱 + one-key approve)는 피로도 경감의 핵심 축.
-2. [Architecture — 고마찰 감소] Workspace별 `.schengen/` 영속 Allowlist & 기계적 자동승인 프로모션(#7207) + Persistent CUD(#91)
-   - 맥락: fail-closed allowlist(fast-track closed enum) + `.schengen/allowlist.json` + TUI /allow /revoke + INV-WS-1..2.
-3. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
+1. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
    - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
-4. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction / M6 cloud-judge / #2555 redirect
-   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, cloud_judge cache-key.
-5. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), UX 상태전이, 카피라이팅, 설정 모달 등.
+2. [피어리뷰 후속 종합] #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207
+   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, M7 raw목록/reject-flow, #7207 신뢰스토어 검증.
+3. [Architecture] Persistent Allowlist CUD(#91)
+   - 맥락: fail-closed allowlist(fast-track closed enum) + TUI /allow /revoke + INV-PL-1..3.
+4. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), UX 상태전이, 카피라이팅, 설정 모달 등.
+
 
 
 
@@ -121,6 +120,18 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   1) fd-redirect 스트립 대칭화: `2>&1` 외 `1>&2`, `&>` 미커버 갭 해소.
   2) 공백 포함 엣지케이스: `2 >&1` 등 스페이스 포함 시 미스트립(over-block) 방어.
 
+[] [Refactor/AntiFatigue] Anti-Fatigue 배치 집계 및 동의 품질 개선 4종 (M7 피어리뷰 후속):
+  1) 배치 배너 raw 명령 목록 표시: quoted string/path 축약 패턴 대신 실제 raw 명령 목록을 표시하여 사용자 동의 품질 개선.
+  2) 실패-inject 경로 회귀 테스트 추가: 키 주입 실패 시의 롤백 및 에러 핸들링 단위테스트 작성.
+  3) Novelty `cwd` 차원 제거 트레이드오프 문서화: 스코프가 pane-only로 확장됨에 따른 영향 정리.
+  4) `reject_batch` OpenCode 거절 플로우 연계: bare escape 대신 에이전트별 reject 프로토콜 연동.
+
+[] [Refactor/WorkspacePolicy] Workspace `.schengen/` 정책 신뢰스토어 검증 3종 (#7207 피어리뷰 후속):
+  1) INV-WS-3 Origin 게이트 연동: watcher의 INJECTED/EMERGENT origin 생산 연동.
+  2) 신뢰 스토어 agent-writable 방어: read-time 위치 파생 `workspace_root` 검증으로 에이전트의 임의 룰 변조 차단.
+  3) 경로 포함 exec 프로모션 차단 명문화: 절대경로 거부 동작 문서화.
+
+
 
 
 
@@ -172,10 +183,10 @@ Epic:
    - npm install(무패키지)·pip install -r/-e .·--cask 네임스페이스 충돌·multi-package·brew bundle·npm ci·
      버전 문법(@latest/^/>=)·sudo-prefixed install(스트립 금지)·brew update/cleanup·npm audit vs audit fix·
      미등록 매니저(yarn/pnpm/bun/nix/go install)·READ 쿼리 네트워크(brew search/npm view) 라우팅.
-    [milestone 순서]
-     1) [x] narrow AST + catch-all 제거 (PR #126) 2) [x] novelty/history gate + scope/TTL (PR #128) 3) [x] complexity (PR #139)
-     4) [x] package manager (PR #131) 5) [x] origin weighting (PR #140) 6) [x] cloud judge confidence (PR #143)
-    7) [ ] anti-fatigue batch 집계 (INV-13 잔여, 2b)
+     [milestone 순서]
+      1) [x] narrow AST + catch-all 제거 (PR #126) 2) [x] novelty/history gate + scope/TTL (PR #128) 3) [x] complexity (PR #139)
+      4) [x] package manager (PR #131) 5) [x] origin weighting (PR #140) 6) [x] cloud judge confidence (PR #143)
+      7) [x] anti-fatigue batch 집계 + one-key approve + novelty cwd fix (PR #144 완료 — M1~M7 전면 완결)
 
 
 TASKS:
@@ -232,7 +243,8 @@ Idea / Research:
         - `audit_logs` 테이블에 `scope_context` 컬럼 추가 (또는 `mechanism` 컬럼 값 표준화: `fast-track:global`, `session-memory:pane_id`, `allowlist:repo`).
         - TUI Audit Table 및 Detail Modal에 스코프 태그/배지 노출 (예: `[🤖 AUTO: Session]` vs `[🤖 AUTO: Global]`).
 
-[] [Task/Architecture] Workspace별 `.schengen/` 기반 영속 Allowlist & 승인 후 기계적 지속 자동승인(Auto-Promotion) 체계 구축 (사례: #7207 access_directory):
+[x] [Task/Architecture] Workspace별 `.schengen/` 기반 영속 Allowlist & 승인 후 기계적 지속 자동승인(Auto-Promotion) 체계 구축 (PR #145 완료):
+
    - Context & Problem (사례: #7207 `access_directory /path/to/worktree` 등):
      - 워크스페이스 외부 경로(worktree, 공유 디렉터리, 라이브러리) 접근이나 반복 명령에 대해, 1회 승인된 이후에도 세션이 바뀌거나 캐시가 만료되면 다시 에스컬레이션되는 비효율 발생.
    - Solution & Architecture Design:
