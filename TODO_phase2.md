@@ -54,8 +54,16 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
       2) `schengen_tui.py`: `pre-render slot validation`에서 `is_question` 예외를 제거하고, `adapter.dialog_is_live(pane_text) == False`일 때 즉시 큐에서 자동 퇴출(Silent Eviction)하여 상단 배너 고착 해소.
 
 
+[] [Bug/Eviction] AGY 다이얼로그 오판으로 인한 조기 Auto-Eviction(가짜 pane-direct 승인) 버그 (사례: #7771 / #2868):
+  - 현상 및 원인 (사례: Audit #7771 / Escalation #2868 AGY Git 커밋 명령 등):
+    • AGY Pane(`w1D:p5X`)에서 명령이 실제로 승인되지 않고 권한 모달에서 대기 중이었음에도, TUI와 데몬이 이를 `APPROVED (pane-direct)`로 오판하여 배너와 큐를 강제 소멸시킴. 이로 인해 TUI에는 승인 완료된 것처럼 보이지만 실제 Pane은 여전히 차단 대기 상태로 고착되는 심각한 상태 불일치 발생.
+    • 근본 원인:
+      1) `agy.py`의 `dialog_is_live()` 검사 앵커 불완전: AGY 표준 권한 요청 프레임(`Do you want to proceed?`, `1. Yes`, `Requesting permission for:`, `Allow creation of this file?`) 등이 `dialog_is_live` tail 앵커(`esc Skip`, `>\s*\d+\.`) 매칭에 실패하여 실제 다이얼로그가 떠 있음에도 `False`를 반환.
+      2) TUI Pre-render Slot Validation의 과격한 즉시 승인: `dialog_is_live`가 `False`를 1회 반환하는 순간, 사용자가 Pane에서 직접 승인한 것으로 단정하고 즉시 `resolve_escalation(..., resolution="APPROVED", approver="pane-direct")`을 호출함.
+  - 해결 방안:
+    1) `agy.py`의 `dialog_is_live()` 앵커 전면 보강: `Do you want to proceed?`, `Requesting permission for:`, `1. Yes`, `Accept this file edit?`, `Allow creation` 등 AGY 전체 다이얼로그 패턴을 누락 없이 포함.
+    2) Eviction 판정 가드 강화: 단순 liveness 1회 실패로 즉시 `APPROVED` 처리하지 않고, 에이전트의 실제 상태 전이(`blocked` -> `working/idle`)를 확인하거나 연속 n회 불일치(debounce) 확인 후 퇴출하도록 방어.
 
-[] [Refactor/Adapter] `footer_is_live` 공용 유틸 안정화 및 엣지케이스 대응 3종 (#17 피어리뷰 후속):
 
   1) tail window 동적/유연화: `tail_lines=8` 고정값으로 인해 긴 다이얼로그/스피너/줄바꿈 발생 시 실제 live 다이얼로그를 stale로 오판(over-block)하는 갭 해소 (가변 window 또는 footer 역방향 탐색 검토).
   2) marker 잔류 오인식 방지: 종료된 다이얼로그의 footer marker가 8줄 뷰포트에 잔류할 때 여전히 live 상태로 오판하는 이슈 방지 정밀화.
