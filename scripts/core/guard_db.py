@@ -880,6 +880,37 @@ def set_complexity_tax_config(enabled=None, threshold=None, mode=None) -> dict[s
     return get_complexity_tax_config()
 
 
+_ORIGIN_WEIGHTING_DEFAULTS = {"origin_weighting_enabled": True}
+
+
+def get_origin_weighting_config() -> dict[str, bool]:
+    """M5 origin-weighting toggle. Controls ONLY the HUMAN trust concession
+    (skip complexity tax). The INJECTED/EMERGENT hard-escalate is unconditional
+    and NOT gated by this knob."""
+    init_db()
+    cfg = dict(_ORIGIN_WEIGHTING_DEFAULTS)
+    with get_db_connection() as conn:
+        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
+            if row["key"] == "origin_weighting_enabled":
+                cfg["origin_weighting_enabled"] = _parse_bool(row["value"])
+    return cfg
+
+
+def set_origin_weighting_config(enabled: Optional[bool] = None) -> dict[str, bool]:
+    """Human-only write path; mirror set_channel_approve_config upsert."""
+    init_db()
+    if enabled is not None:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("origin_weighting_enabled", "true" if _parse_bool(enabled) else "false", now_iso),
+            )
+            conn.commit()
+    return get_origin_weighting_config()
+
+
 def record_adjudication(
     escalation_id: int,
     pane_id: str,

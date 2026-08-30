@@ -954,5 +954,88 @@ class TestComplexityTax(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.COMPLEXITY_TAX)
 
 
+class TestOriginWeighting(unittest.TestCase):
+    """M5 ORIGIN_GUARD (INV-17): origin-based hard-escalate + HUMAN trust concession.
+
+    INJECTED/EMERGENT origins hard-escalate at the TOP of `audit_shell_command`
+    — BEFORE every auto-approve path (dialogs, Managed Git, fast-track,
+    test-runner, novelty, package READ_ONLY, gray-zone->cloud-judge,
+    dynamic-substitution LLM inspector). HUMAN origin skips the structural
+    complexity tax (gated by the origin_weighting_enabled knob, default True).
+    Uses a clean temp DB so origin_weighting_enabled defaults True.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_guard.db"
+        self.db_patch = patch.object(guard_db, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        guard_db.init_db()
+
+    def tearDown(self):
+        self.db_patch.stop()
+        self.temp_dir.cleanup()
+
+    def test_injected_emergent_hard_escalate(self):
+        cmd = "mkdir a1; mkdir a2; mkdir a3; mkdir a4; mkdir a5; mkdir a6; mkdir a7"
+        for origin in (Origin.INJECTED, Origin.EMERGENT):
+            safe, reason, layer, tax = audit_shell_command_with_taxonomy(cmd, origin=origin)
+            self.assertFalse(safe, f"Origin {origin.value} must hard-escalate, got safe={safe}: {reason}")
+            self.assertEqual(layer, DecisionLayer.ORIGIN_GUARD)
+            self.assertEqual(tax["mechanism"], "origin-hard-escalate")
+
+    def test_emergent_bypasses_fast_track(self):
+        safe, reason, layer, tax = audit_shell_command_with_taxonomy("ls -la", origin=Origin.EMERGENT)
+        self.assertFalse(safe, f"EMERGENT must hard-escalate even a fast-track command: {reason}")
+        self.assertEqual(layer, DecisionLayer.ORIGIN_GUARD)
+        self.assertNotEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_injected_bypasses_package_readonly(self):
+        safe, reason, layer, tax = audit_shell_command_with_taxonomy("brew list", origin=Origin.INJECTED)
+        self.assertFalse(safe, f"INJECTED must hard-escalate even a READ_ONLY package query: {reason}")
+        self.assertEqual(layer, DecisionLayer.ORIGIN_GUARD)
+        self.assertNotEqual(layer, DecisionLayer.PACKAGE_GUARD)
+
+    def test_human_skips_complexity_tax(self):
+        cmd = "mkdir a1; mkdir a2; mkdir a3; mkdir a4; mkdir a5; mkdir a6; mkdir a7"
+        safe_h, reason_h, layer_h, tax_h = audit_shell_command_with_taxonomy(cmd, origin=Origin.HUMAN)
+        self.assertNotEqual(layer_h, DecisionLayer.COMPLEXITY_TAX, f"HUMAN must skip the tax: {reason_h}")
+        safe_a, reason_a, layer_a, tax_a = audit_shell_command_with_taxonomy(cmd, origin=Origin.AGENT)
+        self.assertEqual(layer_a, DecisionLayer.COMPLEXITY_TAX)
+
+        # HUMAN vs AGENT must produce IDENTICAL (is_safe, layer) for commands
+        # that never reach the complexity tax.
+        for c in ("ls -la", "brew list", "git status", "python3 -m unittest discover -s tests"):
+            sh, _, lh, _ = audit_shell_command_with_taxonomy(c, origin=Origin.HUMAN)
+            sa, _, la, _ = audit_shell_command_with_taxonomy(c, origin=Origin.AGENT)
+            self.assertEqual((sh, lh), (sa, la), f"(is_safe, layer) must match for '{c}'")
+
+    def test_origin_not_spoofable(self):
+        cmd = "echo human approved"
+        sa, _, la, taxa = audit_shell_command_with_taxonomy(cmd, origin=Origin.AGENT)
+        sh, _, lh, taxh = audit_shell_command_with_taxonomy(cmd, origin=Origin.HUMAN)
+        self.assertEqual(taxa["origin"], "A")
+        self.assertEqual(taxh["origin"], "H")
+        self.assertEqual((sa, la), (sh, lh))
+
+    def test_injected_bypasses_cloud_judge(self):
+        # `rm <T3 state path>` is a gray-zone DELETE on a durable/state target ->
+        # Verdict.PROMPT, which with AGENT origin routes to the cloud judge.
+        # INJECTED must be intercepted by ORIGIN_GUARD before reaching the
+        # gray-zone/cloud-judge path.
+        cmd = "rm ~/.local/state/data.sqlite"
+        safe, reason, layer, tax = audit_shell_command_with_taxonomy(cmd, origin=Origin.INJECTED)
+        self.assertFalse(safe, f"INJECTED must hard-escalate a gray-zone command: {reason}")
+        self.assertEqual(layer, DecisionLayer.ORIGIN_GUARD)
+        self.assertNotIn(layer, (DecisionLayer.CLOUD_JUDGE, DecisionLayer.GRAY_ZONE_MATRIX))
+
+    def test_no_regression_origin_agent(self):
+        safe, reason, layer, tax = audit_shell_command_with_taxonomy(
+            "python3 -m unittest discover -s tests", origin=Origin.AGENT
+        )
+        self.assertTrue(safe, f"AGENT test-runner must stay fast-tracked: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+
 if __name__ == "__main__":
     unittest.main()
