@@ -962,6 +962,9 @@ _FORENSIC_NETWORK_BIN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Issue #6935: sed in-place write-back flags (must never fast-track)
+_SED_INPLACE_RE = re.compile(r"(^|\s)(-i|--in-place)(\s|$)")
+
 # INV-5: explicit closed enumeration of provably-benign read-only commands
 FAST_TRACK_SAFE_COMMANDS = {
     "pwd", "echo", "date", "uname", "whoami", "id", "env", "printenv",
@@ -1089,10 +1092,37 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
         if _BROAD_WILDCARD_RE.search(cmd_str):
             return False
         return True
+
+    # Standalone read-only sed (issue #6935): `sed -n '<addr>p' <file>`
+    if cmd_str.startswith("sed "):
+        return _is_standalone_readonly_sed(cmd_str)
+
     tokens = cmd_str.split()
     if not tokens or tokens[0] not in FAST_TRACK_SAFE_COMMANDS:
         return False
     # INV-SENS-2: single-command broad/root-level or sensitive targets -> fail-closed
+    if SENSITIVE_FILE_PATTERN.search(cmd_str) or SENSITIVE_DIRECTORY_PATTERN.search(cmd_str):
+        return False
+    if _BROAD_WILDCARD_RE.search(cmd_str):
+        return False
+    return True
+
+
+def _is_standalone_readonly_sed(cmd_str: str) -> bool:
+    """Standalone read-only `sed -n '<addr>p' <file>` (issue #6935).
+
+    `sed -n` prints selected lines to STDOUT only; the ONLY mutating forms are
+    `-i`/`--in-place` (in-place write-back) and the `w <file>` write command,
+    both hard-rejected. INV-SENS-1/2: sensitive targets and broad/root wildcards
+    fail closed. Redirection/command-substitution are already hard-rejected by
+    the caller (_is_fast_track_allowlisted) before this runs.
+    """
+    if not re.match(r"^sed\s+-n\b", cmd_str):
+        return False
+    if _SED_INPLACE_RE.search(cmd_str):
+        return False
+    if re.search(r"(^|[\s;|&])w\s+[^\s;|&]", cmd_str):
+        return False  # sed `w <file>` write command
     if SENSITIVE_FILE_PATTERN.search(cmd_str) or SENSITIVE_DIRECTORY_PATTERN.search(cmd_str):
         return False
     if _BROAD_WILDCARD_RE.search(cmd_str):

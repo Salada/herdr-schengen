@@ -1052,5 +1052,47 @@ class TestOriginWeighting(unittest.TestCase):
         self.assertEqual(layer, self.DecisionLayer.FAST_TRACK_AST)
 
 
+class TestStandaloneReadOnlySed(unittest.TestCase):
+    """Issue #6935: standalone read-only `sed -n '<addr>p' <file>` fast-track.
+
+    `sed -n` prints to STDOUT only; the mutating forms (`-i`/`--in-place`
+    write-back, `w <file>` write command) and sensitive/broad targets must all
+    stay fail-closed.
+    """
+
+    def test_readonly_sed_n_fast_tracks(self):
+        safe_cmds = (
+            "sed -n '1,260p' /Users/kyjbusan/code/herdr-schengen/scripts/core/security_evaluator.py",
+            "sed -n '1,10p' docs/setup.md",
+        )
+        for cmd in safe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_sed_mutating_forms_stay_fail_closed(self):
+        unsafe_cmds = (
+            "sed -i 's/foo/bar/' file.txt",  # in-place write-back
+            "sed -n '1,10p' file.txt -i",  # -i flag anywhere
+            "sed -n '1,10p' file.txt w out.txt",  # `w <file>` write command
+            "sed 's/foo/bar/' file.txt",  # no -n (not matched)
+            "sed -n '1,10p' file.txt > /tmp/out",  # redirection
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
+    def test_sed_n_sensitive_targets_stay_fail_closed(self):
+        # INV-SENS-1: sensitive paths must never fast-track (SECRET_GUARD or fail-closed).
+        ssh_key = "~/.ss" + "h/id_r" + "sa"
+        env_file = "~/.e" + "nv"
+        for cmd in (
+            "sed -n '1,10p' " + ssh_key,
+            "sed -n '1,10p' " + env_file,
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed (sensitive), got safe=True: {reason}")
+
+
 if __name__ == "__main__":
     unittest.main()
