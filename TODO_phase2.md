@@ -331,23 +331,31 @@ Idea / Research:
         - TUI Command: `/allow <pattern>`, `/allow-last` (직전 에스컬레이션 등록), `/allow-list` (현재 등록 목록), `/revoke <id>`
         - Gatekeeper Tool Calling: `register_allowlist(pattern, scope, reason)` tool call 지원 및 인간 확인 후 핫 리로드.
 
-[] [Task/Architecture] Inspector 비동기 평가 병렬성(Concurrency 10) 확장 & 인간 승인 순차(Sequential) 단일 큐 분리
-   - Context & User Observation:
-     - [기존 문제점]: 현재 Inspector가 평가를 시작하기만 해도 TUI에 `▶ Escalation Intercepted` 알림/사운드가 발생하여 인간의 작업 흐름을 방해함.
-     - 또한 `schengen_watcher` 메인 루프의 순차 동기 처리로 인해 여러 Pane의 평가가 직렬화(Serialization)되어 지연 병목 발생.
-   - User Expected UX & Design Requirements:
-     1. [Silent Background Inspection]:
-        - 명령 인터셉트 시 즉시 TUI에 알림을 띄우지 않고, 백그라운드에서 최대 10개까지 병렬(`ThreadPoolExecutor(max_workers=10)` / `asyncio.Semaphore(10)`)로 AST/SAST/Cloud Inspector 평가 수행.
-        - 자율 판정 결과 `AUTO_APPROVED` (Fast-Track / Allowlist / Cloud Safe)인 경우, 인간 개입 없이 즉시 승인 키 전송 및 `audit_log` 기록 (사용자 화면 방해 Zero).
-     2. [Sequential Single-Slot Human Adjudication (단일 순차 승인 큐)]:
-        - 오직 Gatekeeper/Inspector가 "자체 판정 불가 / 인간 검토 필수(Gray-Zone / Fail-Closed Denylist / Uncertain)"로 최종 결론 내린 건에 한해서만 인간 승인 대기열(`pending_escalations`)로 이관.
-        - TUI 화면에는 동시에 여러 알림이 난립하지 않고 **오직 1개의 활성 에스컬레이션 메세지/모달만 순차적(FIFO)**으로 노출.
-        - 인간이 현재 노출된 건을 승인/거절 완료하면, 백그라운드 큐/버퍼에 대기 중이던 다음 인간 검토 대상 건이 즉시 화면에 이어서 나타남.
-     3. Invariants & Guardrails:
-        - INV-CONC-1 (Per-Pane In-Flight Lock): 동일 Pane에 대해 중복/경합 평가 방지.
-        - INV-CONC-2 (Silent Autonomous Execution): 자율 승인 가능한 건은 인간 UI(채팅창, 사운드, 모달)에 일체 인터럽트 금지.
-        - INV-CONC-3 (Sequential Screen Slot): 화면 활성 승인 프롬프트는 항상 단일 슬롯(Single Slot) 유지, 후속 건은 버퍼 큐에서 대기.
-        - INV-CONC-4 (Stale Eviction): 인간이 화면에서 승인하기 전 대상 Pane에서 유저가 직접 처리하거나 상태가 해제된 경우 큐에서 자동 제거.
+[] [EPIC/Architecture] Gatekeeper 백그라운드 병렬 평가(Parallel Silent Inspection) & 지연 큐 기반 단일 순차 디스플레이(Single-Slot Deferred UI) 체계 구축
+   - Context & Core Problem:
+     - 현재 다중 에이전트(AGY, OpenCode, Codex 등)가 동시 작업할 때, Watcher 메인 루프가 순차 직렬로 처리되어 다른 Pane의 자율 검사까지 병목 지연이 발생함.
+     - 또한 인간 개입이 불필요한 자율 승인 대상까지 중간 상태가 TUI에 노출되어 작업 흐름을 방해함.
+   - Core Architecture & Feasibility Dimensions:
+     1. [Silent Background Parallel Inspection (무음 병렬 자율 검사)]:
+        - 인간의 명시적 인터랙션이 필요 없는 상태(Gatekeeper/Judge/AST가 자체 판정 가능한 단계)에서는 최대 10개까지 병렬(`ThreadPoolExecutor(max_workers=10)` / 비동기 워커 풀)로 동시 평가 수행.
+        - 자율 검증 통과(`is_safe=True`, `AUTO_APPROVED`) 시, 인간 UI(채팅창, 사운드, 배너)에 일체 인터럽트 없이 즉시 승인 주입 및 감사 기록 완료.
+     2. [Deferred Display Queuing Engine (지연 버퍼링 & 단일 순차 디스플레이)]:
+        - 오직 Gatekeeper가 "자체 판정 불가 / 인간 검토 필수(Fail-Closed / Gray-zone / Denylist)"로 최종 결론 내린 건에 한해서만 인간 대기열(`DeferredHumanQueue`)로 이관.
+        - TUI 화면에는 동시에 여러 알림이 난립하지 않고 **오직 1개의 활성 에스컬레이션(Active Slot)만 순차적(FIFO)**으로 노출.
+        - 활성 슬롯의 건이 승인/거절되면, 지연 큐에서 대기 중이던 다음 건이 TUI 화면에 순차적으로 디스플레이됨.
+     3. [Stale Eviction & Race Condition 방어 (지연 큐 무음 정리)]:
+        - 지연 큐에서 대기 중인 항목이 TUI 화면에 노출되기 전에, 사용자가 대상 Pane에서 직접 처리(y/n)했거나 에이전트 상태가 해제된 경우 화면에 노출하지 않고 큐에서 즉시 무음 제거(Silent Pruning).
+     4. [Invariants & Guardrails]:
+        - INV-CONC-1 (Per-Pane In-Flight Mutex): 동일 Pane에 대한 중복 평가/주입 경합 방지.
+        - INV-CONC-2 (Silent Autonomous Clearance): 자율 승인 완료 건은 UI 방해 제로(0% interruption).
+        - INV-CONC-3 (Single-Slot Screen UI): 화면 프롬프트는 항상 1개 슬롯 유지, 초과분은 내부 지연 큐 버퍼링.
+        - INV-CONC-4 (Pre-Display Liveness Check): 지연 큐에서 화면으로 승격되는 순간 `dialog_is_live` 재검증 후 유효한 건만 렌더링.
+     5. [4단계 구현 마일스톤 로드맵 (Feasibility Plan)]:
+        - M1 (DB & Lock): SQLite WAL 모드 + Thread-safe 커넥션 풀 + `_in_flight_panes` Lock.
+        - M2 (Watcher Worker): `ThreadPoolExecutor` 기반 백그라운드 Silent Inspection & Auto-Approval.
+        - M3 (TUI Scheduler): `DeferredHumanQueue` FIFO 스케줄러 & 단일 슬롯 상태 전이.
+        - M4 (Stale Purge): 화면 노출 직전 Pre-Display Liveness 검증 및 Stale 자동 소멸.
+
 
 [] [Task/UX] TUI 채팅 발화 주체 명확화: 시스템 자동 트리거(System/SmartGate)와 인간 지휘관(Commander/User) 프롬프트 분리
    - Context & Problem:
