@@ -60,6 +60,7 @@ from core.guard_db import (
     resolve_escalation,
 )
 from adapters.herdr_client import get_pane_text
+from adapters.agent_adapters import get_adapter
 from core.redaction import redact_for_cloud
 
 # ── Shared fallback config ──────────────────────────────────────────
@@ -372,7 +373,8 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             esc_row = _get_escalation_row(esc_id) if esc_id > 0 else None
             target_pane = esc_row.get("pane_id") if esc_row else ""
             agent_kind = esc_row.get("agent_kind", "agy") if esc_row else "agy"
-            
+            req_cmd = esc_row.get("raw_command", "") if esc_row else ""
+
             resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
             record_adjudication(esc_id, target_pane, agent_kind, "APPROVE", feedback)
 
@@ -386,8 +388,29 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                     subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
                     subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
                 else:
-                    # Standard Enter Flow (approval keystroke only; instruction is gated)
-                    subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
+                    # Agent-kind-specific approval (issue #23): use the adapter's
+                    # channel approve (opencode permission.reply) then its keystroke
+                    # inject_approval (codex 'y', opencode enter+self-correction),
+                    # NOT a bare enter.
+                    injected = False
+                    inject_reason = ""
+                    adapter = get_adapter(agent_kind)
+                    if adapter is not None:
+                        ch_approved, ch_reason = adapter.channel_approve(target_pane, req_cmd)
+                        if ch_approved:
+                            injected = True
+                        else:
+                            ok, inject_reason = adapter.inject_approval(target_pane, req_cmd)
+                            injected = ok
+                    else:
+                        # no registered adapter: best-effort bare enter (unchanged legacy path)
+                        subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
+                        injected = True
+                    if not injected:
+                        return json.dumps({
+                            "status": "error",
+                            "error": f"approval injection failed ({agent_kind}): {inject_reason or 'no adapter'}",
+                        }, ensure_ascii=False)
                     if send_instruction and feedback:
                         subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
                         subprocess.run(["herdr", "pane", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
