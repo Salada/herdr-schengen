@@ -357,16 +357,23 @@ Idea / Research:
         - M4 (Stale Purge): 화면 노출 직전 Pre-Display Liveness 검증 및 Stale 자동 소멸.
 
 
-[] [Task/UX] TUI 채팅 발화 주체 명확화: 시스템 자동 트리거(System/SmartGate)와 인간 지휘관(Commander/User) 프롬프트 분리
-   - Context & Problem:
-     - 현재 에스컬레이션 발생 시 TUI 내부에서 LLM 조사를 위해 주입하는 합성 프롬프트(`New escalation intercepted...`)가 `👤 You:`로 출력되어, 마치 인간 사용자가 직접 타이핑한 발화처럼 오인되는 UX 혼선 발생.
-   - Solution & Design:
-     1. 발화 주체(Role) 분리:
-        - [인간 입력 (Human Command)]: `21:39:24 👤 Commander:` 또는 `21:39:24 👤 User:` (실제 TUI 인풋 박스에서 엔터로 제출한 경우만)
-        - [시스템 내부 트리거 (System Event)]: `21:39:24 ⚡ [System / SmartGate Trigger]:` 또는 내부 합성 프롬프트는 채팅 텍스트로 노출하지 않고 `⚡ Investigating Escalation #XXXX with tools...` 형태의 dim status/badge로만 간결하게 표시.
-     2. Implementation Point:
-        - `process_user_chat(msg, is_system_trigger=False, origin="commander")` 인자 추가.
-        - `is_system_trigger=True`일 때는 `👤 You:` 출력 스킵 혹은 `⚡ [System]:` 전용 스타일 렌더링.
+[] [Task/UX] TUI 채팅 Universal Deep-Link (Audit/에스컬레이션 즉시 점프) & Pending Queue 다단계 상태 뱃지 (최소 정보량 시각화)
+   - Context & UX Motivation:
+     - 채팅창에 에스컬레이션이나 감사 로그가 언급될 때 원문이나 승인 사유를 보기 위해 감사 테이블로 일일이 이동해야 하는 번거로움 해소.
+     - 또한 백그라운드 병렬 평가/지연 큐 환경에서 지연된 에스컬레이션이 '왜 대기 중인지/왜 승인되었는지'를 최소한의 정보량으로 한눈에 파악할 수 있는 시각적 큐 상태 체계 필요.
+   - Key Architecture & UX Requirements:
+     1. [Universal Deep-Link & Inline Expand (원클릭 디테일 점프)]:
+        - TUI 채팅 메시지 내 `[#2868]`, `[Audit #7771]`, `[▼ Details]` 형태의 대괄호 링크 렌더링.
+        - 마우스 클릭 또는 키보드 포커스(`Enter`) 시 해당 레코드의 `AuditDetailModal`을 즉시 팝업하거나, 장문 스크립트/Diff를 인라인으로 전개(Expand).
+     2. [Pending Queue Status Taxonomy (지연/진행 4단계 상태 배지)]:
+        - 대기 큐 및 사이드바 목록에 진행 상태를 명확하고 정돈된 배지로 표기:
+          • `🔍 [Gatekeeper Checking]` : AI 백그라운드 툴콜/Cloud Judge 자율 조사 진행 중
+          • `🚨 [Human Action Required]` : 자율 통과 불가, 지휘관의 `/approve` 대기 중
+          • `⏳ [Deferred (Slot #N)]` : 단일 슬롯 정책에 의해 백그라운드 큐에서 대기 중
+          • `⚡ [Approved (Gatekeeper)]` / `👤 [Approved (Human)]` / `⌨️ [Approved (Pane-Direct)]`
+     3. [사후 판단 근거 추적성 (Post-Adjudication Traceability)]:
+        - 처리 완료된 건도 큐/채팅에서 링크 클릭 한 번으로 왜 승인이 내려졌는지(결정 레이어, Gatekeeper 판단 사유, AST 검증 결과) 즉시 열람 가능.
+
 
 [] [Research/Stability] LLM Base URL 엔드포인트 서버 상태 이상(Unhealthy/Hang) 감지 및 재시작/복구(Auto-Restart) 로직 분석 및 강화
    - Context & Objective:
