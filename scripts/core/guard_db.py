@@ -592,20 +592,21 @@ def get_escalation_approver(pane_id: str, raw_command: str) -> Optional[str]:
     return row["approver"] if row else None
 
 
-def record_human_approval_pattern(canonical_pattern: str, scope: str = "default", cwd: str = "") -> None:
+def record_human_approval_pattern(canonical_pattern: str, scope: str = "default") -> None:
     """Record a canonical command pattern that a HUMAN explicitly approved (INV-3).
 
-    Stores a row in `evaluation_cache` keyed by `human_approved:{scope}:{cwd_hash}:{pattern}`
-    with a TTL (default 3600s). INV-4 is satisfied by construction: the `human_approved:`
-    prefix has no legacy rows, so the learned-safe set starts EMPTY.
+    Stores a row in `evaluation_cache` keyed by `human_approved:{scope}:{pattern}`
+    (M7: the cwd dimension is dropped — the novelty gate previously seeded with
+    cwd="" but queried with the real cwd, so the keys never matched and the
+    HUMAN_APPROVED fast-path was dead). TTL is configurable via
+    human_approval_ttl_seconds (default 3600s, clamp [60, 86400]). INV-4 is
+    satisfied by construction: the `human_approved:` prefix has no legacy rows,
+    so the learned-safe set starts EMPTY.
     """
-    import hashlib
-
     init_db()
     norm_scope = str(scope).strip() or "default"
-    cwd_hash = hashlib.sha256(str(cwd or "").encode("utf-8")).hexdigest()[:12]
-    cache_key = f"human_approved:{norm_scope}:{cwd_hash}:{canonical_pattern}"
-    ttl = 3600
+    cache_key = f"human_approved:{norm_scope}:{canonical_pattern}"
+    ttl = int(get_batch_approval_config().get("human_approval_ttl_seconds", 3600))
     now = time.time()
     expires_at = int(now + ttl)
 
@@ -621,19 +622,16 @@ def record_human_approval_pattern(canonical_pattern: str, scope: str = "default"
                 is_safe=1,
                 expires_at=excluded.expires_at
             """,
-            (cache_key, canonical_pattern, cwd, norm_scope, expires_at),
+            (cache_key, canonical_pattern, "", norm_scope, expires_at),
         )
         conn.commit()
 
 
-def has_human_approval_pattern(canonical_pattern: str, scope: str = "default", cwd: str = "") -> bool:
+def has_human_approval_pattern(canonical_pattern: str, scope: str = "default") -> bool:
     """Return True if the canonical pattern has a valid (unexpired) human approval in scope."""
-    import hashlib
-
     init_db()
     norm_scope = str(scope).strip() or "default"
-    cwd_hash = hashlib.sha256(str(cwd or "").encode("utf-8")).hexdigest()[:12]
-    cache_key = f"human_approved:{norm_scope}:{cwd_hash}:{canonical_pattern}"
+    cache_key = f"human_approved:{norm_scope}:{canonical_pattern}"
     now = time.time()
 
     with get_db_connection() as conn:
@@ -945,6 +943,52 @@ def set_cloud_judge_config(min_confidence: Optional[float] = None) -> dict[str, 
     return get_cloud_judge_config()
 
 
+_BATCH_APPROVAL_DEFAULTS = {"batch_approval_enabled": True, "human_approval_ttl_seconds": 3600}
+
+
+def get_batch_approval_config() -> dict:
+    """M7 anti-fatigue knobs, backed by guard_config. Missing keys -> defaults.
+
+    batch_approval_enabled: _parse_bool. human_approval_ttl_seconds: int clamp
+    [60, 86400] (used by the novelty gate in record_human_approval_pattern).
+    """
+    init_db()
+    cfg = dict(_BATCH_APPROVAL_DEFAULTS)
+    with get_db_connection() as conn:
+        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
+            k, v = row["key"], row["value"]
+            if k == "batch_approval_enabled":
+                cfg[k] = _parse_bool(v)
+            elif k == "human_approval_ttl_seconds":
+                try:
+                    cfg[k] = max(60, min(86400, int(float(v))))
+                except (TypeError, ValueError):
+                    pass
+    return cfg
+
+
+def set_batch_approval_config(enabled=None, ttl_seconds=None) -> dict:
+    """Human-only write path; upsert guard_config (mirror set_channel_approve_config)."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        if enabled is not None:
+            conn.execute(
+                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("batch_approval_enabled", "true" if _parse_bool(enabled) else "false", now_iso),
+            )
+        if ttl_seconds is not None:
+            clamped = max(60, min(86400, int(float(ttl_seconds))))
+            conn.execute(
+                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("human_approval_ttl_seconds", str(clamped), now_iso),
+            )
+        conn.commit()
+    return get_batch_approval_config()
+
+
 def record_adjudication(
     escalation_id: int,
     pane_id: str,
@@ -983,7 +1027,7 @@ def record_adjudication(
         conn.commit()
 
     if action == "APPROVE" and raw_command:
-        record_human_approval_pattern(normalize_command(raw_command), scope=pane_id, cwd="")
+        record_human_approval_pattern(normalize_command(raw_command), scope=pane_id)
 
 
 def enqueue_pending_escalation(
@@ -1094,6 +1138,27 @@ def get_pending_escalations(
         )
 
     return valid_escalations
+
+
+def group_pending_escalations(escalations: list[dict]) -> list[dict]:
+    """Group pending rows into (decision_layer, canonical_pattern) batches, FIFO order."""
+    groups = {}
+    order = []
+    for e in escalations:  # already id ASC (FIFO)
+        key = (e["decision_layer"], normalize_command(e["raw_command"]))
+        if key not in groups:
+            groups[key] = {
+                "group_key": key,
+                "decision_layer": e["decision_layer"],
+                "canonical_pattern": normalize_command(e["raw_command"]),
+                "count": 0,
+                "items": [],
+                "sample_raw_command": e["raw_command"],
+            }
+            order.append(key)
+        groups[key]["items"].append(e)
+        groups[key]["count"] += 1
+    return [groups[k] for k in order]
 
 
 def mark_escalation_delivered(escalation_id: int):

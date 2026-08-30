@@ -11,6 +11,7 @@ Key Features:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -74,6 +75,7 @@ from core.guard_db import (
     get_adjudications_for_audit,
     get_answer_language,
     get_audit_log_by_id,
+    get_batch_approval_config,
     get_channel_approve_config,
     get_escalation_approver,
     get_escalation_resolution,
@@ -81,11 +83,17 @@ from core.guard_db import (
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
+    group_pending_escalations,
     set_answer_language,
     set_channel_approve_config,
     set_instruction_delivery_config,
 )
-from tools.schengen_agent_llm import SchengenAgentChat, get_current_active_escalation
+from tools.schengen_agent_llm import (
+    SchengenAgentChat,
+    approve_batch_escalations,
+    get_current_active_escalation,
+    reject_batch_escalations,
+)
 from cmd.schengen_watcher import list_active_guard_locks
 
 
@@ -1290,9 +1298,28 @@ class SchengenTUIApp(App):
                     f"[dim]   ↩ Answer this question directly in the pane — resolves automatically.[/]"
                 )
             else:
+                # M7 anti-fatigue (INV-13): when the FIFO head group aggregates
+                # >1 identical (decision_layer, canonical_pattern) rows, surface a
+                # batch line with one-key /approve-batch | /reject-batch actions.
+                batch_note = ""
+                try:
+                    batch_cfg = get_batch_approval_config()
+                    if batch_cfg.get("batch_approval_enabled", True):
+                        groups = group_pending_escalations(get_pending_escalations())
+                        head = groups[0] if groups else None
+                        if head and head["count"] > 1 and head["items"][0]["id"] == active_id:
+                            batch_note = (
+                                f"[bold magenta]⚠ {head['count']} similar commands — pattern:[/] "
+                                f"[white]{rich_escape(head['canonical_pattern'][:60])}[/] "
+                                f"[dim](layer: {head['decision_layer']})[/]\n"
+                                f"[dim]   [/][bold magenta]/approve-batch[/] [dim]or[/] [bold magenta]/reject-batch[/] [dim]for one-key resolution[/]\n"
+                            )
+                except Exception:
+                    batch_note = ""
                 banner_text = (
                     f"[bold yellow]▶ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
                     f"[bold white]{rich_escape(cmd_display)}[/]\n"
+                    f"{batch_note}"
                     f"[dim]⚠ {rich_escape(reason_short)}[/]\n"
                     f"[dim]   ⚡ Awaiting adjudication or autonomous inspection completion...[/]"
                 )
@@ -1562,6 +1589,24 @@ class SchengenTUIApp(App):
                 resp = await self.agent.send_message(f"Reject escalation #{esc_id} with English reason: '{reason}'")
                 self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper[/]:")
                 self._write_markdown(resp)
+                self.update_radar_data(force=True)
+                return
+
+            # M7 anti-fatigue (INV-13): one-key batch resolution. Deterministic
+            # loop DIRECTLY on the FIFO head batch — NOT via the gatekeeper LLM.
+            if user_msg.startswith("/approve-batch") or user_msg.startswith("/reject-batch"):
+                batch_cfg = get_batch_approval_config()
+                if not batch_cfg.get("batch_approval_enabled", True):
+                    self._write("[dim]⏸ [Batch approval disabled] — /approve-batch and /reject-batch are no-ops. Use /approve <id> or /reject <id>.[/]")
+                    return
+                parts = user_msg.split(maxsplit=1)
+                reason = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+                if user_msg.startswith("/approve-batch"):
+                    result = await asyncio.to_thread(approve_batch_escalations, reason or "Approved in batch via TUI")
+                else:
+                    result = await asyncio.to_thread(reject_batch_escalations, reason or "Rejected in batch via TUI")
+                self._write(f"{self._timestamp()} 🤖 [bold cyan]Batch Gatekeeper[/]:")
+                self._write_markdown(f"```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```")
                 self.update_radar_data(force=True)
                 return
 

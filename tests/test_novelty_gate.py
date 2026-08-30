@@ -1,8 +1,9 @@
 """Novelty Gate tests (INV-3, INV-4, INV-7).
 
 Verifies that a canonical command pattern with prior HUMAN approval (scoped to
-pane + cwd, with a TTL) auto-approves via the HUMAN_APPROVED fast path instead
-of re-escalating — while remaining fail-closed everywhere else.
+pane, with a TTL — the cwd dimension was dropped in M7 so the seed/query keys
+match) auto-approves via the HUMAN_APPROVED fast path instead of re-escalating
+— while remaining fail-closed everywhere else.
 """
 
 import sys
@@ -61,30 +62,35 @@ class TestNoveltyGate(unittest.TestCase):
 
     def test_novelty_gate_auto_approve(self):
         pat = normalize_command("git push origin feat/novelty-test")
-        record_human_approval_pattern(pat, scope="w1D:p1", cwd="/repo")
-        self.assertTrue(has_human_approval_pattern(pat, scope="w1D:p1", cwd="/repo"))
+        record_human_approval_pattern(pat, scope="w1D:p1")
+        self.assertTrue(has_human_approval_pattern(pat, scope="w1D:p1"))
 
     def test_novelty_gate_scope_isolation(self):
         pat = normalize_command("git push origin feat/novelty-test")
-        record_human_approval_pattern(pat, scope="w1D:p1", cwd="/repo")
-        self.assertFalse(has_human_approval_pattern(pat, scope="w1D:p2", cwd="/repo"))
+        record_human_approval_pattern(pat, scope="w1D:p1")
+        self.assertFalse(has_human_approval_pattern(pat, scope="w1D:p2"))
 
-    def test_novelty_gate_cwd_isolation(self):
+    def test_novelty_gate_cwd_dimension_dropped(self):
+        # M7 fix: the novelty gate previously seeded its cache with cwd="" but
+        # queried with the real cwd, so the keys never matched and the
+        # HUMAN_APPROVED fast-path was dead. The cwd dimension is deliberately
+        # dropped — scope (pane) is the only partition, so a recorded approval
+        # must be found regardless of the cwd used at query time.
         pat = normalize_command("git push origin feat/novelty-test")
-        record_human_approval_pattern(pat, scope="w1D:p1", cwd="/repo")
-        self.assertFalse(has_human_approval_pattern(pat, scope="w1D:p1", cwd="/other"))
+        record_human_approval_pattern(pat, scope="w1D:p1")
+        self.assertTrue(has_human_approval_pattern(pat, scope="w1D:p1"))
 
     def test_novelty_gate_inv4_starts_empty(self):
         # INV-4: the human_approved: prefix must never inherit legacy rows — a
         # never-recorded pattern is always False even though pattern_stats may
         # carry auto_approved_count for other prefixes.
-        self.assertFalse(has_human_approval_pattern("rm -rf /tmp/foo", scope="w1D:p1", cwd=""))
+        self.assertFalse(has_human_approval_pattern("rm -rf /tmp/foo", scope="w1D:p1"))
 
     # --- E2E: evaluator integration ---
 
     def test_e2e_human_approved_layer(self):
         cmd = "git push origin feat/novelty-test"
-        record_human_approval_pattern(normalize_command(cmd), scope="w1D:p1", cwd="/repo")
+        record_human_approval_pattern(normalize_command(cmd), scope="w1D:p1")
 
         safe, reason, layer = audit_shell_command(cmd, cwd="/repo", scope="w1D:p1")
         self.assertTrue(safe, f"Expected human-approved command to be safe: {reason}")
@@ -99,7 +105,7 @@ class TestNoveltyGate(unittest.TestCase):
         from core.security_evaluator import audit_shell_command_with_taxonomy
 
         cmd = "git push origin feat/novelty-test"
-        record_human_approval_pattern(normalize_command(cmd), scope="w1D:p1", cwd="/repo")
+        record_human_approval_pattern(normalize_command(cmd), scope="w1D:p1")
         safe, reason, layer, tax = audit_shell_command_with_taxonomy(cmd, cwd="/repo", scope="w1D:p1")
         self.assertTrue(safe)
         self.assertEqual(layer, DecisionLayer.HUMAN_APPROVED)
@@ -118,7 +124,7 @@ class TestNoveltyGate(unittest.TestCase):
             agent_kind="agy",
         )
         record_adjudication(escalation_id=esc_id, pane_id=pane_id, agent_kind="agy", action="APPROVE", feedback="ok")
-        self.assertTrue(has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id, cwd=""))
+        self.assertTrue(has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id))
 
     def test_adjudication_reject_does_not_seed_gate(self):
         pane_id = "w1D:pB"
@@ -131,14 +137,14 @@ class TestNoveltyGate(unittest.TestCase):
             agent_kind="agy",
         )
         record_adjudication(escalation_id=esc_id, pane_id=pane_id, agent_kind="agy", action="REJECT", feedback="no")
-        self.assertFalse(has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id, cwd=""))
+        self.assertFalse(has_human_approval_pattern(normalize_command(raw_cmd), scope=pane_id))
 
     # --- TTL expiry ---
 
     def test_ttl_expiry_invalidates_approval(self):
         pat = normalize_command("brew install git")
-        record_human_approval_pattern(pat, scope="w1D:pC", cwd="")
-        self.assertTrue(has_human_approval_pattern(pat, scope="w1D:pC", cwd=""))
+        record_human_approval_pattern(pat, scope="w1D:pC")
+        self.assertTrue(has_human_approval_pattern(pat, scope="w1D:pC"))
 
         # Force expiry directly in SQLite (epoch 0 < now).
         conn = guard_db.get_db_connection()
@@ -149,7 +155,7 @@ class TestNoveltyGate(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        self.assertFalse(has_human_approval_pattern(pat, scope="w1D:pC", cwd=""))
+        self.assertFalse(has_human_approval_pattern(pat, scope="w1D:pC"))
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ from core.guard_db import (
     get_instruction_delivery_config,
     get_pending_escalations,
     get_recent_audit_logs,
+    group_pending_escalations,
     record_adjudication,
     resolve_escalation,
 )
@@ -294,6 +295,126 @@ def _get_escalation_row(esc_id: int) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def _inject_approval(
+    target_pane: str,
+    agent_kind: str,
+    req_cmd: str,
+    feedback: str,
+    send_instruction: bool,
+) -> Tuple[bool, str]:
+    """Inject an approval into the target pane via the verified-inject path.
+
+    Mirrors the approve_escalation tool's inject-first semantics (issue #23/#1910):
+    channel approve (opencode permission.reply) -> keystroke inject (codex 'y',
+    opencode enter+self-correction), with the AGY Tab Amend Flow when
+    instructions are enabled. The caller must ONLY record/adjudicate AFTER this
+    returns injected=True, so 'APPROVED' in the DB actually implies the dialog
+    got approved. Returns (injected, inject_reason).
+    """
+    injected = False
+    inject_reason = ""
+    if not target_pane:
+        return False, "no target pane"
+    if agent_kind == "agy" and send_instruction and feedback:
+        # AGY Tab Amend Flow: Tab -> send feedback note -> Enter
+        subprocess.run(["herdr", "agent", "send-keys", target_pane, "tab"], capture_output=True, timeout=5.0)
+        subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
+        subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
+        injected = True  # best-effort (unchanged AGY sequence)
+    else:
+        # Agent-kind-specific approval (issue #23): use the adapter's channel
+        # approve (opencode permission.reply) then its keystroke inject_approval
+        # (codex 'y', opencode enter+self-correction), NOT a bare enter.
+        adapter = get_adapter(agent_kind)
+        if adapter is not None:
+            ch_approved, ch_reason = adapter.channel_approve(target_pane, req_cmd)
+            if ch_approved:
+                injected = True
+            else:
+                ok, inject_reason = adapter.inject_approval(target_pane, req_cmd)
+                injected = ok
+        else:
+            # no registered adapter: best-effort bare enter (unchanged legacy path)
+            subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
+            injected = True
+    return injected, inject_reason
+
+
+def approve_batch_escalations(feedback: str = "Approved in batch via TUI") -> Dict[str, Any]:
+    """One-key approve (M7 INV-13/INV-25..28): resolve the FIFO head batch.
+
+    The head batch is the FIRST (decision_layer, canonical_pattern) group of
+    currently-PENDING escalations (FIFO id ASC). Each item is approved via the
+    SAME verified-inject path as approve_escalation (inject-first, record-only-
+    on-verified-inject); on inject failure the item stays PENDING (per-item, not
+    all-or-nothing). Every resolved row gets approver='human-tui' provenance and
+    its own adjudication_log entry. Later groups stay PENDING (FIFO head-only).
+    Returns {"status": "empty"|"ok", "resolved": [...], "deferred": [...]}.
+    """
+    pending = get_pending_escalations()
+    groups = group_pending_escalations(pending)
+    if not groups:
+        return {"status": "empty", "resolved": 0}
+    head = groups[0]
+    resolved, deferred = [], []
+    cfg = get_instruction_delivery_config()
+    send_instruction = bool(cfg.get("send_approve_instruction", False))
+    safe_feedback = _sanitize_feedback(feedback)
+    for item in head["items"]:
+        esc_id = item["id"]
+        pane = item["pane_id"]
+        kind = item["agent_kind"]
+        req = item["raw_command"]
+        injected, inject_reason = _inject_approval(pane, kind, req, safe_feedback, send_instruction)
+        if not injected:
+            deferred.append(esc_id)
+            continue
+        resolve_escalation(
+            pane_id=pane,
+            escalation_id=esc_id,
+            resolution_status="RESOLVED",
+            is_approval=True,
+            approver="human-tui",
+        )
+        record_adjudication(esc_id, pane, kind, "APPROVE", safe_feedback)
+        resolved.append(esc_id)
+    return {"status": "ok", "resolved": resolved, "deferred": deferred}
+
+
+def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dict[str, Any]:
+    """One-key reject (M7): cancel the FIFO head batch deterministically.
+
+    Mirrors reject_escalation per item: fire escape to the pane, resolve the
+    row as CANCELLED, and record a REJECT adjudication — no gatekeeper LLM call.
+    Returns {"status": "empty"|"ok", "resolved": [...], "deferred": [...]}.
+    """
+    pending = get_pending_escalations()
+    groups = group_pending_escalations(pending)
+    if not groups:
+        return {"status": "empty", "resolved": 0}
+    head = groups[0]
+    resolved, deferred = [], []
+    cfg = get_instruction_delivery_config()
+    send_instruction = bool(cfg.get("send_reject_instruction", True))
+    safe_feedback = _sanitize_feedback(feedback)
+    for item in head["items"]:
+        esc_id = item["id"]
+        pane = item["pane_id"]
+        kind = item["agent_kind"]
+        try:
+            if pane:
+                subprocess.run(["herdr", "agent", "send-keys", pane, "escape"], capture_output=True, timeout=5.0)
+                if send_instruction and safe_feedback:
+                    subprocess.run(["herdr", "pane", "send-text", pane, f"# [SECURITY GATEKEEPER]: {safe_feedback}"], capture_output=True, timeout=5.0)
+                    subprocess.run(["herdr", "pane", "send-keys", pane, "enter"], capture_output=True, timeout=5.0)
+            resolve_escalation(pane_id=pane, escalation_id=esc_id, resolution_status="CANCELLED")
+            record_adjudication(esc_id, pane, kind, "REJECT", safe_feedback)
+            resolved.append(esc_id)
+        except Exception:
+            deferred.append(esc_id)
+    return {"status": "ok", "resolved": resolved, "deferred": deferred}
+
+
 def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
     if name == "investigate_pane_history":
         pane_id = args.get("pane_id", "")
@@ -381,32 +502,7 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             # FIX 1 (issue #23/#1910): the injection happens FIRST; resolve_escalation
             # + record_adjudication run ONLY after a verified injection success, so
             # 'APPROVED' in the DB actually implies the dialog got approved.
-            injected = False
-            inject_reason = ""
-            if target_pane:
-                if agent_kind == "agy" and send_instruction and feedback:
-                    # AGY Tab Amend Flow: Tab -> send feedback note -> Enter
-                    subprocess.run(["herdr", "agent", "send-keys", target_pane, "tab"], capture_output=True, timeout=5.0)
-                    subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
-                    subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
-                    injected = True  # best-effort (unchanged AGY sequence)
-                else:
-                    # Agent-kind-specific approval (issue #23): use the adapter's
-                    # channel approve (opencode permission.reply) then its keystroke
-                    # inject_approval (codex 'y', opencode enter+self-correction),
-                    # NOT a bare enter.
-                    adapter = get_adapter(agent_kind)
-                    if adapter is not None:
-                        ch_approved, ch_reason = adapter.channel_approve(target_pane, req_cmd)
-                        if ch_approved:
-                            injected = True
-                        else:
-                            ok, inject_reason = adapter.inject_approval(target_pane, req_cmd)
-                            injected = ok
-                    else:
-                        # no registered adapter: best-effort bare enter (unchanged legacy path)
-                        subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
-                        injected = True
+            injected, inject_reason = _inject_approval(target_pane, agent_kind, req_cmd, feedback, send_instruction)
 
             if not injected:
                 # FIX 1/4 (issue #23/#1910): do NOT resolve/adjudicate on failure —
