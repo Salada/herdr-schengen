@@ -72,9 +72,9 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
     def test_approve_falls_back_to_adapter_inject_approval(self):
         esc_id = self._seed_escalation()
         fake = _FakeAdapter(ch_ok=False, ch_reason="no channel permission", inj_ok=True, inj_reason="ok")
-        with patch("tools.schengen_agent_llm.resolve_escalation"), patch(
+        with patch("tools.schengen_agent_llm.resolve_escalation") as mock_resolve, patch(
             "tools.schengen_agent_llm.record_adjudication"
-        ), patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
+        ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
             "tools.schengen_agent_llm.get_adapter", return_value=fake
         ):
             res = execute_tool_call("approve_escalation", {"escalation_id": esc_id, "english_feedback": "x"})
@@ -83,13 +83,16 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
         # channel_approve failed -> keystroke inject_approval was used with (pane, cmd).
         self.assertEqual(fake.channel_calls, [("w1D:p1", "curl example.com")])
         self.assertEqual(fake.inject_calls, [("w1D:p1", "curl example.com")])
+        # FIX 1: a verified injection success DOES record the adjudication.
+        mock_resolve.assert_called_once()
+        mock_rec.assert_called_once()
 
     def test_approve_error_when_injection_fails(self):
         esc_id = self._seed_escalation()
         fake_fail = _FakeAdapter(ch_ok=False, inj_ok=False, inj_reason="keyboard inject failed")
-        with patch("tools.schengen_agent_llm.resolve_escalation"), patch(
+        with patch("tools.schengen_agent_llm.resolve_escalation") as mock_resolve, patch(
             "tools.schengen_agent_llm.record_adjudication"
-        ), patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
+        ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
             "tools.schengen_agent_llm.get_adapter", return_value=fake_fail
         ):
             res = execute_tool_call("approve_escalation", {"escalation_id": esc_id, "english_feedback": "x"})
@@ -97,6 +100,33 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
         self.assertEqual(out["status"], "error")
         self.assertIn("approval injection failed", out["error"])
         self.assertIn("keyboard inject failed", out["error"])
+        # FIX 1: on injection failure the adjudication is NOT recorded — the
+        # escalation stays PENDING so a retry is possible.
+        mock_resolve.assert_not_called()
+        mock_rec.assert_not_called()
+        pending = guard_db.get_pending_escalations(include_delivered=False)
+        self.assertTrue(any(e["id"] == esc_id for e in pending), "escalation must stay PENDING after failure")
+
+    def test_approve_deferred_when_dialog_changed(self):
+        # FIX 4: an INJECT_SKIP_CHANGED reason (dialog trampolined to a different
+        # request) is surfaced distinctly from a hard delivery failure, and is
+        # also NOT recorded as APPROVED.
+        esc_id = self._seed_escalation()
+        from adapters.agent_adapters import INJECT_SKIP_CHANGED
+
+        fake = _FakeAdapter(ch_ok=False, inj_ok=False, inj_reason=INJECT_SKIP_CHANGED)
+        with patch("tools.schengen_agent_llm.resolve_escalation") as mock_resolve, patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
+            "tools.schengen_agent_llm.get_adapter", return_value=fake
+        ):
+            res = execute_tool_call("approve_escalation", {"escalation_id": esc_id, "english_feedback": "x"})
+        out = json.loads(res)
+        self.assertEqual(out["status"], "error")
+        self.assertIn("approval deferred", out["error"])
+        self.assertIn("dialog changed", out["error"])
+        mock_resolve.assert_not_called()
+        mock_rec.assert_not_called()
 
     def test_approve_channel_approve_success_skips_keystroke(self):
         esc_id = self._seed_escalation()

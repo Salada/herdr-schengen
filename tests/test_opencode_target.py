@@ -1,6 +1,7 @@
 """Unit tests for multi-agent target support (agy + opencode)."""
 
 import json
+import os
 import sys
 import time
 import unittest
@@ -650,12 +651,53 @@ class TestOpenCodeInjectSkip(unittest.TestCase):
         self.assertFalse(approved)
         self.assertEqual(reason, INJECT_SKIP_CHANGED)
 
-    def test_inject_success_when_dialog_already_cleared(self):
-        # If the dialog is already gone (stage unknown), injection is a no-op success.
-        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value="random terminal output"):
+    def test_inject_unknown_read_does_not_claim_success(self):
+        # Issue #23/#1910 FIX 2: a single 'unknown' stage read is NOT evidence the
+        # dialog cleared. inject_approval must not return True without an actual
+        # enter + two-consecutive-cleared-polls evidence — it retries, then fails
+        # closed once the retry budget is exhausted.
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value="random terminal output"), patch.dict(
+            os.environ, {"SCHENGEN_OPENCODE_MAX_INJECT": "1"}
+        ):
             approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory /tmp")
+        self.assertFalse(approved)
+        self.assertIn("dialog stage unknown", reason)
+
+    def test_inject_success_via_two_consecutive_cleared_polls(self):
+        # FIX 2: a genuinely-cleared dialog is confirmed by TWO consecutive
+        # 'unknown' polls AFTER the enter (resolve_opencode_injection evidence),
+        # not by a single pre-inject unknown read.
+        dialog = "Permission required\n\n  $ ls -la\n\nAllow once  Allow always  Reject"
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value=dialog), patch(
+            "adapters.agent_adapters.opencode.run_cmd", return_value=True
+        ), patch("adapters.agent_adapters.opencode.read_channel_event", return_value=None), patch.object(
+            self.adapter,
+            "classify_dialog_stage",
+            # TOCTOU pre-inject + get_pending_request stage gate + parse gate,
+            # then two post-inject cleared polls.
+            side_effect=["permission", "permission", "permission", "unknown", "unknown"],
+        ), patch.dict(os.environ, {"SCHENGEN_OPENCODE_REPOLL_SECONDS": "1.0"}):
+            approved, reason = self.adapter.inject_approval("w1D:p1", "ls -la")
         self.assertTrue(approved)
-        self.assertIn("dialog cleared", reason)
+        self.assertIn("cleared", reason)
+
+    def test_inject_matches_normalized_command_with_prompt_prefix(self):
+        # Issue #23/#1910 FIX 3: a channel-sourced req_cmd and the pane-text
+        # re-parse of the SAME dialog can differ by a leading '$ ' prompt / extra
+        # whitespace; normalization must make them MATCH (no INJECT_SKIP_CHANGED).
+        dialog = (
+            "Permission required\n\n  $ python3 -m unittest discover -s tests\n\n"
+            "Allow once  Allow always  Reject"
+        )
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value=dialog), patch(
+            "adapters.agent_adapters.opencode.run_cmd", return_value=True
+        ), patch(
+            "adapters.agent_adapters.opencode.resolve_opencode_injection", return_value=("success", "once approved")
+        ), patch.object(self.adapter, "classify_dialog_stage", return_value="permission"), patch.object(
+            self.adapter, "get_pending_request", return_value="$ python3 -m unittest discover -s tests"
+        ), patch.dict(os.environ, {"SCHENGEN_OPENCODE_REPOLL_SECONDS": "0"}):
+            approved, reason = self.adapter.inject_approval("w1D:p1", "python3 -m unittest discover -s tests")
+        self.assertTrue(approved)
 
 
 class TestStructuredPermissionChannel(unittest.TestCase):
@@ -776,6 +818,23 @@ class TestChannelApproval(unittest.TestCase):
             approved, reason = self.adapter.channel_approve("w1D:p1", "echo ok")
             self.assertFalse(approved)
             self.assertEqual(reason, INJECT_SKIP_CHANGED)
+
+    def test_channel_approve_matches_normalized_command(self):
+        # Issue #23/#1910 FIX 3: req_cmd with a leading '$ ' prompt / extra
+        # whitespace must match the channel-sourced command after normalization
+        # (no spurious INJECT_SKIP_CHANGED from a stale gatekeeper-approved cmd).
+        ev = {
+            "permission_id": "per_789",
+            "permission": "bash",
+            "patterns": ["python3 -m unittest discover -s tests"],
+            "metadata": {"command": "python3 -m unittest discover -s tests"},
+        }
+        with patch("adapters.agent_adapters.opencode.read_channel_event", return_value=ev), patch(
+            "adapters.agent_adapters.opencode.write_decision"
+        ) as wd:
+            approved, reason = self.adapter.channel_approve("w1D:p1", "$ python3 -m unittest discover -s tests")
+            self.assertTrue(approved)
+            wd.assert_called_once_with("w1D:p1", "per_789", "once")
 
     def test_channel_approve_falls_back_without_channel(self):
         with patch("adapters.agent_adapters.opencode.read_channel_event", return_value=None):

@@ -60,7 +60,7 @@ from core.guard_db import (
     resolve_escalation,
 )
 from adapters.herdr_client import get_pane_text
-from adapters.agent_adapters import get_adapter
+from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter
 from core.redaction import redact_for_cloud
 
 # ── Shared fallback config ──────────────────────────────────────────
@@ -375,25 +375,26 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             agent_kind = esc_row.get("agent_kind", "agy") if esc_row else "agy"
             req_cmd = esc_row.get("raw_command", "") if esc_row else ""
 
-            resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
-            record_adjudication(esc_id, target_pane, agent_kind, "APPROVE", feedback)
-
             cfg = get_instruction_delivery_config()
             send_instruction = bool(cfg.get("send_approve_instruction", False))
 
+            # FIX 1 (issue #23/#1910): the injection happens FIRST; resolve_escalation
+            # + record_adjudication run ONLY after a verified injection success, so
+            # 'APPROVED' in the DB actually implies the dialog got approved.
+            injected = False
+            inject_reason = ""
             if target_pane:
                 if agent_kind == "agy" and send_instruction and feedback:
                     # AGY Tab Amend Flow: Tab -> send feedback note -> Enter
                     subprocess.run(["herdr", "agent", "send-keys", target_pane, "tab"], capture_output=True, timeout=5.0)
                     subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
                     subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
+                    injected = True  # best-effort (unchanged AGY sequence)
                 else:
                     # Agent-kind-specific approval (issue #23): use the adapter's
                     # channel approve (opencode permission.reply) then its keystroke
                     # inject_approval (codex 'y', opencode enter+self-correction),
                     # NOT a bare enter.
-                    injected = False
-                    inject_reason = ""
                     adapter = get_adapter(agent_kind)
                     if adapter is not None:
                         ch_approved, ch_reason = adapter.channel_approve(target_pane, req_cmd)
@@ -406,14 +407,30 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                         # no registered adapter: best-effort bare enter (unchanged legacy path)
                         subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
                         injected = True
-                    if not injected:
-                        return json.dumps({
-                            "status": "error",
-                            "error": f"approval injection failed ({agent_kind}): {inject_reason or 'no adapter'}",
-                        }, ensure_ascii=False)
-                    if send_instruction and feedback:
-                        subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
-                        subprocess.run(["herdr", "pane", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
+
+            if not injected:
+                # FIX 1/4 (issue #23/#1910): do NOT resolve/adjudicate on failure —
+                # the escalation stays PENDING so a retry is possible and the FIFO
+                # head check will not wrongly reject a second attempt. Distinguish a
+                # hard delivery failure from a dialog-changed deferral so the
+                # gatekeeper can act appropriately.
+                if inject_reason == INJECT_SKIP_CHANGED:
+                    return json.dumps({
+                        "status": "error",
+                        "error": f"approval deferred ({agent_kind}): dialog changed mid-evaluation; re-polling",
+                    }, ensure_ascii=False)
+                return json.dumps({
+                    "status": "error",
+                    "error": f"approval injection failed ({agent_kind}): {inject_reason or 'no adapter'}",
+                }, ensure_ascii=False)
+
+            # Only a VERIFIED injection success records the adjudication (FIX 1).
+            resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
+            record_adjudication(esc_id, target_pane, agent_kind, "APPROVE", feedback)
+
+            if send_instruction and feedback:
+                subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
+                subprocess.run(["herdr", "pane", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
 
             return json.dumps({
                 "status": "success",

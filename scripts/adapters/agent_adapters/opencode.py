@@ -17,6 +17,8 @@ from adapters.herdr_client import get_pane_text, run_cmd
 
 from adapters.agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, footer_is_live, register
 
+from core.guard_db import normalize_command
+
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 
 # Box-drawing / block-element glyphs rendered by the Bubble Tea panel border
@@ -200,7 +202,23 @@ def resolve_opencode_injection(stages):
 # closed — never silently trust a missing/garbled channel).
 
 CHANNEL_DIR = Path.home() / ".local" / "state" / "herdr-schengen" / "opencode_permissions"
-CHANNEL_TTL_SECONDS = float(os.environ.get("SCHENGEN_OPENCODE_CHANNEL_TTL", "30"))
+# Issue #23/#1910: a gatekeeper LLM adjudication takes MINUTES, so the permission
+# event must not stale out while the dialog is still pending. Kept overridable.
+CHANNEL_TTL_SECONDS = float(os.environ.get("SCHENGEN_OPENCODE_CHANNEL_TTL", "3600"))
+
+
+def _norm_req_cmd(s) -> str:
+    """Canonicalize a request-command for equality comparison (issue #23/#1910).
+
+    A channel-sourced raw_command and a pane-text re-parse of the SAME dialog can
+    differ by a leading shell-prompt '$ ' (the TUI renders it, the channel does
+    not) or by whitespace (soft-wrap / extra spaces). Strip a leading '$ ' prompt
+    and apply normalize_command (whitespace/quotes/paths/hashes/versions) so the
+    live-dialog re-verification does not spuriously abort with INJECT_SKIP_CHANGED.
+    """
+    s = (s or "").strip()
+    s = re.sub(r"^\$\s+", "", s)
+    return normalize_command(s)
 
 
 def _sanitize_pane_id(pane_id: str) -> str:
@@ -480,7 +498,10 @@ class OpenCodeAdapter(AgentAdapter):
         event = read_channel_event(pane_id)
         if not event or not event.get("permission_id"):
             return False, "no channel permission"
-        if channel_event_to_req_cmd(event) != req_cmd:
+        # Normalized comparison (issue #23/#1910): the channel-sourced command and
+        # req_cmd may differ by prompt prefix / whitespace; only a REAL command
+        # mismatch (a different permission request) must yield INJECT_SKIP_CHANGED.
+        if _norm_req_cmd(channel_event_to_req_cmd(event)) != _norm_req_cmd(req_cmd):
             return False, INJECT_SKIP_CHANGED
         write_decision(pane_id, event["permission_id"], "once")
         return True, "permission.reply decision written (permission_id bound)"
@@ -510,6 +531,7 @@ class OpenCodeAdapter(AgentAdapter):
         poll_interval = 0.25
 
         reason = "post-inject: dialog not confirmed cleared after bounded re-poll; enter not registered"
+        injected_once = False
         for _ in range(max(1, max_attempts)):
             # TOCTOU re-verification BEFORE each enter: the live dialog must still
             # show the SAME permission request. A retry must not approve a
@@ -518,10 +540,21 @@ class OpenCodeAdapter(AgentAdapter):
             live_stage = self.classify_dialog_stage(visible)
             if live_stage != "permission":
                 if live_stage == "unknown":
-                    print(f"🚀 Auto-approving opencode 'once' for {pane_id}...", flush=True)
-                    return True, "once approved (dialog cleared)"
+                    # Issue #23/#1910: a single 'unknown' read is NOT evidence the
+                    # dialog cleared (mid-redraw flicker / stale scrollback). Do not
+                    # claim success without an enter: continue to the next retry
+                    # iteration, which re-reads the pane. A success return must be
+                    # backed by resolve_opencode_injection's two-consecutive-cleared
+                    # polls evidence AFTER an actual enter; if the budget is
+                    # exhausted without confirming, we fail closed below.
+                    continue
                 return False, f"post-inject: dialog moved to '{live_stage}' before inject; aborted"
-            if self.get_pending_request(pane_id, visible) != req_cmd:
+            # Normalized comparison (issue #23/#1910): the live pane-text re-parse
+            # may render a leading '$ ' prompt or extra whitespace vs the
+            # channel-sourced req_cmd — normalize both before deciding the dialog
+            # trampolined to a different request.
+            live_req = self.get_pending_request(pane_id, visible)
+            if _norm_req_cmd(live_req) != _norm_req_cmd(req_cmd):
                 # The dialog trampolined to a DIFFERENT permission request while we
                 # were evaluating (e.g. "Access external directory" -> "Shell command").
                 # The stale req_cmd is gone; skip so the next poll re-parses the new
@@ -532,6 +565,7 @@ class OpenCodeAdapter(AgentAdapter):
             # subprocess failure (herdr_client swallows CalledProcessError).
             if run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"]) is None:
                 return False, "send-keys failed (herdr CLI error); enter not delivered"
+            injected_once = True
 
             # Post-inject self-correction backstop via bounded re-poll.
             deadline = time.monotonic() + poll_seconds
@@ -563,4 +597,6 @@ class OpenCodeAdapter(AgentAdapter):
             # verdict == "not_registered" -> dialog still at 'permission'; retry
             # (the next loop iteration re-verifies the dialog before re-entering).
 
+        if not injected_once:
+            reason = "post-inject: dialog stage unknown; approval not confirmed"
         return False, reason
