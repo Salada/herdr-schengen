@@ -1098,6 +1098,27 @@ class TestStandaloneReadOnlySed(unittest.TestCase):
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
 
+    def test_sed_extra_script_sources_stay_fail_closed(self):
+        # Reviewer round 3: additional script sources (-e/-f/--expression/--file,
+        # attached or space-separated) must reject — the whitelist only validates
+        # the FIRST quoted script, so extra sources could smuggle e/w/s///w.
+        unsafe_cmds = (
+            "sed -n '1,10p' -e '1e touch /tmp/pwned' file.txt",  # execute via -e
+            "sed -n '1,10p' -f /tmp/evil.sed file.txt",  # script file
+            "sed -n --expression='1e id' '1,10p' file.txt",  # long form (attached)
+            "sed -n --file=/tmp/evil.sed '1,10p' file.txt",  # long form (attached)
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
+    def test_sed_extra_script_sources_no_false_positive(self):
+        # A filename-like token starting with -e/-f must NOT be rejected
+        # (the \b boundary after the flag ensures only the bare flag token matches).
+        safe, reason, layer = audit_shell_command("sed -n '1,10p' -example.txt")
+        self.assertTrue(safe, f"Expected '-example.txt' fast-track safe, got: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
     def test_sed_n_sensitive_targets_stay_fail_closed(self):
         # INV-SENS-1: sensitive paths must never fast-track (SECRET_GUARD or fail-closed).
         ssh_key = "~/.ss" + "h/id_r" + "sa"

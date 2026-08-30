@@ -1125,6 +1125,10 @@ def _is_readonly_sed(seg: str) -> bool:
         return False
     if _SED_INPLACE_RE.search(seg):
         return False
+    # reject additional script sources (sed -e / -f / --expression / --file) —
+    # they add scripts the whitelist would otherwise not validate (e/w/s///w bypass)
+    if re.search(r"(^|\s)(-e|-f|--expression|--file)\b", seg):
+        return False
     m = re.search(r"-n\s+(['\"])([^'\"]*)\1", seg)
     if not m:
         return False
