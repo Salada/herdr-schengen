@@ -66,8 +66,20 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   2) `re.IGNORECASE` 적용: 소문자 `destination:` / `file:` 매칭 누락으로 인한 오차단(over-block) 방지.
   3) `edit_file {dests[0].strip()}`의 중복 `.strip()` 제거 정리.
 [x] [Prerequisite/Host] 호스트 머신 semgrep 바이너리 미설치로 인한 SAST DEGRADED 해소: semgrep 1.175.0 설치(/opt/homebrew/bin/semgrep) 및 기능 스캔/SAST BLOCK 정상 탐지 검증 완료. shellcheck+semgrep 모두 READY.
+[] [Task/Dependency] semgrep 필수 디펜던시(Required Dependency) 체계적 관리 및 자동화 방안 수립:
+  - Context & Objective:
+    • semgrep은 SmartGate의 SAST Pre-Filter 및 Fail-Closed 보안의 핵심 축이나, 현재 호스트 수동 설치에 의존하고 있어 환경 간 드리프트(Drift) 발생 위험이 있음.
+  - Recommended Solutions & Multi-Layer Management:
+    1) [Python venv 디펜던시 선언 (pyproject.toml)]:
+       - `semgrep`은 PyPI 표준 배포 패키지(`semgrep>=1.70.0`)이므로, `pyproject.toml` 및 `requirements.txt`에 명시적 의존성으로 추가.
+       - TUI venv(`~/.local/share/herdr-schengen-tui-venv/`) 생성/동기화 시 `semgrep` CLI 바이너리가 venv `bin/`에 자동 설치·동기화되도록 보장.
+    2) [Host Runtime Gate 강제 (Startup Pre-Flight Check)]:
+       - `verify_host_runtime_environment()`에서 `semgrep` 탐색 실패 시 무조건 fail-closed 및 명확한 액션 가이드(`pip install semgrep` 또는 `brew install semgrep`) 안내.
+    3) [CI / Forgejo Runner 및 Dotfiles 연동]:
+       - `.forgejo/workflows/` CI 테스트 환경 및 배포 스크립트에 semgrep 설치 스텝 공식화.
 
 [] [Refactor/SAST] `_inject_runtime_path()` 및 Host Runtime Gate 안정화 4종 (#45 피어리뷰 후속):
+
   1) `_inject_runtime_path()` 선행순서 버그 수정: `parts.insert(0, d)` 반복으로 `~/.local/bin`이 최우선순위가 되어 Homebrew 바이너리를 섀도잉(shadow)할 위험 해소 (reverse iteration 또는 시스템/Homebrew 우선순위 보존).
   2) 빈 PATH 항목(`.`) 처리: `os.environ["PATH"].split(":")` 필터 시 빈 항목 drop 동작 정리 및 명시적 문서화.
   3) 플랫폼 가드: `_RUNTIME_BIN_DIRS`에 macOS 전용(`/opt/homebrew`, `/usr/local`) 외 `sys.platform` 분기 및 Linux 경로 지원.
