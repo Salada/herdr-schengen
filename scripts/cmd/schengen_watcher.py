@@ -664,10 +664,13 @@ def resolve_cleared_dialog(pane_id: str, cached_clear: Optional[dict]) -> None:
     if not cached_clear:
         return
     is_q = str(cached_clear.get("cmd", "")).startswith("question")
-    if not cached_clear.get("is_safe", True):
-        resolve_escalation(pane_id=pane_id, resolution="APPROVED", approver="pane-direct")
-    elif is_q:
+    if is_q:
+        # INV-Q-1: a question is ANSWERED regardless of its safety flag — check
+        # is_q FIRST so a future change to the question cache entry's is_safe
+        # cannot silently regress a question to APPROVED.
         resolve_escalation(pane_id=pane_id, resolution="ANSWERED", approver="pane-direct")
+    elif not cached_clear.get("is_safe", True):
+        resolve_escalation(pane_id=pane_id, resolution="APPROVED", approver="pane-direct")
     else:
         resolve_escalation(pane_id=pane_id, approver="other")
 
@@ -694,7 +697,10 @@ def sweep_answered_questions(confirm_polls: int = 2) -> int:
         q_pane = q_esc.get("pane_id")
         if not q_pane:
             continue
-        q_info = get_pane_info(q_pane)
+        try:
+            q_info = get_pane_info(q_pane)
+        except Exception:
+            continue  # fail-closed: unknown status -> keep pending
         if not q_info:
             continue
         if q_info.get("agent_status") == "blocked":
