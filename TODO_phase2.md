@@ -1,3 +1,18 @@
+## Handoff — Next Pick (맥락 보존 우선순위)
+> 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
+> 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
+
+1. [Epic 잔여 — 최고 맥락] Fail-closed 편향 전환 M3/M5/M7
+   - M3 complexity tax, M5 origin weighting(INV-12: Origin enum 단일 사용, INJECTED/EMERGENT hard-escalate), M7 anti-fatigue(INV-13).
+   - 맥락: INV-1..13 불변식 + @oracle verdict(MODIFY) + 결정 레이어 순서(security_evaluator.py `_audit_static_shell_command`).
+2. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
+   - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
+3. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction
+   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`.
+4. [Architecture] Persistent Allowlist CUD(#91) + Test Runner Fast-Track(#137 item 3, 이번 세션 구현 중)
+   - 맥락: fail-closed allowlist(fast-track closed enum) + TUI /allow /revoke + INV-PL-1..3.
+5. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), UX 상태전이, 카피라이팅, 설정 모달 등.
+
 Bug (HIGHEST PRIORITY — handoff 후 최우선):
 [x] TUI가 terminal resize를 감지 못함: terminal 크기가 바뀌어도 작게 유지됨. (PR #94)
   - 실제 원인: NoPixelMouseDriver가 _enable_in_band_window_resize(2048h)만 no-op하고
@@ -133,7 +148,7 @@ Epic:
      미등록 매니저(yarn/pnpm/bun/nix/go install)·READ 쿼리 네트워크(brew search/npm view) 라우팅.
     [milestone 순서]
     1) [x] narrow AST + catch-all 제거 (PR #126) 2) [x] novelty/history gate + scope/TTL (PR #128) 3) [ ] complexity
-    4) [ ] package manager 5) [ ] origin weighting(마지막) 6) [ ] cloud judge confidence 상향
+     4) [x] package manager (PR #131) 5) [ ] origin weighting(마지막) 6) [ ] cloud judge confidence 상향
     7) [ ] anti-fatigue batch 집계 (INV-13 잔여, 2b)
 
 TASKS:
