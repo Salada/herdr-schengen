@@ -1406,39 +1406,35 @@ def _audit_static_shell_command(
     if cmd_str == "feedback_survey_skip":
         return True, "Auto-skipping CLI feedback survey ([0] Skip)", DecisionLayer.FAST_TRACK_AST
 
-    # 0a. Check AGY File Edit / Creation dialog commands (edit_file <path>, create_file <path>)
+    # 0a. Check AGY File Edit / Creation dialog commands (edit_file <path>,
+    #     create_file <path>). #7759: the payload may be newline-delimited for
+    #     multi-file edits — collect ALL paths, validate EACH against the
+    #     denylist (all-or-nothing, INV-EF-2), and only then fast-track.
     if cmd_str.startswith("edit_file ") or cmd_str.startswith("create_file "):
         op_type = "creation" if cmd_str.startswith("create_file ") else "edit"
-        target_path = cmd_str.split(" ", 1)[1].strip()
-        if HERMES_SANDBOX_PATTERN.search(target_path):
-            return (
-                False,
-                f"Forbidden file {op_type} targeting Hermes Sandbox: '{target_path}'",
-                DecisionLayer.SANDBOX_GUARD,
-            )
-        if (
-            SENSITIVE_FILE_PATTERN.search(target_path)
-            and "dot_zshenv.tmpl" not in target_path
-            and ".zshenv.local" not in target_path
-        ):
-            return (
-                False,
-                f"Attempting to perform file {op_type} on sensitive credential file: '{target_path}'",
-                DecisionLayer.SECRET_GUARD,
-            )
-        # Check gray zone classification for the target path
-        gz_tier = classify_resource_tier(target_path)
-        if gz_tier == ResourceTier.T4_CRITICAL:
-            return (
-                False,
-                f"Critical OS/Secret resource {op_type} blocked: '{target_path}'",
-                DecisionLayer.GRAY_ZONE_MATRIX,
-            )
+        raw = cmd_str.split(" ", 1)[1]
+        paths = [p.strip() for p in raw.split("\n") if p.strip()]
+        if not paths:
+            return False, f"File {op_type} request with no target path", DecisionLayer.NOT_ALLOWLISTED
+        for target_path in paths:
+            if HERMES_SANDBOX_PATTERN.search(target_path):
+                return False, f"Forbidden file {op_type} targeting Hermes Sandbox: '{target_path}'", DecisionLayer.SANDBOX_GUARD
+            if (
+                SENSITIVE_FILE_PATTERN.search(target_path)
+                and "dot_zshenv.tmpl" not in target_path
+                and ".zshenv.local" not in target_path
+            ):
+                return False, f"Attempting to perform file {op_type} on sensitive credential file: '{target_path}'", DecisionLayer.SECRET_GUARD
+            # Check gray zone classification for the target path
+            if classify_resource_tier(target_path) == ResourceTier.T4_CRITICAL:
+                return False, f"Critical OS/Secret resource {op_type} blocked: '{target_path}'", DecisionLayer.GRAY_ZONE_MATRIX
         # issue #7207: workspace .schengen/ allowlist fast-track (after denylists)
-        ws_hit = _check_workspace_allowlist(cmd_str, cwd=cwd, action_type="edit_file")
-        if ws_hit is not None:
-            return True, ws_hit[1], DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST
-        return True, f"Verified safe file {op_type}: '{target_path}'", DecisionLayer.FAST_TRACK_AST
+        # — single-file only (INV-EF-3 parity; multi-file stays explicit).
+        if len(paths) == 1:
+            ws_hit = _check_workspace_allowlist(cmd_str, cwd=cwd, action_type="edit_file")
+            if ws_hit is not None:
+                return True, ws_hit[1], DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST
+        return True, f"Verified safe file {op_type}: '{', '.join(paths)}'", DecisionLayer.FAST_TRACK_AST
 
     # 0a-2. Check opencode external-directory access dialog (access_directory <path>)
     if cmd_str.startswith("access_directory "):

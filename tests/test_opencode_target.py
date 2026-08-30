@@ -149,8 +149,9 @@ class TestCodexAdapter(unittest.TestCase):
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
 
-    def test_parse_file_edit_multi_destination_stays_fail_closed(self):
-        # Multiple Destination lines (multi-file edit) -> bare edit_file (fail-closed).
+    def test_parse_file_edit_multi_destination_returns_all_paths(self):
+        # #7759: multiple Destination lines (multi-file edit) -> newline-
+        # delimited paths so the evaluator validates EVERY target (INV-EF-2).
         text = (
             "Would you like to make the following edits?\n\n"
             "Destination: /repo/a.py\n"
@@ -158,7 +159,61 @@ class TestCodexAdapter(unittest.TestCase):
             "› 1. Yes, proceed (y)\n"
             "Press enter to confirm or esc to cancel"
         )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text), "edit_file /repo/a.py\n/repo/b.py"
+        )
+
+    def test_parse_file_edit_leading_indent_destination(self):
+        # #7759: leading-indent `  Destination: <path>` still parses.
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "  Destination: /repo/a.py\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file /repo/a.py")
+
+    def test_parse_file_edit_framed_destination(self):
+        # #7759: ratatui frame border `│ Destination: /path │` — the frame
+        # chars must NOT be captured into the path.
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "│ Destination: /repo/a.py │\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file /repo/a.py")
+
+    def test_parse_file_edit_lowercase_destination(self):
+        # #7759: lowercase `destination:` / `file:` labels parse (IGNORECASE).
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "destination: /repo/a.py\n"
+            "file: /repo/b.py\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
+        )
+        self.assertEqual(
+            self.adapter.parse_permission_request(text), "edit_file /repo/a.py\n/repo/b.py"
+        )
+
+    def test_parse_file_edit_regression_pathless_and_spaces(self):
+        # Regression: pathless -> bare edit_file (fail-closed, INV-EF-1).
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "Description: Apply proposed file edits\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
+        )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
+        # Regression: a single path containing spaces is preserved verbatim.
+        text2 = (
+            "Would you like to make the following edits?\n\n"
+            "Destination: /repo/My Folder/x.py\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text2), "edit_file /repo/My Folder/x.py")
 
     def test_parse_file_edit_legacy_update_still_works(self):
         # Legacy `*** Update File:` header must keep working (single Update -> path).

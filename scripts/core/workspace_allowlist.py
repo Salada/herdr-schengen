@@ -247,9 +247,8 @@ def check_rule(policy, action_type: str, target: str) -> bool:
     return False
 
 
-def _atomic_write(path: Path, policy: dict) -> None:
-    """Write the policy atomically: tmp + fsync + os.replace + fsync dir."""
-    data = json.dumps(policy, indent=2, ensure_ascii=False).encode("utf-8")
+def _atomic_write_raw(path: Path, data: bytes) -> None:
+    """Write raw bytes atomically: tmp + fsync + os.replace + fsync dir."""
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".allowlist-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
@@ -271,6 +270,29 @@ def _atomic_write(path: Path, policy: dict) -> None:
                 os.unlink(tmp_name)
         except Exception:
             pass
+
+
+def _atomic_write(path: Path, policy: dict) -> None:
+    """Write the policy atomically (JSON-serialized via the raw helper)."""
+    _atomic_write_raw(path, json.dumps(policy, indent=2, ensure_ascii=False).encode("utf-8"))
+
+
+def restore_policy(path, raw_bytes) -> bool:
+    """Atomically restore a policy file's previous raw bytes (INV-EF-4 rollback).
+
+    Used by the multi-rule all-or-nothing promotion: on ANY refusal the
+    pre-batch snapshot is restored byte-for-byte, so a partial batch never
+    persists. Returns True on success.
+    """
+    try:
+        p = Path(path)
+        if not p.parent.is_dir():
+            return False
+        _atomic_write_raw(p, raw_bytes)
+        _policy_cache.pop(str(p), None)
+        return True
+    except Exception:
+        return False
 
 
 def _policy_root(policy_path: Path) -> str:
