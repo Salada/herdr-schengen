@@ -1159,7 +1159,7 @@ def compute_complexity(cmd_str: str) -> int:
     # INV-16 fix (issue #2555): '2>&1' / '1>&2' / '&>' are file-descriptor
     # redirections, not command separators — strip the '&' so it is not
     # misread as a segment split. The '>' is still counted as a redirection.
-    s = re.sub(r">&", ">", s)
+    s = re.sub(r">&|&>", ">", s)
     n_segments = len([seg for seg in _COMPLEXITY_CONTROL_RE.split(s) if seg.strip()])
     n_subst = s.count("$(") + s.count("`")
     n_redir = len(_COMPLEXITY_REDIR_RE.findall(s))
@@ -1214,6 +1214,10 @@ def _is_fast_track_test_runner(cmd_str: str) -> bool:
     rest = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+", "", cmd_str).strip()
     # (issue #2555) strip a trailing stderr-redirect '2>&1' (fd redirect, no file write)
     rest = re.sub(r"\s+2>&1\b", " ", rest).strip()
+    # (round 2) reject any remaining file redirection / heredoc in the FULL
+    # command (head AND filter tail) — '> file' / '>> file' / '< file' / '<<'.
+    if re.search(r">>?|<<?", rest):
+        return False
     # allow AT MOST ONE pipe whose tail is a single read-only filter
     if "|" in rest:
         head, tail = rest.split("|", 1)
@@ -1225,9 +1229,6 @@ def _is_fast_track_test_runner(cmd_str: str) -> bool:
         if not tok or tok[0] not in ("grep", "head", "tail", "sort", "uniq", "rg"):
             return False
         rest = head.strip()
-    # no remaining file redirection / heredoc allowed
-    if re.search(r">>?|<<?", rest):
-        return False
     tokens = rest.split()
     if not tokens:
         return False

@@ -1177,10 +1177,24 @@ class TestTestRunnerStderrRedirect(unittest.TestCase):
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
 
+    def test_test_runner_filter_tail_redirection_stays_fail_closed(self):
+        # Round-2 finding: the redirection reject must run on the FULL command
+        # (head AND filter tail) — '> file' / '>> file' on the filter tail must
+        # not bypass it.
+        unsafe_cmds = (
+            "python3 -m unittest discover -s tests | grep FAIL > /tmp/out",  # filter-tail file redirect
+            "python3 -m unittest discover -s tests | grep FAIL >> /tmp/out",  # filter-tail append
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
     def test_compute_complexity_2and1_not_a_separator(self):
         # Fix A metric: '2>&1' counts as 1 segment + 1 redirection (was 2 segments + 1).
         self.assertEqual(compute_complexity("ls 2>&1"), 2)
         self.assertEqual(compute_complexity("a 2>&1 | b"), 3)
+        # Round-2: the combined '&>' stdout+stderr redirect is also not a separator.
+        self.assertEqual(compute_complexity("cmd &> file"), 2)
 
 
 if __name__ == "__main__":
