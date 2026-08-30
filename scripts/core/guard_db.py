@@ -506,16 +506,44 @@ def get_pattern_analysis() -> list[dict]:
 
 
 def check_persisted_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
-    """Check if command matches any human-persisted allowlist regex."""
+    """Check if command matches any human-persisted allowlist regex.
+
+    Reviewer fix (fail-open closure): the match is a FULL match
+    (``re.fullmatch``), NOT a substring ``re.search``. A rule must match the
+    ENTIRE command string, so ``/allow-last``'s ``re.escape(raw_command)`` is an
+    exact-literal contract: ``git\\ status`` matches ONLY ``git status``, never
+    ``git status && rm -rf /`` — a compound command with a dangerous suffix can
+    never be allowlisted past the denylist (INV-PL-2 / denylist non-bypass).
+    """
     init_db()
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT pattern_regex, description FROM user_allowlist WHERE" " is_active = 1")
         for row in cursor.fetchall():
             pat = row["pattern_regex"]
-            if re.search(pat, cmd_str):
+            if re.fullmatch(pat, cmd_str):
                 return True, f"Matched User Allowlist: {row['description'] or pat}"
     return False, None
+
+
+# INV-PL-4: the "matches-everything" family is fully rejected at write time
+# (reviewer-expanded; the len<3 floor is unchanged — that is a separate item).
+_DANGEROUS_CATCH_ALLS = {
+    ".*",
+    ".+",
+    "^.*$",
+    "^.+$",
+    ".*?",
+    ".+?",
+    "^.*",
+    ".*$",
+    "(?s).",
+    "..",
+    r"\A.\Z",
+    "(?:.)",
+    ".|.*",
+    "(?s:.)",
+}
 
 
 def add_to_allowlist(pattern_regex: str, description: str = "", created_by: str = "human-tui"):
@@ -527,8 +555,7 @@ def add_to_allowlist(pattern_regex: str, description: str = "", created_by: str 
     """
     init_db()
     pat_stripped = pattern_regex.strip()
-    dangerous_catch_alls = {".*", ".+", "^.*$", "^.+$", ".*?", ".+?", "^.*", ".*$"}
-    if pat_stripped in dangerous_catch_alls or len(pat_stripped) < 3:
+    if pat_stripped in _DANGEROUS_CATCH_ALLS or len(pat_stripped) < 3:
         raise ValueError(f"Overbroad or dangerous allowlist pattern rejected: '{pattern_regex}'")
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -577,8 +604,7 @@ def update_allowlist_rule(rule_id, pattern_regex=None, description=None, created
     now_iso = datetime.now(timezone.utc).isoformat()
     if pattern_regex is not None:
         pat_stripped = str(pattern_regex).strip()
-        dangerous_catch_alls = {".*", ".+", "^.*$", "^.+$", ".*?", ".+?", "^.*", ".*$"}
-        if pat_stripped in dangerous_catch_alls or len(pat_stripped) < 3:
+        if pat_stripped in _DANGEROUS_CATCH_ALLS or len(pat_stripped) < 3:
             raise ValueError(f"Overbroad or dangerous allowlist pattern rejected: '{pattern_regex}'")
 
     with get_db_connection() as conn:

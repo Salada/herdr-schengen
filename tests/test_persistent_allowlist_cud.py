@@ -12,6 +12,7 @@ Covers the full Create/Update/Revoke lifecycle of the global `user_allowlist`:
 """
 
 import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -186,6 +187,36 @@ class TestPersistentAllowlistCud(unittest.TestCase):
         self.assertEqual(revoke_allowlist_rule(rule_id), 0)  # already revoked
         rows = _audit_rows()
         self.assertEqual([r["mechanism"] for r in rows], ["allowlist-create", "allowlist-revoke"])
+
+    # --- Reviewer fix: full-match (not substring) + expanded catch-all blacklist ---
+
+    def test_fullmatch_blocks_dangerous_suffix(self):
+        # /allow-last stores re.escape(raw_command) -> an exact-literal contract.
+        # A "git status" rule must NOT allowlist compound commands with
+        # dangerous suffixes (fail-open closure; denylist non-bypass).
+        add_to_allowlist(re.escape("git status"), description="status", created_by="human-tui")
+        ok, _ = check_persisted_allowlist("git status")
+        self.assertTrue(ok)
+        ok_suffix, _ = check_persisted_allowlist("git status && rm -rf /")
+        self.assertFalse(ok_suffix, "compound command with dangerous suffix must NOT be allowlisted")
+        ok_semicolon, _ = check_persisted_allowlist("git status; sudo id")
+        self.assertFalse(ok_semicolon, "compound command with sudo must NOT be allowlisted")
+        ok_prefix, _ = check_persisted_allowlist("git statusx")
+        self.assertFalse(ok_prefix, "prefix-extended command must NOT be allowlisted")
+
+    def test_catch_all_variants_rejected(self):
+        add_to_allowlist("^git show$")
+        rule_id = list_allowlist_rules()[0]["id"]
+        variants = ["(?s).", "..", r"\A.\Z", "(?:.)", ".|.*", "(?s:.)"]
+        for bad in variants:
+            with self.assertRaises(ValueError, msg=f"add must reject {bad!r}"):
+                add_to_allowlist(bad)
+            with self.assertRaises(ValueError, msg=f"update must reject {bad!r}"):
+                update_allowlist_rule(rule_id, pattern_regex=bad)
+        # the original catch-alls still rejected too
+        for bad in (".*", ".+", "^.*$", "^.+$", ".*?", ".+?", "^.*", ".*$"):
+            with self.assertRaises(ValueError):
+                add_to_allowlist(bad)
 
 
 if __name__ == "__main__":
