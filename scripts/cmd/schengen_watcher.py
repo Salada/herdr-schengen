@@ -31,6 +31,7 @@ import time
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 # Add script directory to sys.path for local imports
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -609,6 +610,20 @@ def _inject_runtime_path() -> None:
     os.environ["PATH"] = os.pathsep.join(parts)
 
 
+def _should_evict_stale_escalation(cached: Optional[dict], agent_status: str) -> bool:
+    """Return True if a cached UNSAFE escalation should be auto-evicted.
+
+    Signals pane-direct adjudication: the agent was `blocked` (dialog shown) when
+    the escalation was cached, and has since transitioned to a non-blocked state
+    (working / idle / done) — i.e. the user answered the dialog directly in the pane.
+    """
+    if not cached or cached.get("is_safe", True):
+        return False
+    if cached.get("status", "") != "blocked":
+        return False
+    return agent_status in ("working", "idle", "done")
+
+
 def verify_host_runtime_environment():
     """Ensure the watcher runs within a supported agent runtime (Antigravity or OpenCode) under Herdr.
 
@@ -1100,6 +1115,25 @@ def main():
                     if inspector.active_human and inspector.active_human[0] == pane_id:
                         inspector.active_human = None
                     inspector.release(pane_id)
+                    continue
+
+                # Live revalidation (issue #33): the agent was `blocked` (dialog
+                # shown) when this UNSAFE escalation was cached, but has since
+                # transitioned to a non-blocked state — the user answered the
+                # dialog DIRECTLY in the pane (y/n/enter). Auto-evict the stale
+                # escalation instead of letting the scrollback dialog keep it
+                # PENDING for minutes.
+                cached_esc = last_processed_prompt.get(pane_id)
+                if _should_evict_stale_escalation(cached_esc, agent_status):
+                    resolve_escalation(pane_id=pane_id, approver="pane-direct")
+                    last_processed_prompt.pop(pane_id, None)
+                    if inspector.active_human and inspector.active_human[0] == pane_id:
+                        inspector.active_human = None
+                    inspector.release(pane_id)
+                    print(
+                        f"♻️ [AUTO-EVICT] Pane {pane_id}: agent left blocked state; resolved stale escalation (pane-direct).",
+                        flush=True,
+                    )
                     continue
 
                 if req_cmd.startswith("question"):
