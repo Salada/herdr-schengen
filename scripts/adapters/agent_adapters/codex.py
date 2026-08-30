@@ -88,6 +88,13 @@ class CodexAdapter(AgentAdapter):
             q = _extract_codex_question_text(visible_text)
             return f"question: {q}" if q else "question"
 
+        # Live-dialog gate (issue #17): require the approval dialog's footer to be
+        # present in the tail, so a cleared dialog lingering in the terminal
+        # scrollback is not re-parsed as a pending request. The question dialog is
+        # handled above with its own footer ("enter to submit answer").
+        if not footer_is_live(visible_text, "Press enter to confirm or esc to cancel"):
+            return None
+
         # Exec (shell): the "$ <command>" body before the "1. Yes" option row.
         m = re.search(r"\$\s+([\s\S]*?)\n\s*[›>]?\s*1\.\s*Yes", visible_text)
         if m:
