@@ -473,6 +473,20 @@ Idea / Research:
         - INV-AGY-1: 축약된 생략 줄(`⋯ lines hidden`)이 존재하는 상태에서 내용 미확인 채로 임의 통과(Fail-Open) 금지.
         - INV-AGY-2: `ctrl+g` 전개 실패 또는 원문 읽기 불가 시에만 안전하게 Fail-Closed 에스컬레이션.
 
+[] [Task/Feature] OpenCode 장문 Git 커밋 메시지/스크립트 단서 부족 시 `ctrl+f` 풀스크린 전개 자율 조사 Tool Call 구현
+   - Context & Problem:
+     - OpenCode에서 긴 git 커밋 메시지(`git commit -m "$(cat <<'EOF' ... EOF)"`)나 다줄 복합 스크립트 실행 시, 다이얼로그 뷰포트 내 텍스트가 잘리거나 스크롤되어 Gatekeeper LLM / Inspector가 메시지 전문 및 동적 치환 내용을 온전히 확인하지 못하고 단서 부족으로 불필요하게 에스컬레이션되는 현상 발생.
+   - Solution & Adapter Tool Call Architecture:
+     1. OpenCode `ctrl+f` 풀스크린 전개 활용:
+        - OpenCode 모달은 하단에 `ctrl+f fullscreen` 단축키를 제공하여 화면 전체 높이로 다이얼로그 내용을 전개 가능.
+     2. Gatekeeper 자율 전개 Tool Call (`expand_opencode_dialog` 또는 공용 `expand_dialog`):
+        - Gatekeeper LLM이 텍스트 절단이나 단서 부족 감지 시, `herdr agent send-keys <pane_id> ctrl+f`를 직접 호출하여 풀스크린 다이얼로그의 전체 메시지 본문을 획득.
+     3. 100% 전문 안전성 검증 후 자율 판정:
+        - Commit message 및 Heredoc 전체에 대해 AST/민감 경로/인젝션 위험을 완벽히 검증한 후, `approve_escalation`으로 자율 승인 진행.
+     4. 에이전트 어댑터별 다이얼로그 전개 표준 인터페이스 통합:
+        - `adapter.expand_dialog(pane_id)`: AGY(`ctrl+g`), OpenCode(`ctrl+f`), Codex(`ctrl+a`).
+
+
 
 
 
