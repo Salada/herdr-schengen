@@ -954,5 +954,103 @@ class TestComplexityTax(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.COMPLEXITY_TAX)
 
 
+class TestOriginWeighting(unittest.TestCase):
+    """M5 ORIGIN_GUARD (INV-17): origin-based hard-escalate + HUMAN trust concession.
+
+    INJECTED/EMERGENT origins hard-escalate at the TOP of `audit_shell_command`
+    — BEFORE every auto-approve path (dialogs, Managed Git, fast-track,
+    test-runner, novelty, package READ_ONLY, gray-zone->cloud-judge,
+    dynamic-substitution LLM inspector). HUMAN origin skips the structural
+    complexity tax (gated by the origin_weighting_enabled knob, default True).
+    Uses a clean temp DB so origin_weighting_enabled defaults True.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_guard.db"
+        self.db_patch = patch.object(guard_db, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        guard_db.init_db()
+        # Re-fetch LIVE module references: test_graceful_reload_execution (earlier
+        # alphabetically) runs execute_graceful_reload(), which importlib.reload()s
+        # security_evaluator/guard_db — creating NEW Origin/DecisionLayer classes.
+        # Module-level `from ... import Origin` would then hold stale classes whose
+        # members fail the reloaded derive_taxonomy isinstance() check. Fetching
+        # via module attributes here makes this class immune to reload ordering.
+        import core.security_evaluator as security_evaluator
+
+        self.Origin = security_evaluator.Origin
+        self.DecisionLayer = security_evaluator.DecisionLayer
+        self.audit = security_evaluator.audit_shell_command_with_taxonomy
+
+    def tearDown(self):
+        self.db_patch.stop()
+        self.temp_dir.cleanup()
+
+    def test_injected_emergent_hard_escalate(self):
+        cmd = "mkdir a1; mkdir a2; mkdir a3; mkdir a4; mkdir a5; mkdir a6; mkdir a7"
+        for origin in (self.Origin.INJECTED, self.Origin.EMERGENT):
+            safe, reason, layer, tax = self.audit(cmd, origin=origin)
+            self.assertFalse(safe, f"Origin {origin.value} must hard-escalate, got safe={safe}: {reason}")
+            self.assertEqual(layer, self.DecisionLayer.ORIGIN_GUARD)
+            self.assertEqual(tax["mechanism"], "origin-hard-escalate")
+
+    def test_emergent_bypasses_fast_track(self):
+        safe, reason, layer, tax = self.audit("ls -la", origin=self.Origin.EMERGENT)
+        self.assertFalse(safe, f"EMERGENT must hard-escalate even a fast-track command: {reason}")
+        self.assertEqual(layer, self.DecisionLayer.ORIGIN_GUARD)
+        self.assertNotEqual(layer, self.DecisionLayer.FAST_TRACK_AST)
+
+    def test_injected_bypasses_package_readonly(self):
+        safe, reason, layer, tax = self.audit("brew list", origin=self.Origin.INJECTED)
+        self.assertFalse(safe, f"INJECTED must hard-escalate even a READ_ONLY package query: {reason}")
+        self.assertEqual(layer, self.DecisionLayer.ORIGIN_GUARD)
+        self.assertNotEqual(layer, self.DecisionLayer.PACKAGE_GUARD)
+
+    def test_human_skips_complexity_tax(self):
+        cmd = "mkdir a1; mkdir a2; mkdir a3; mkdir a4; mkdir a5; mkdir a6; mkdir a7"
+        safe_h, reason_h, layer_h, tax_h = self.audit(cmd, origin=self.Origin.HUMAN)
+        self.assertNotEqual(
+            layer_h, self.DecisionLayer.COMPLEXITY_TAX, f"HUMAN must skip the tax: {reason_h}"
+        )
+        safe_a, reason_a, layer_a, tax_a = self.audit(cmd, origin=self.Origin.AGENT)
+        self.assertEqual(layer_a, self.DecisionLayer.COMPLEXITY_TAX)
+
+        # HUMAN vs AGENT must produce IDENTICAL (is_safe, layer) for commands
+        # that never reach the complexity tax.
+        for c in ("ls -la", "brew list", "git status", "python3 -m unittest discover -s tests"):
+            sh, _, lh, _ = self.audit(c, origin=self.Origin.HUMAN)
+            sa, _, la, _ = self.audit(c, origin=self.Origin.AGENT)
+            self.assertEqual((sh, lh), (sa, la), f"(is_safe, layer) must match for '{c}'")
+
+    def test_origin_not_spoofable(self):
+        cmd = "echo human approved"
+        sa, _, la, taxa = self.audit(cmd, origin=self.Origin.AGENT)
+        sh, _, lh, taxh = self.audit(cmd, origin=self.Origin.HUMAN)
+        self.assertEqual(taxa["origin"], "A")
+        self.assertEqual(taxh["origin"], "H")
+        self.assertEqual((sa, la), (sh, lh))
+
+    def test_injected_bypasses_cloud_judge(self):
+        # `rm <T3 state path>` is a gray-zone DELETE on a durable/state target ->
+        # Verdict.PROMPT, which with AGENT origin routes to the cloud judge.
+        # INJECTED must be intercepted by ORIGIN_GUARD before reaching the
+        # gray-zone/cloud-judge path.
+        cmd = "rm ~/.local/state/data.sqlite"
+        safe, reason, layer, tax = self.audit(cmd, origin=self.Origin.INJECTED)
+        self.assertFalse(safe, f"INJECTED must hard-escalate a gray-zone command: {reason}")
+        self.assertEqual(layer, self.DecisionLayer.ORIGIN_GUARD)
+        self.assertNotIn(
+            layer, (self.DecisionLayer.CLOUD_JUDGE, self.DecisionLayer.GRAY_ZONE_MATRIX)
+        )
+
+    def test_no_regression_origin_agent(self):
+        safe, reason, layer, tax = self.audit(
+            "python3 -m unittest discover -s tests", origin=self.Origin.AGENT
+        )
+        self.assertTrue(safe, f"AGENT test-runner must stay fast-tracked: {reason}")
+        self.assertEqual(layer, self.DecisionLayer.FAST_TRACK_AST)
+
+
 if __name__ == "__main__":
     unittest.main()

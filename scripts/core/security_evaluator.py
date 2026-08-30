@@ -37,7 +37,12 @@ from core.gray_zone_evaluator import (
     evaluate_gray_zone_operation,
     format_decision_guidance,
 )
-from core.guard_db import get_complexity_tax_config, has_human_approval_pattern, normalize_command
+from core.guard_db import (
+    get_complexity_tax_config,
+    get_origin_weighting_config,
+    has_human_approval_pattern,
+    normalize_command,
+)
 from core.redaction import redact_for_cloud
 from core.semgrep_evaluator import audit_script_with_semgrep
 from core.shellcheck_evaluator import audit_shell_with_shellcheck
@@ -948,6 +953,7 @@ class DecisionLayer(str, Enum):
     HUMAN_APPROVED = "HUMAN_APPROVED"  # Novelty gate: canonical pattern has prior human approval (scope+TTL)
     PACKAGE_GUARD = "PACKAGE_GUARD"  # Package-manager 3-tuple classifier (MUTATING vs READ_ONLY)
     COMPLEXITY_TAX = "COMPLEXITY_TAX"  # Structural complexity deferral (never auto-approves)
+    ORIGIN_GUARD = "ORIGIN_GUARD"  # Origin-based hard-escalate (INJECTED/EMERGENT never auto-approve)
 
 
 # INV-6: forensic / network primitives must NEVER fast-track (binary inspection / egress)
@@ -1115,12 +1121,15 @@ def compute_complexity(cmd_str: str) -> int:
     return n_segments + n_subst + n_redir
 
 
-def _apply_complexity_tax(cmd_str: str, cfg: dict) -> "Optional[tuple[bool, str, str]]":
+def _apply_complexity_tax(cmd_str: str, cfg: dict, origin: Origin) -> "Optional[tuple[bool, str, str]]":
     """Return an escalation tuple if the command exceeds the complexity threshold,
-    else None (pass through). NEVER returns is_safe=True. Origin-agnostic for now;
-    M5 threads `origin` through this signature."""
+    else None (pass through). NEVER returns is_safe=True. M5 threads `origin`
+    through this signature; HUMAN origin skips the structural-complexity deferral
+    (trust concession gated by the origin_weighting_enabled knob)."""
     if not cfg.get("complexity_tax_enabled", True):
         return None
+    if origin == Origin.HUMAN and get_origin_weighting_config().get("origin_weighting_enabled", True):
+        return None   # M5: HUMAN trust concession — skip structural complexity deferral
     thr = cfg.get("complexity_threshold", 6)
     cx = compute_complexity(cmd_str)
     if cx > thr:
@@ -1245,6 +1254,7 @@ def _audit_static_shell_command(
     cwd: str = "",
     scope: str = "default",
     agent_id: str = "default",
+    origin: Origin = Origin.AGENT,
 ) -> tuple[bool, str, str]:
     """Audit static shell command line with PATH, Managed Git rules, and AST judge."""
     # Normalize leading/trailing whitespace so dialog dispatch (startswith / ==)
@@ -1342,6 +1352,7 @@ def _audit_static_shell_command(
             cwd=cwd,
             scope=scope,
             agent_id=agent_id,
+            origin=origin,
         )
         if cloud_safe:
             return True, f"Unhandled dialog cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
@@ -1446,12 +1457,18 @@ def _audit_static_shell_command(
     if gz_verdict == Verdict.BLOCK:
         return False, f"Non-VCS Gray-Zone Guard [BLOCK]: {gz_reason}", DecisionLayer.GRAY_ZONE_MATRIX
     if gz_verdict == Verdict.PROMPT and gz_payload:
-        tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config())
+        tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config(), origin)
         if tax is not None:
             return tax
         guidance = format_decision_guidance(gz_payload)
         cloud_safe, cloud_reason = audit_with_cloud_judge(
-            cmd_str, context=guidance, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
+            cmd_str,
+            context=guidance,
+            reasoning_effort=reasoning_effort,
+            cwd=cwd,
+            scope=scope,
+            agent_id=agent_id,
+            origin=origin,
         )
         if cloud_safe:
             return True, f"Gray-zone cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
@@ -1472,7 +1489,7 @@ def _audit_static_shell_command(
 
     # M3 COMPLEXITY_TAX: gate the UNPROVEN auto-approve paths (novelty recall,
     # package READ_ONLY). Runs AFTER the provably-benign fast-track + test-runner.
-    tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config())
+    tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config(), origin)
     if tax is not None:
         return tax
 
@@ -1505,12 +1522,23 @@ def audit_shell_command(
     cwd: str = "",
     scope: str = "default",
     agent_id: str = "default",
+    origin: Origin = Origin.AGENT,
 ) -> tuple[bool, str, str]:
     """Audit shell command line with PATH, Managed Git rules, dynamic substitution inspection, and AST judge.
 
     Returns:
         (is_safe: bool, reason: str, layer: str)
     """
+    # M5 INV-17: INJECTED/EMERGENT hard-escalate BEFORE every auto-approve path
+    # (dialogs, Managed Git, fast-track, test-runner, novelty, package READ_ONLY,
+    # gray-zone->cloud-judge, dynamic-substitution LLM inspector).
+    if origin in (Origin.INJECTED, Origin.EMERGENT):
+        return (
+            False,
+            f"Origin {origin.value} hard-escalates; requires human review",
+            DecisionLayer.ORIGIN_GUARD,
+        )
+
     if not cmd_str or not cmd_str.strip():
         return True, "Safe", DecisionLayer.FAST_TRACK_AST
 
@@ -1540,6 +1568,7 @@ def audit_shell_command(
             cwd=cwd,
             scope=scope,
             agent_id=agent_id,
+            origin=origin,
         )
         if exp_safe:
             return (
@@ -1551,7 +1580,13 @@ def audit_shell_command(
             return False, f"Dynamic substitution expanded to unsafe command: {exp_reason}", exp_layer
 
     return _audit_static_shell_command(
-        cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
+        cmd_str,
+        use_llm_judge=use_llm_judge,
+        reasoning_effort=reasoning_effort,
+        cwd=cwd,
+        scope=scope,
+        agent_id=agent_id,
+        origin=origin,
     )
 
 
@@ -1697,6 +1732,9 @@ def derive_taxonomy(
     elif layer == DecisionLayer.PACKAGE_GUARD:
         consequence = Consequence.INTEGRITY
         mechanism = "package-mutation"
+    elif layer == DecisionLayer.ORIGIN_GUARD:
+        consequence = Consequence.NONE
+        mechanism = "origin-hard-escalate"
     elif layer == DecisionLayer.COMPLEXITY_TAX:
         consequence = Consequence.NONE
         mechanism = "complexity-tax"
@@ -1742,7 +1780,13 @@ def audit_shell_command_with_taxonomy(
     counterfactual logging metadata.
     """
     is_safe, reason, raw_layer = audit_shell_command(
-        cmd_str, use_llm_judge=use_llm_judge, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
+        cmd_str,
+        use_llm_judge=use_llm_judge,
+        reasoning_effort=reasoning_effort,
+        cwd=cwd,
+        scope=scope,
+        agent_id=agent_id,
+        origin=origin,
     )
     try:
         layer = DecisionLayer(raw_layer) if not isinstance(raw_layer, DecisionLayer) else raw_layer
