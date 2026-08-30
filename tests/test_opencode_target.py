@@ -13,6 +13,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
 from adapters.agent_adapters.opencode import (
+    _norm_req_cmd,
     channel_event_to_req_cmd,
     decide_opencode_injection,
     read_channel_event,
@@ -698,6 +699,39 @@ class TestOpenCodeInjectSkip(unittest.TestCase):
         ), patch.dict(os.environ, {"SCHENGEN_OPENCODE_REPOLL_SECONDS": "0"}):
             approved, reason = self.adapter.inject_approval("w1D:p1", "python3 -m unittest discover -s tests")
         self.assertTrue(approved)
+
+
+class TestNormReqCmd(unittest.TestCase):
+    """_norm_req_cmd must be SURGICAL (prompt + whitespace only), not a
+    security-collapsing normalization (reviewer round 2 on issue #1910)."""
+
+    def test_different_paths_do_not_normalize_equal(self):
+        # A dialog that changed to a DIFFERENT path must NOT be treated as the
+        # same command: quoted payloads / absolute paths must stay distinct.
+        self.assertNotEqual(
+            _norm_req_cmd("edit_file /Users/alice/foo.txt"),
+            _norm_req_cmd("edit_file /Users/alice/.ssh/id_rsa"),
+        )
+        self.assertNotEqual(
+            _norm_req_cmd("cat /home/bob/a.txt"),
+            _norm_req_cmd("cat /home/bob/.aws/credentials"),
+        )
+
+    def test_prompt_prefix_and_whitespace_still_match(self):
+        # The intended-match behavior is preserved: leading '$ ' prompt and
+        # whitespace differences of the SAME command still match.
+        self.assertEqual(
+            _norm_req_cmd("$ python3 -m unittest discover -s tests"),
+            _norm_req_cmd("python3 -m unittest discover -s tests"),
+        )
+        self.assertEqual(_norm_req_cmd("  ls   -la  "), _norm_req_cmd("ls -la"))
+
+    def test_quoted_payloads_do_not_normalize_equal(self):
+        # Quoted -c/-d/-m payloads must stay distinct (no <STRING> collapsing).
+        self.assertNotEqual(
+            _norm_req_cmd('python3 -c "print(1)"'),
+            _norm_req_cmd('python3 -c "print(2)"'),
+        )
 
 
 class TestStructuredPermissionChannel(unittest.TestCase):

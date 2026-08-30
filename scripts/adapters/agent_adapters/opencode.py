@@ -17,8 +17,6 @@ from adapters.herdr_client import get_pane_text, run_cmd
 
 from adapters.agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, footer_is_live, register
 
-from core.guard_db import normalize_command
-
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 
 # Box-drawing / block-element glyphs rendered by the Bubble Tea panel border
@@ -211,14 +209,15 @@ def _norm_req_cmd(s) -> str:
     """Canonicalize a request-command for equality comparison (issue #23/#1910).
 
     A channel-sourced raw_command and a pane-text re-parse of the SAME dialog can
-    differ by a leading shell-prompt '$ ' (the TUI renders it, the channel does
-    not) or by whitespace (soft-wrap / extra spaces). Strip a leading '$ ' prompt
-    and apply normalize_command (whitespace/quotes/paths/hashes/versions) so the
-    live-dialog re-verification does not spuriously abort with INJECT_SKIP_CHANGED.
+    differ by a leading shell-prompt '$ ' or by whitespace (soft-wrap / extra
+    spaces). Strip a leading '$ ' prompt and collapse whitespace ONLY. Do NOT use
+    normalize_command: it collapses security-relevant fields (paths, quoted
+    payloads, hashes, versions) to placeholders, which would weaken the
+    INJECT_SKIP_CHANGED guard and approve a DIFFERENT command.
     """
     s = (s or "").strip()
     s = re.sub(r"^\$\s+", "", s)
-    return normalize_command(s)
+    return re.sub(r"\s+", " ", s)
 
 
 def _sanitize_pane_id(pane_id: str) -> str:
