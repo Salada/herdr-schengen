@@ -20,16 +20,17 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   - 해결 방향:
     • `codex_adapter`의 프롬프트 활성 상태 검사 강화: "Would you like..." 문구뿐 아니라 실제 하단 활성 선택지(`› 1. Yes, proceed` 또는 `Confirm: y/n`) 존재 여부를 앵커링하여 이미 완료된 과거 스크롤백 텍스트 오인식 방지.
     • TUI `/approve` 및 pane 직접 `y` 키 입력 후 다이얼로그 해제 감지 시 `resolve_escalation(pane_id, approver=...)` 호출 즉시 보장.
-[] [Bug/Approval] Escalation #1910 승인 발화 성공 후 실제 Pane(OpenCode w1D:p1) 명령 미승인 현상 디버깅 및 해결:
+[] [Bug/Approval] Escalation #1910 & #2339 승인 발화 성공 후 실제 Pane(OpenCode w1D:p1) 명령 미승인 현상 재발 및 디버깅:
   - 현상 분석:
-    • DB 기록 확인: #1910(OpenCode `unittest discover ... | grep ...`)에 대해 Gatekeeper가 4차례 `APPROVE` 판정을 내리고 승인했다고 응답했으나, 실제 OpenCode 서브에이전트(Fixer) 다이얼로그(`Allow once / Allow always / Reject`)는 승인되지 않고 계속 대기 상태로 유지됨.
+    • #1910에 이어 **#2339에서도 동일 현상 재발**: #2339(OpenCode `unittest tests.test_stale_escalation_eviction`)에 대해 Gatekeeper가 `APPROVE` 판정을 내리고 승인했다고 응답했으나, 10:09까지 실제 OpenCode 서브에이전트(Fixer) 다이얼로그(`Allow once / Allow always / Reject`)는 승인되지 않고 대기 상태로 유지됨.
   - 원인 추정 및 점검 포인트:
-    1. `opencode_adapter`의 승인 주입 방식: `client.permission.reply(permission_id)` 채널 호출 시 서브에이전트 task 내부 permission_id 누락/불일치로 RPC 무효화.
+    1. `opencode_adapter`의 승인 주입 방식: `client.permission.reply(permission_id)` 채널 호출 시 서브에이전트(Fixer Task) 내부 `permission_id` 누락/불일치로 RPC 무효화.
     2. Fallback 키 주입(`herdr agent send-keys` 또는 PTY Enter): OpenCode TUI의 활성 선택자(`› Allow once`)와 포커스 상태 불일치로 엔터/단축키 미전달.
-    3. `adjudication_log`에 기록은 되었으나 `inject_approval()` 반환값 실패 처리 누락 여부 확인.
+    3. `adjudication_log`에 기록 및 TUI 응답은 성공으로 출력되나, `inject_approval()`의 실제 전송 결과 검증 누락.
   - 해결 방안:
     • OpenCode 서브에이전트 권한 다이얼로그에 대한 RPC permission reply 채널 매핑 강화 및 fallback PTY 주입(Enter / Space) 보장.
     • `inject_approval()`의 실제 전송 성공 여부를 검증하고 실패 시 Gatekeeper에게 명확한 에러 반환 및 재시도 체계 확립.
+
 [] [Task/Architecture] Pane 직접 승인(Pane-Direct Adjudication) 실시간 감지 및 Stale Escalation 자동 해제(Auto-Eviction) 아키텍처 구현:
   - Context & Problem (사례: #2108 등):
     • 사용자가 TUI를 거치지 않고 대상 Pane(AGY/OpenCode/Codex)에서 직접 `1. Yes`나 `y`를 입력하여 승인·진행했음에도, Daemon과 TUI가 이를 실시간으로 감지하지 못해 수 분 동안 `pending_escalations` 큐에 Stale 상태로 잔류하는 현상 발생.
