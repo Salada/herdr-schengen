@@ -812,6 +812,74 @@ def set_channel_approve_config(enabled: bool) -> bool:
     return bool(enabled)
 
 
+_COMPLEXITY_TAX_DEFAULTS = {
+    "complexity_tax_enabled": True,
+    "complexity_threshold": 6,
+    "complexity_mode": "escalate",  # "escalate" | "judge" (judge reserved for M6)
+}
+
+
+def get_complexity_tax_config() -> dict[str, Any]:
+    """Complexity-tax knobs, backed by guard_config. Missing keys -> defaults.
+    threshold stored as string; coerce to int, clamp to [1, 10000]."""
+    init_db()
+    cfg = dict(_COMPLEXITY_TAX_DEFAULTS)
+    with get_db_connection() as conn:
+        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
+            k, v = row["key"], row["value"]
+            if k == "complexity_tax_enabled":
+                cfg[k] = _parse_bool(v)
+            elif k == "complexity_threshold":
+                try:
+                    cfg[k] = max(1, min(10000, int(v)))
+                except (TypeError, ValueError):
+                    pass
+            elif k == "complexity_mode":
+                if str(v).strip().lower() in ("escalate", "judge"):
+                    cfg[k] = str(v).strip().lower()
+    return cfg
+
+
+def set_complexity_tax_config(enabled=None, threshold=None, mode=None) -> dict[str, Any]:
+    """Human-only write path (TUI settings modal); returns the new config.
+    Mirror the set_answer_language / set_channel_approve_config upsert pattern."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        if enabled is not None:
+            conn.execute(
+                """
+                INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                ("complexity_tax_enabled", "true" if _parse_bool(enabled) else "false", now_iso),
+            )
+        if threshold is not None:
+            try:
+                clamped = max(1, min(10000, int(threshold)))
+            except (TypeError, ValueError):
+                clamped = int(_COMPLEXITY_TAX_DEFAULTS["complexity_threshold"])
+            conn.execute(
+                """
+                INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                ("complexity_threshold", str(clamped), now_iso),
+            )
+        if mode is not None:
+            m = str(mode).strip().lower()
+            if m in ("escalate", "judge"):
+                conn.execute(
+                    """
+                    INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                    """,
+                    ("complexity_mode", m, now_iso),
+                )
+        conn.commit()
+    return get_complexity_tax_config()
+
+
 def record_adjudication(
     escalation_id: int,
     pane_id: str,
