@@ -2,9 +2,10 @@
 > 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
 > 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
 
-1. [Epic 잔여 — 최고 맥락] Fail-closed 편향 전환 M3/M5/M7
-   - M3 complexity tax, M5 origin weighting(INV-12: Origin enum 단일 사용, INJECTED/EMERGENT hard-escalate), M7 anti-fatigue(INV-13).
+1. [Epic 잔여 — 최고 맥락] Fail-closed 편향 전환 M5/M7 (M3 complexity tax 완료 PR #139)
+   - M5 origin weighting(INV-12: Origin enum 단일 사용, INJECTED/EMERGENT hard-escalate), M7 anti-fatigue(INV-13).
    - 맥락: INV-1..13 불변식 + @oracle verdict(MODIFY) + 결정 레이어 순서(security_evaluator.py `_audit_static_shell_command`).
+   - M3 non-blocking 후속: (1) `2>&1` over-count('&' separator) (2) herestring(`<<<`) under-count (3) 산술확장 over-count (4) `get_complexity_tax_config()` 비-allowlist 명령마다 DB 2회 조회 → read-once 캐시 (5) `complexity_mode='judge'` dead-config(M6 예약).
 2. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
    - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
 3. [피어리뷰 후속] #17 footer_is_live / #52 codex 파서 / #45 runtime-path / #33 eviction
@@ -157,7 +158,7 @@ Epic:
      버전 문법(@latest/^/>=)·sudo-prefixed install(스트립 금지)·brew update/cleanup·npm audit vs audit fix·
      미등록 매니저(yarn/pnpm/bun/nix/go install)·READ 쿼리 네트워크(brew search/npm view) 라우팅.
     [milestone 순서]
-    1) [x] narrow AST + catch-all 제거 (PR #126) 2) [x] novelty/history gate + scope/TTL (PR #128) 3) [ ] complexity
+     1) [x] narrow AST + catch-all 제거 (PR #126) 2) [x] novelty/history gate + scope/TTL (PR #128) 3) [x] complexity (PR #139)
      4) [x] package manager (PR #131) 5) [ ] origin weighting(마지막) 6) [ ] cloud judge confidence 상향
     7) [ ] anti-fatigue batch 집계 (INV-13 잔여, 2b)
 
