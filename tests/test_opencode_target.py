@@ -77,18 +77,27 @@ class TestCodexAdapter(unittest.TestCase):
         self.assertEqual(self.adapter.parse_permission_request(text), "echo a && echo b && echo c")
 
     def test_parse_network_access(self):
-        text = 'Do you want to approve network access to "api.example.com"?\n\n› 1. Yes, just this once (y)'
+        text = (
+            'Do you want to approve network access to "api.example.com"?\n\n'
+            "› 1. Yes, just this once (y)\n"
+            "Press enter to confirm or esc to cancel"
+        )
         self.assertEqual(self.adapter.parse_permission_request(text), "network_access api.example.com")
 
     def test_parse_file_edit(self):
-        text = "Would you like to make the following edits?\n\n› 1. Yes, proceed (y)"
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
+        )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
 
     def test_parse_file_edit_preserves_single_patch_target(self):
         text = (
             "Would you like to make the following edits?\n\n"
             "*** Add File: TODO_codex.md\n+draft\n"
-            "*** End Patch\n\n› 1. Yes, proceed (y)"
+            "*** End Patch\n\n› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file TODO_codex.md")
 
@@ -96,7 +105,8 @@ class TestCodexAdapter(unittest.TestCase):
         text = (
             "Would you like to make the following edits?\n\n"
             "*** Delete File: TODO_codex.md\n"
-            "*** End Patch\n\n› 1. Yes, proceed (y)"
+            "*** End Patch\n\n› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
 
@@ -108,7 +118,8 @@ class TestCodexAdapter(unittest.TestCase):
             "Would you like to make the following edits?\n\n"
             "Description: Apply proposed file edits\n"
             "Destination: /repo/scripts/core/session_memory.py\n\n"
-            "› 1. Yes, proceed (y)"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
         )
         self.assertEqual(
             self.adapter.parse_permission_request(text), "edit_file /repo/scripts/core/session_memory.py"
@@ -119,7 +130,8 @@ class TestCodexAdapter(unittest.TestCase):
         text = (
             "Would you like to make the following edits?\n\n"
             "File: /repo/scripts/core/session_memory.py\n\n"
-            "› 1. Yes, proceed (y)"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
         )
         self.assertEqual(
             self.adapter.parse_permission_request(text), "edit_file /repo/scripts/core/session_memory.py"
@@ -130,7 +142,8 @@ class TestCodexAdapter(unittest.TestCase):
         text = (
             "Would you like to make the following edits?\n\n"
             "Description: Apply proposed file edits\n\n"
-            "› 1. Yes, proceed (y)"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
 
@@ -140,7 +153,8 @@ class TestCodexAdapter(unittest.TestCase):
             "Would you like to make the following edits?\n\n"
             "Destination: /repo/a.py\n"
             "Destination: /repo/b.py\n\n"
-            "› 1. Yes, proceed (y)"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file")
 
@@ -149,9 +163,43 @@ class TestCodexAdapter(unittest.TestCase):
         text = (
             "Would you like to make the following edits?\n\n"
             "*** Update File: TODO_codex.md\n-foo\n+bar\n"
-            "*** End Patch\n\n› 1. Yes, proceed (y)"
+            "*** End Patch\n\n› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
         )
         self.assertEqual(self.adapter.parse_permission_request(text), "edit_file TODO_codex.md")
+
+    def test_parse_edit_dialog_live_footer_returns_target(self):
+        # Issue #17: a LIVE edit dialog (footer present in the tail) still parses.
+        text = (
+            "Would you like to make the following edits?\n\n"
+            "Destination: /repo/x.py\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel"
+        )
+        self.assertEqual(self.adapter.parse_permission_request(text), "edit_file /repo/x.py")
+
+    def test_parse_edit_dialog_stale_returns_none(self):
+        # Issue #17: a cleared edit dialog lingering in scrollback (the footer has
+        # scrolled ABOVE the last 8 lines) must NOT be re-parsed as a pending edit.
+        text = (
+            "Would you like to make the following edits?\n"
+            "Destination: /repo/x.py\n"
+            "Press enter to confirm or esc to cancel\n"
+            + "".join(f"out: new pane output line {i}\n" for i in range(12))
+        )
+        self.assertIsNone(self.adapter.parse_permission_request(text))
+
+    def test_parse_exec_dialog_stale_returns_none(self):
+        # Issue #17: a cleared exec dialog ("$ <cmd>" still in scrollback, footer
+        # absent from the tail) must NOT be re-parsed as a pending command.
+        text = (
+            "Would you like to run the following command?\n\n"
+            "  $ ls -la /tmp\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "Press enter to confirm or esc to cancel\n"
+            + "".join(f"out: new pane output line {i}\n" for i in range(12))
+        )
+        self.assertIsNone(self.adapter.parse_permission_request(text))
 
     def test_parse_none_when_no_dialog(self):
         self.assertIsNone(self.adapter.parse_permission_request("random terminal output"))
