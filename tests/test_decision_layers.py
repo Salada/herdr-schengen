@@ -3,6 +3,7 @@
 import ast
 import os
 import sys
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -14,9 +15,12 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from core.security_evaluator import (
     DecisionLayer,
+    Origin,
     _python_normalization_candidates,
     audit_python_code,
     audit_shell_command,
+    audit_shell_command_with_taxonomy,
+    compute_complexity,
 )
 
 
@@ -36,6 +40,8 @@ from core.guard_db import (
     search_audit_logs,
     tail_state_log,
 )
+
+import core.guard_db as guard_db
 
 
 class TestDecisionLayers(unittest.TestCase):
@@ -127,7 +133,14 @@ class TestDecisionLayers(unittest.TestCase):
         for cmd in escalated_not_denylisted:
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' to escalate (fail-closed), got safe=True: {reason}")
-            self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED, f"Expected NOT_ALLOWLISTED for '{cmd}', got {layer}")
+            # M3 COMPLEXITY_TAX may intercept structurally-complex commands (e.g. the
+            # quoted `|` alternation inflates the segment count) — still fail-closed,
+            # still never an env-dump denylist false positive.
+            self.assertIn(
+                layer,
+                (DecisionLayer.NOT_ALLOWLISTED, DecisionLayer.COMPLEXITY_TAX),
+                f"Expected NOT_ALLOWLISTED/COMPLEXITY_TAX for '{cmd}', got {layer}",
+            )
 
     def test_gpt_model_name_not_disk_command(self):
         # Regression: "gpt-4o-mini" (OpenAI model name) must not match the `gpt`
@@ -865,6 +878,80 @@ class TestFastTrackTestRunner(unittest.TestCase):
         for cmd in unsafe_cmds:
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
+
+class TestComplexityTax(unittest.TestCase):
+    """M3 COMPLEXITY_TAX (INV-16): structural-complexity deferral layer.
+
+    The tax must ONLY escalate (never auto-approve): chained/nested aggregate
+    shape above the threshold defers to human review, while provably-benign
+    fast-track / test-runner / read-only-pipeline commands and already-blocked
+    commands are unaffected. Uses a clean temp DB so the default threshold (6)
+    applies — no pre-seeded guard_config rows.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "test_guard.db"
+        self.db_patch = patch.object(guard_db, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        guard_db.init_db()
+
+    def tearDown(self):
+        self.db_patch.stop()
+        self.temp_dir.cleanup()
+
+    def _audit(self, cmd):
+        return audit_shell_command_with_taxonomy(cmd, origin=Origin.AGENT)
+
+    def test_complex_chain_escalates_complexity_tax(self):
+        cmd = "mkdir a1; mkdir a2; mkdir a3; mkdir a4; mkdir a5; mkdir a6; mkdir a7"
+        safe, reason, layer, tax = self._audit(cmd)
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.COMPLEXITY_TAX)
+        self.assertIn("complexity", reason)
+        self.assertEqual(tax["mechanism"], "complexity-tax")
+
+    def test_simple_commands_unaffected(self):
+        for cmd in ("ls -la", "git status"):
+            safe, reason, layer, tax = self._audit(cmd)
+            self.assertNotEqual(layer, DecisionLayer.COMPLEXITY_TAX)
+            self.assertTrue(safe)
+
+    def test_compute_complexity_boundary(self):
+        self.assertEqual(compute_complexity(";".join(f"mkdir a{i}" for i in range(6))), 6)
+        self.assertEqual(compute_complexity(";".join(f"mkdir a{i}" for i in range(7))), 7)
+
+    def test_separator_agnostic(self):
+        # INV-16: |/&/; and surrounding whitespace/newlines are equivalent separators.
+        self.assertEqual(compute_complexity("a && b"), 2)
+        self.assertEqual(compute_complexity("a&&b"), 2)
+        self.assertEqual(compute_complexity("a\n&&\nb"), 2)
+        self.assertEqual(compute_complexity("a   &&   b"), 2)
+
+    def test_already_blocked_unaffected(self):
+        safe, reason, layer, tax = self._audit("rm -rf /tmp/x && sudo id")
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+        self.assertNotEqual(layer, DecisionLayer.COMPLEXITY_TAX)
+
+    def test_readonly_pipelines_not_gated(self):
+        for cmd in ("git status && git log --oneline -3", "cat a.txt | sort | uniq"):
+            safe, reason, layer, tax = self._audit(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_test_runner_not_gated(self):
+        # INV-TEST-1: the gatekeeper's own suite must stay fast-tracked.
+        safe, reason, layer, tax = self._audit("python3 -m unittest discover -s tests")
+        self.assertTrue(safe, f"Expected test runner fast-track safe, got: {reason}")
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_substitution_terms_escalate_complexity_tax(self):
+        cmd = "echo " + " ".join("$(pwd)" for _ in range(7))
+        safe, reason, layer, tax = self._audit(cmd)
+        self.assertFalse(safe)
+        self.assertEqual(layer, DecisionLayer.COMPLEXITY_TAX)
 
 
 if __name__ == "__main__":

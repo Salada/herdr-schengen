@@ -37,7 +37,7 @@ from core.gray_zone_evaluator import (
     evaluate_gray_zone_operation,
     format_decision_guidance,
 )
-from core.guard_db import has_human_approval_pattern, normalize_command
+from core.guard_db import get_complexity_tax_config, has_human_approval_pattern, normalize_command
 from core.redaction import redact_for_cloud
 from core.semgrep_evaluator import audit_script_with_semgrep
 from core.shellcheck_evaluator import audit_shell_with_shellcheck
@@ -947,6 +947,7 @@ class DecisionLayer(str, Enum):
     NOT_ALLOWLISTED = "NOT_ALLOWLISTED"  # Fail-closed default: not in fast-track allowlist, requires human review
     HUMAN_APPROVED = "HUMAN_APPROVED"  # Novelty gate: canonical pattern has prior human approval (scope+TTL)
     PACKAGE_GUARD = "PACKAGE_GUARD"  # Package-manager 3-tuple classifier (MUTATING vs READ_ONLY)
+    COMPLEXITY_TAX = "COMPLEXITY_TAX"  # Structural complexity deferral (never auto-approves)
 
 
 # INV-6: forensic / network primitives must NEVER fast-track (binary inspection / egress)
@@ -1091,6 +1092,44 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     if _BROAD_WILDCARD_RE.search(cmd_str):
         return False
     return True
+
+
+# M3 COMPLEXITY_TAX (INV-16): structural complexity metric + deferral helper.
+_COMPLEXITY_CONTROL_RE = re.compile(r"[|&;\n\r]+")
+_COMPLEXITY_REDIR_RE = re.compile(r"(?<![<>])[<>]{1,2}(?![<>])")
+
+
+def compute_complexity(cmd_str: str) -> int:
+    """Structural complexity score (INV-16: separator-agnostic, pure, never semantic).
+
+    Structural-chain complexity only — NOT argument-length, NOT aliasing. Single
+    commands with many args score low (handled by the fail-closed default + other
+    layers). This tax targets chained/nested aggregate shape, which is the shape
+    that "individually-passes-narrow-gates but hides risk." Aliasing/semantic
+    obfuscation is out of scope (caught by SHELL_CRITICAL/SAST earlier).
+    """
+    s = cmd_str.replace("\r\n", "\n").replace("\r", "\n")
+    n_segments = len([seg for seg in _COMPLEXITY_CONTROL_RE.split(s) if seg.strip()])
+    n_subst = s.count("$(") + s.count("`")
+    n_redir = len(_COMPLEXITY_REDIR_RE.findall(s))
+    return n_segments + n_subst + n_redir
+
+
+def _apply_complexity_tax(cmd_str: str, cfg: dict) -> "Optional[tuple[bool, str, str]]":
+    """Return an escalation tuple if the command exceeds the complexity threshold,
+    else None (pass through). NEVER returns is_safe=True. Origin-agnostic for now;
+    M5 threads `origin` through this signature."""
+    if not cfg.get("complexity_tax_enabled", True):
+        return None
+    thr = cfg.get("complexity_threshold", 6)
+    cx = compute_complexity(cmd_str)
+    if cx > thr:
+        return (
+            False,
+            f"Complex command requires human review (complexity={cx} > threshold={thr})",
+            DecisionLayer.COMPLEXITY_TAX,
+        )
+    return None
 
 
 # INV-TEST-1: Narrow test-runner fast-track (documented code-execution exception).
@@ -1407,6 +1446,9 @@ def _audit_static_shell_command(
     if gz_verdict == Verdict.BLOCK:
         return False, f"Non-VCS Gray-Zone Guard [BLOCK]: {gz_reason}", DecisionLayer.GRAY_ZONE_MATRIX
     if gz_verdict == Verdict.PROMPT and gz_payload:
+        tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config())
+        if tax is not None:
+            return tax
         guidance = format_decision_guidance(gz_payload)
         cloud_safe, cloud_reason = audit_with_cloud_judge(
             cmd_str, context=guidance, reasoning_effort=reasoning_effort, cwd=cwd, scope=scope, agent_id=agent_id
@@ -1427,6 +1469,12 @@ def _audit_static_shell_command(
     # INV-TEST-1: narrow test-runner fast-track (documented code-execution exception)
     if _is_fast_track_test_runner(cmd_str):
         return True, f"Fast-track test runner (narrow): '{cmd_str}'", DecisionLayer.FAST_TRACK_AST
+
+    # M3 COMPLEXITY_TAX: gate the UNPROVEN auto-approve paths (novelty recall,
+    # package READ_ONLY). Runs AFTER the provably-benign fast-track + test-runner.
+    tax = _apply_complexity_tax(cmd_str, get_complexity_tax_config())
+    if tax is not None:
+        return tax
 
     # INV-3: novelty/history gate — a canonical pattern with prior HUMAN approval
     # (scoped to pane + cwd, within TTL) auto-approves, instead of re-escalating.
@@ -1649,6 +1697,9 @@ def derive_taxonomy(
     elif layer == DecisionLayer.PACKAGE_GUARD:
         consequence = Consequence.INTEGRITY
         mechanism = "package-mutation"
+    elif layer == DecisionLayer.COMPLEXITY_TAX:
+        consequence = Consequence.NONE
+        mechanism = "complexity-tax"
     elif layer == DecisionLayer.CLOUD_JUDGE:
         consequence = Consequence.DESTRUCTION
         mechanism = "cloud-judge-defer"
