@@ -844,5 +844,190 @@ class TestToolRedactionIntegration(unittest.TestCase):
             os.remove(temp_path)
 
 
+class TestTUIBadgesAndDeepLinks(unittest.TestCase):
+    """Sprint 2 observability: phase3 queue status taxonomy + universal deep-link.
+
+    Presentation-only: badges derive exclusively from existing stored fields
+    (status, decision_layer, resolution, approver, FIFO position) and deep-links
+    reuse the existing AuditDetailModal open path.
+    """
+
+    def test_pending_queue_badge_taxonomy(self):
+        from cmd.schengen_tui import format_pending_queue_badge
+
+        # Active FIFO head, non-question -> Gatekeeper Checking (in progress)
+        b = format_pending_queue_badge(
+            {"id": 1, "status": "PENDING", "decision_layer": "COMPLEXITY_TAX"},
+            active_id=1,
+        )
+        self.assertIn("Gatekeeper Checking", b)
+        self.assertNotIn("Human Action Required", b)
+        self.assertNotIn("Deferred", b)
+
+        # Active FIFO head QUESTION -> Human Action Required (user answers in pane)
+        b = format_pending_queue_badge(
+            {"id": 1, "status": "DELIVERED", "decision_layer": "QUESTION"},
+            active_id=1,
+        )
+        self.assertIn("Human Action Required", b)
+        self.assertNotIn("Gatekeeper Checking", b)
+
+        # Non-head row -> Deferred behind the active single slot (FIFO position)
+        b = format_pending_queue_badge(
+            {"id": 3, "status": "PENDING", "decision_layer": "SECRET_GUARD"},
+            active_id=1,
+            slot=3,
+        )
+        self.assertIn("Deferred (Slot #3)", b)
+        self.assertNotIn("Gatekeeper Checking", b)
+
+        # Deferred wins over QUESTION (positional fact: not actionable yet)
+        b = format_pending_queue_badge(
+            {"id": 4, "status": "PENDING", "decision_layer": "QUESTION"},
+            active_id=1,
+            slot=4,
+        )
+        self.assertIn("Deferred (Slot #4)", b)
+
+        # No active slot known -> everything is in-progress (no invented state)
+        b = format_pending_queue_badge(
+            {"id": 9, "status": "PENDING", "decision_layer": "SHELL_AST"},
+        )
+        self.assertIn("Gatekeeper Checking", b)
+        self.assertNotIn("Deferred", b)
+
+    def test_resolved_badge_from_fields(self):
+        from cmd.schengen_tui import format_resolved_badge
+
+        self.assertIn("Approved (Gatekeeper)", format_resolved_badge("APPROVED", "gatekeeper"))
+        self.assertIn("Approved (Human)", format_resolved_badge("APPROVED", "human-tui"))
+        self.assertIn("Approved (Pane-Direct)", format_resolved_badge("APPROVED", "pane-direct"))
+        self.assertEqual(format_resolved_badge("ANSWERED", None), "[cyan]ANS[/]")
+        self.assertEqual(format_resolved_badge("REJECTED", None), "[red]RJ[/]")
+        self.assertEqual(format_resolved_badge("UNANSWERED", None), "[yellow]UA[/]")
+        self.assertEqual(format_resolved_badge(None, None), "[dim]—[/]")
+
+    def test_linkify_tokens_and_plain_text(self):
+        from cmd.schengen_tui import _chat_plain_text, _linkify_chat_markup
+
+        markup = "[yellow]▶ Escalation [#42] Intercepted [cyan][▼ Details][/][/]"
+        t = _linkify_chat_markup(markup, default_target=(42, "escalation"))
+        # tokens survive markup parsing; tags are consumed
+        self.assertIn("[#42]", t.plain)
+        self.assertIn("[▼ Details]", t.plain)
+        self.assertNotIn("[yellow]", t.plain)
+        self.assertNotIn("[cyan]", t.plain)
+
+        # [Audit #N] token renders literally
+        t2 = _linkify_chat_markup("see [Audit #7771] for context")
+        self.assertIn("[Audit #7771]", t2.plain)
+
+        # bare [▼ Details] without a target renders literally (no invented link)
+        t3 = _linkify_chat_markup("just [▼ Details] alone")
+        self.assertIn("[▼ Details]", t3.plain)
+
+        # clipboard plain text keeps deep-link tokens but strips markup tags
+        plain = _chat_plain_text(markup)
+        self.assertIn("[#42]", plain)
+        self.assertIn("[▼ Details]", plain)
+        self.assertNotIn("[yellow]", plain)
+        self.assertNotIn("[cyan]", plain)
+
+    def test_link_target_in_line_hit_test(self):
+        from cmd.schengen_tui import _link_target_in_line
+        from rich.text import Text
+
+        line = Text()
+        line.append("Escalation ")
+        link = Text("[#42]", style="bold underline cyan")
+        line.append_text(link)
+        line.append(" queued  ")
+        details = Text("[▼ Details]", style="bold")
+        line.append_text(details)
+
+        class FakeSeg:
+            def __init__(self, text):
+                self.text = text
+
+        segments = [FakeSeg(ch) for ch in line.plain]
+        # hit the [#42] token cells (11..15: after "Escalation ")
+        self.assertEqual(_link_target_in_line(segments, 12), (42, "escalation"))
+        self.assertEqual(_link_target_in_line(segments, 15), (42, "escalation"))
+        # [▼ Details] inherits the preceding [#N] target on the same line
+        details_start = line.plain.index("[▼ Details]")
+        self.assertEqual(_link_target_in_line(segments, details_start + 2), (42, "escalation"))
+        # miss: plain text cell
+        self.assertIsNone(_link_target_in_line(segments, 3))
+
+
+class TestTUIBadgesAndDeepLinksAsync(unittest.IsolatedAsyncioTestCase):
+    """Async half of the Sprint 2 badge/deep-link tests (needs a live app)."""
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_chat_link_click_opens_audit_detail_modal(self):
+        from cmd.schengen_tui import AuditDetailModal, FocusableRichLog, SchengenTUIApp
+        from rich.text import Text
+
+        app = SchengenTUIApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            chat = app.query_one("#chat-log", FocusableRichLog)
+            chat.clear()
+            t = Text()
+            t.append("x ")
+            link = Text("[#42]", style="bold underline cyan")
+            t.append_text(link)
+            chat.write(t)
+            await pilot.pause()
+            # [#42] occupies content cells 2..7; click inside it
+            # (y=2 skips border+padding into the first content row)
+            await pilot.click(chat, offset=(4, 2))
+            await pilot.pause()
+            self.assertIsInstance(app.screen, AuditDetailModal)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_chat_link_click_off_token_does_not_open_modal(self):
+        from cmd.schengen_tui import AuditDetailModal, FocusableRichLog, SchengenTUIApp
+        from rich.text import Text
+
+        app = SchengenTUIApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            chat = app.query_one("#chat-log", FocusableRichLog)
+            chat.clear()
+            t = Text()
+            t.append("x ")
+            link = Text("[#42]", style="bold underline cyan")
+            t.append_text(link)
+            chat.write(t)
+            await pilot.pause()
+            # click on the "x " prefix (cell 0) -> no modal
+            await pilot.click(chat, offset=(0, 2))
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, AuditDetailModal)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_escalation_list_item_selection_opens_detail(self):
+        from cmd.schengen_tui import AuditDetailModal, SchengenTUIApp
+        from textual.widgets import Label, ListItem, ListView
+
+        app = SchengenTUIApp()
+        async with app.run_test(size=(120, 40)) as pilot:
+            esc_list = app.query_one("#escalation-list", ListView)
+            li = ListItem(Label("[#777] test"))
+            li.esc_id = 777
+            esc_list.append(li)
+            await pilot.pause()
+            esc_list.index = 0
+            await pilot.pause()
+            esc_list.post_message(esc_list.Selected(esc_list, li, 0))
+            await pilot.pause()
+            self.assertIsInstance(app.screen, AuditDetailModal)
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+
 if __name__ == "__main__":
     unittest.main()

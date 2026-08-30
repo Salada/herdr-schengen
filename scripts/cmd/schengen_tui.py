@@ -35,6 +35,7 @@ SCRIPTS_ROOT = SCRIPT_DIR.parent
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
+from rich.cells import cell_len
 from rich.markdown import Markdown
 from rich.markup import escape as rich_escape
 from rich.segment import Segment
@@ -147,6 +148,170 @@ def format_approver_badge(approver: Optional[str], decision: str = "") -> str:
     return "[dim]—[/]"
 
 
+# --- Phase3 queue status taxonomy + universal deep-link (Sprint 2) ----------
+#
+# Presentation-only helpers: every badge is derived from EXISTING stored fields
+# (status, decision_layer, resolution, approver, FIFO position). No new data is
+# invented. See TODO_phase3.md "Pending Queue Status Taxonomy" + "Universal
+# Deep-Link".
+
+# Deep-link tokens rendered in chat / queue lists. `[#N]` and `[Audit #N]` carry
+# their record id; a bare `[▼ Details]` inherits the nearest preceding token's
+# target (or the caller-supplied default) on the same message.
+_LINK_TOKEN_RE = re.compile(r"(\[Audit\s*#(\d+)\])|(\[#(\d+)\])|(\[▼\s*Details\])")
+_LINK_STYLE = "bold underline cyan"
+
+
+def format_pending_queue_badge(
+    esc: dict,
+    active_id: Optional[int] = None,
+    slot: Optional[int] = None,
+) -> str:
+    """Render the phase3 pending-queue status badge from existing fields.
+
+    Precedence (only what is determinable from stored data):
+      1. Not the active FIFO slot  -> ``⏳ [Deferred (Slot #N)]``
+         (strict single-pending FIFO: every non-head row waits behind the
+         active slot; ``slot`` is the row's 1-based position in the FIFO line)
+      2. ``decision_layer == QUESTION`` -> ``🚨 [Human Action Required]``
+         (the user answers in the pane; nothing else can auto-resolve it)
+      3. Otherwise -> ``🔍 [Gatekeeper Checking]`` (adjudication in progress)
+
+    NOTE (logic dependency): for a non-question HEAD we cannot distinguish
+    "gatekeeper autonomous inspection in flight" from "awaiting human
+    /approve" using stored fields alone — both render as Gatekeeper Checking.
+    """
+    status = esc.get("status", "PENDING")
+    if status not in ("PENDING", "DELIVERED"):
+        return f"[red]✖ [{rich_escape(str(status or 'UNKNOWN'))}][/]"
+    if active_id is not None and esc.get("id") != active_id:
+        n = int(slot) if slot else 1
+        return f"[bold yellow]⏳ [Deferred (Slot #{n})][/]"
+    if esc.get("decision_layer") == "QUESTION":
+        return "[bold red]🚨 [Human Action Required][/]"
+    return "[bold cyan]🔍 [Gatekeeper Checking][/]"
+
+
+def format_resolved_badge(resolution: Optional[str], approver: Optional[str]) -> str:
+    """Render the post-adjudication badge from existing resolution + approver fields."""
+    if resolution == "ANSWERED":
+        return "[cyan]ANS[/]"
+    if resolution == "REJECTED":
+        return "[red]RJ[/]"
+    if resolution == "UNANSWERED":
+        return "[yellow]UA[/]"
+    if resolution == "APPROVED":
+        if approver == "gatekeeper":
+            return "[green]⚡ [Approved (Gatekeeper)][/]"
+        if approver == "human-tui":
+            return "[cyan]👤 [Approved (Human)][/]"
+        if approver == "pane-direct":
+            return "[yellow]⌨️ [Approved (Pane-Direct)][/]"
+        return "[green]⚡ [Approved][/]"
+    return "[dim]—[/]"
+
+
+def resolve_audit_id_for_escalation(esc_id: int) -> Optional[int]:
+    """Map an escalation id to the audit_logs id that best represents it.
+
+    1. If the id itself IS an audit record, use it directly.
+    2. Otherwise locate the pending escalation and match the newest audit row
+       with the same (pane_id, raw_command).
+    3. Return None when nothing matches — callers then fall back to
+       ``AuditDetailModal(esc_id)`` (the modal renders "Record not found.").
+    """
+    esc_id = int(esc_id)
+    try:
+        if get_audit_log_by_id(esc_id):
+            return esc_id
+    except Exception:
+        pass
+    try:
+        pending = get_pending_escalations(include_delivered=True)
+    except Exception:
+        return None
+    for esc in pending:
+        if esc.get("id") == esc_id:
+            pane = esc.get("pane_id", "")
+            cmd = esc.get("raw_command", "")
+            try:
+                logs = get_recent_audit_logs(limit=100, pane_id=pane)
+            except Exception:
+                return None
+            for log in logs:  # newest first (id DESC)
+                if log.get("raw_command") == cmd:
+                    return log["id"]
+            return None
+    return None
+
+
+def _linkify_chat_markup(
+    markup: str,
+    default_target: Optional[Tuple[int, str]] = None,
+) -> Text:
+    """Convert ``[Audit #N]`` / ``[#N]`` / ``[▼ Details]`` tokens into links.
+
+    Rich markup must NOT see the raw ``[#N]`` form (it parses ``#N`` as a hex
+    color and swallows it), so tokens are first replaced with sentinels, the
+    remaining string is parsed as ordinary rich markup, then the sentinels are
+    spliced back as styled, clickable Text spans. ``[▼ Details]`` inherits the
+    nearest preceding token target in the same message, else ``default_target``.
+
+    The resulting Text is hit-tested by ``FocusableRichLog._link_target_at``
+    (RichLog strips segment meta during offset rendering, so click handling
+    re-derives the target from the rendered line text).
+    """
+    tokens: List[Tuple[str, Optional[int], Optional[str]]] = []
+    last_target: Optional[Tuple[int, str]] = default_target
+
+    def _protect(m: "re.Match[str]") -> str:
+        nonlocal last_target
+        label = m.group(0)
+        if m.group(2):  # [Audit #N]
+            target: Optional[int] = int(m.group(2))
+            kind: Optional[str] = "audit"
+        elif m.group(4):  # [#N]
+            target = int(m.group(4))
+            kind = "escalation"
+        else:  # [▼ Details]
+            target, kind = last_target if last_target else (None, None)
+        if target is not None:
+            last_target = (target, kind or "escalation")
+        tokens.append((label, target, kind))
+        return f"\x00T{len(tokens) - 1}\x01"
+
+    protected = _LINK_TOKEN_RE.sub(_protect, markup)
+    try:
+        base = Text.from_markup(protected)
+    except Exception:
+        base = Text(protected)
+
+    out = Text()
+    pos = 0
+    for m in re.finditer(r"\x00T(\d+)\x01", base.plain):
+        if m.start() > pos:
+            out.append_text(base[pos : m.start()])
+        label, target, kind = tokens[int(m.group(1))]
+        if target is None:
+            out.append(label)  # bare token: render literally, not as a link
+        else:
+            link = Text(label, style=_LINK_STYLE)
+            out.append_text(link)
+        pos = m.end()
+    if pos < len(base.plain):
+        out.append_text(base[pos:])
+    return out
+
+
+def _chat_plain_text(msg: str) -> str:
+    """Strip rich markup for the clipboard buffer while preserving deep-link tokens."""
+    protected = _LINK_TOKEN_RE.sub(
+        lambda m: m.group(0).replace("[", "\x00").replace("]", "\x01"), str(msg)
+    )
+    plain = re.sub(r"\[/?[^\]]*\]", "", protected)
+    return plain.replace("\x00", "[").replace("\x01", "]")
+
+
 def _update_static_if_changed(widget: Static, content: str) -> None:
     """Update a Static only when its content changes, avoiding redundant re-render/layout.
 
@@ -189,6 +354,46 @@ def _mouse_debug_log(message: str) -> None:
         handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         _mouse_debug_logger.addHandler(handler)
     _mouse_debug_logger.debug(message)
+
+
+def _link_target_in_line(segments: List[Any], x: int) -> Optional[Tuple[int, str]]:
+    """Hit-test a deep-link token in one rendered line at content cell ``x``.
+
+    ``segments`` are the line's rich Segments (as stored in RichLog.lines).
+    Returns (record_id, kind) for the token under the cell, with a bare
+    ``[▼ Details]`` inheriting the nearest preceding token target on the line.
+    Wide (CJK) glyphs are accounted for via cell widths.
+    """
+    if x < 0:
+        return None
+    chars: List[str] = []
+    char_cell: List[int] = []
+    cell = 0
+    for seg in segments:
+        for ch in getattr(seg, "text", ""):
+            char_cell.append(cell)
+            chars.append(ch)
+            cell += cell_len(ch)
+    if not char_cell or x >= cell:
+        return None
+    target_char = None
+    for i, start in enumerate(char_cell):
+        if x >= start and x < start + cell_len(chars[i]):
+            target_char = i
+            break
+    if target_char is None:
+        return None
+    line_text = "".join(chars)
+    last_target: Optional[Tuple[int, str]] = None
+    for m in _LINK_TOKEN_RE.finditer(line_text):
+        s, e = m.span()
+        if m.group(2):  # [Audit #N]
+            last_target = (int(m.group(2)), "audit")
+        elif m.group(4):  # [#N]
+            last_target = (int(m.group(4)), "escalation")
+        if s <= target_char < e:
+            return last_target  # Details inherits the nearest preceding target
+    return None
 
 
 class FocusableRichLog(RichLog):
@@ -279,6 +484,47 @@ class FocusableRichLog(RichLog):
         elif event.key == "down":
             event.stop()
             self.scroll_down()
+
+    def _link_target_at(self, x: int, y: int) -> Optional[Tuple[int, str]]:
+        """Return (record_id, kind) for the deep-link token under content cell (x, y).
+
+        ``kind`` is "audit" (the id IS an audit_logs id) or "escalation"
+        (resolve to an audit record at open time). Returns None when no link
+        token is under the cell. Coordinates are widget-relative (as delivered
+        by Click events); border + padding are converted to content coords and
+        wide (CJK) glyphs are accounted for via cell widths.
+        """
+        try:
+            cr = self.content_region
+            r = self.region
+            cx = x - (cr.x - r.x)
+            cy = y - (cr.y - r.y)
+        except Exception:
+            cx, cy = x, y
+        if cx < 0 or cy < 0:
+            return None
+        line_idx = self._start_line + cy
+        if not (0 <= line_idx < len(self.lines)):
+            return None
+        return _link_target_in_line(self.lines[line_idx]._segments, cx)
+
+    def on_click(self, event: events.Click) -> None:
+        """Open AuditDetailModal when a deep-link token is clicked in chat."""
+        if event.button != 1:
+            return
+        hit = self._link_target_at(event.x, event.y)
+        if hit is None:
+            return
+        event.stop()
+        app = getattr(self, "app", None) or getattr(self, "_app", None)
+        if app is None or len(app.screen_stack) > 1:
+            return
+        record_id, kind = hit
+        if kind == "audit":
+            app.push_screen(AuditDetailModal(record_id))
+        else:
+            resolved = resolve_audit_id_for_escalation(record_id)
+            app.push_screen(AuditDetailModal(resolved if resolved is not None else record_id))
 
 
 # --- Modal close-button convention (shared by every audit modal) -----------
@@ -972,6 +1218,8 @@ class SchengenTUIApp(App):
         # counter dict is reset whenever the head id changes.
         self._pane_direct_head: Optional[int] = None
         self._last_active_id: Optional[int] = None
+        self._last_resolved_ref: Optional[Tuple[str, str]] = None  # (pane_id, raw_command) of last FIFO head
+        self._last_escalation_link: Optional[Tuple[int, str]] = None  # default target for bare [▼ Details]
         self._processing_chat: bool = False
         self._last_guard_active: bool = False
         self._last_esc_time: float = 0.0
@@ -1039,7 +1287,7 @@ class SchengenTUIApp(App):
                 yield Static(id="token-meter-box")
                 yield AuditSectionHeader("📜 Recent Audits (Click: ⛶ Fullscreen)", classes="section-title")
                 yield AuditDataTable(id="audit-table")
-                yield Label("🚨 Pending Escalations Queue", classes="section-title")
+                yield Label("🚨 Pending Escalations Queue [dim](click item: details)[/]", classes="section-title")
                 yield ListView(id="escalation-list")
         yield Footer()
 
@@ -1439,6 +1687,13 @@ class SchengenTUIApp(App):
                 if self.is_controller and active_id not in self._notified_escalation_ids and not self._processing_chat:
                     self._notified_escalation_ids.add(active_id)
                     self._last_active_id = active_id
+                    # Remember the FIFO head reference so the queue-clear notice
+                    # can render its post-adjudication badge (resolution +
+                    # approver) from existing stored fields.
+                    self._last_resolved_ref = (active_esc["pane_id"], active_esc["raw_command"])
+                    # Deep-link context: bare [▼ Details] tokens in the notices
+                    # below inherit this escalation.
+                    self._last_escalation_link = (active_id, "escalation")
 
                     # Sound alert
                     try:
@@ -1455,20 +1710,20 @@ class SchengenTUIApp(App):
                     safe_reason = rich_escape(active_esc['safety_reason'])
 
                     if is_question:
-                        self._write(f"\n[cyan]{'─'*20} ❓ Question #{active_id} {'─'*20}[/]")
+                        self._write(f"\n[cyan]{'─'*20} ❓ Question [#{active_id}] {'─'*20}[/]")
                         self._write(f"  [dim]Pane:[/]     {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
                         self._write(f"  [dim]Question:[/] [white]{safe_cmd}[/]")
-                        self._write(f"[dim]  ↩ Answer directly in the pane — resolves automatically.[/]\n")
+                        self._write(f"[dim]  ↩ Answer directly in the pane — resolves automatically.  [cyan][▼ Details][/][/]\n")
                         # Read-only interpretation (NO approve/reject tools): surface the
                         # question in the TUI chat so the user notices it, without giving
                         # the gatekeeper any ability to adjudicate (AGENTS.md rule 10).
                         self._interpret_question()
                     else:
-                        self._write(f"\n[yellow]{'─'*20} ▶ Escalation #{active_id} Intercepted {'─'*20}[/]")
+                        self._write(f"\n[yellow]{'─'*20} ▶ Escalation [#{active_id}] Intercepted {'─'*20}[/]")
                         self._write(f"  [dim]Pane:[/]   {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
                         self._write(f"  [dim]Cmd:[/]    [white]{safe_cmd}[/]")
                         self._write(f"  [dim]Reason:[/] {safe_reason}")
-                        self._write(f"[dim]  ⚡ Autonomous inspector awakening...[/]\n")
+                        self._write(f"[dim]  ⚡ Autonomous inspector awakening...  [cyan][▼ Details][/][/]\n")
 
                         self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
 
@@ -1481,8 +1736,24 @@ class SchengenTUIApp(App):
                 "[dim]   Listening for Gray-Zone mutations and critical AST denylists[/]",
             )
             if self._last_active_id is not None:
-                self._write(f"\n[dim]{'─'*20} ✔ Escalation #{self._last_active_id} resolved {'─'*20}[/]\n")
+                # Post-adjudication badge from existing stored fields (resolution
+                # + approver of the last FIFO head), when still resolvable.
+                badge_str = ""
+                try:
+                    if self._last_resolved_ref:
+                        _pane, _cmd = self._last_resolved_ref
+                        _res = get_escalation_resolution(_pane, _cmd)
+                        _appr = get_escalation_approver(_pane, _cmd)
+                        badge_str = f" {format_resolved_badge(_res, _appr)}"
+                except Exception:
+                    badge_str = ""
+                self._last_escalation_link = (self._last_active_id, "escalation")
+                self._write(
+                    f"\n[dim]{'─'*20} ✔ Escalation [#{self._last_active_id}] resolved"
+                    f"{badge_str}  [cyan][▼ Details][/] {'─'*20}[/]\n"
+                )
                 self._last_active_id = None
+                self._last_resolved_ref = None
 
 
         radar_col = self.query_one("#radar-column")
@@ -1534,34 +1805,39 @@ class SchengenTUIApp(App):
                     badge = "[red]ES[/]"
                 audit_table.add_row(time_str, log['pane_id'], badge, short_cmd)
 
-        # 5. Update Recent Escalations List
+        # 5. Update Recent Escalations List (FIFO head first, then deferred)
         esc_list = self.query_one("#escalation-list", ListView)
         all_escalations = get_pending_escalations(include_delivered=True)
-        recent_escalations = all_escalations[-5:] if all_escalations else []
-        current_esc_hash = str([(e["id"], e["status"]) for e in recent_escalations])
-        
+        # Strict sequential single-pending FIFO: show the pipeline from the head
+        # (active slot) forward so Deferred (Slot #N) badges read in order.
+        recent_escalations = all_escalations[:5] if all_escalations else []
+        active_id = active_esc["id"] if active_esc else None
+        fifo_slots = {e["id"]: i + 1 for i, e in enumerate(all_escalations)}
+        current_esc_hash = str(
+            [(e["id"], e["status"], e.get("decision_layer")) for e in recent_escalations] + [active_id]
+        )
+
         if current_esc_hash != self._last_escalation_hash:
             self._last_escalation_hash = current_esc_hash
             esc_list.clear()
             for esc in recent_escalations:
                 cmd_short = esc['raw_command'].replace("\n", " ").strip()
-                if len(cmd_short) > 28:
-                    cmd_short = cmd_short[:28] + "…"
-                status = esc['status']
-                if status == "PENDING":
-                    state_badge = "[bold yellow]⏳ PEND[/]"
-                elif status == "RESOLVED":
-                    state_badge = "[green]✅ OK[/]"
-                else:
-                    state_badge = "[red]❌ NO[/]"
-                
-                esc_list.append(
-                    ListItem(
-                        Label(
-                            f"[bold cyan]#{esc['id']}[/] {state_badge} [bold white]{rich_escape(cmd_short)}[/]"
-                        )
-                    )
+                if len(cmd_short) > 24:
+                    cmd_short = cmd_short[:24] + "…"
+                badge = format_pending_queue_badge(
+                    esc, active_id=active_id, slot=fifo_slots.get(esc["id"])
                 )
+                item_label = Text()
+                item_label.append(f"[#{esc['id']}]", style="bold cyan")
+                item_label.append(" ")
+                item_label.append_text(Text.from_markup(badge))
+                item_label.append(" ")
+                item_label.append(cmd_short, style="bold white")
+                item_label.append("  ")
+                item_label.append("[▼ Details]", style="dim italic")
+                item = ListItem(Label(item_label))
+                item.esc_id = esc["id"]  # deep-link target for selection/Enter
+                esc_list.append(item)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "audit-table":
@@ -1570,6 +1846,21 @@ class SchengenTUIApp(App):
     def on_data_table_cell_selected(self, event: DataTable.CellSelected) -> None:
         if event.data_table.id == "audit-table":
             self.push_screen(AuditFullscreenModal())
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Deep-link: Enter/click on a queue item opens its audit detail modal."""
+        item = getattr(event, "item", None)
+        esc_id = getattr(item, "esc_id", None)
+        if esc_id is None:
+            return
+        try:
+            event.stop()
+        except Exception:
+            pass
+        if len(self.screen_stack) > 1:
+            return
+        resolved = resolve_audit_id_for_escalation(int(esc_id))
+        self.push_screen(AuditDetailModal(resolved if resolved is not None else int(esc_id)))
 
     def on_resize(self, event: events.Resize) -> None:
         self.update_radar_data(force=True)
@@ -1848,15 +2139,21 @@ class SchengenTUIApp(App):
 
     def _write(self, msg: Any) -> None:
         """Write to RichLog and append plain-text to clipboard buffer."""
-        import re as _re
         chat_log = self.query_one(RichLog)
-        chat_log.write(msg)
+        if isinstance(msg, str):
+            chat_log.write(
+                _linkify_chat_markup(
+                    msg, default_target=getattr(self, "_last_escalation_link", None)
+                )
+            )
+        else:
+            chat_log.write(msg)
         if isinstance(msg, Markdown):
             raw_text = getattr(msg, "markup", str(msg)).strip()
             if raw_text:
                 self._chat_plain.append(raw_text)
         else:
-            plain = _re.sub(r"\[/?[^\]]*\]", "", str(msg)).strip()
+            plain = _chat_plain_text(str(msg)).strip()
             if plain:
                 self._chat_plain.append(plain)
 
