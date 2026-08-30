@@ -65,9 +65,8 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   1) `Destination:` 우선 요구 및 `File:` 과포괄(다이얼로그 내 임의의 File: 라인 캡처) 방지 정밀 매칭.
   2) `re.IGNORECASE` 적용: 소문자 `destination:` / `file:` 매칭 누락으로 인한 오차단(over-block) 방지.
   3) `edit_file {dests[0].strip()}`의 중복 `.strip()` 제거 정리.
-[] [Prerequisite/Host] 호스트 머신 semgrep 바이너리 미설치로 인한 SAST DEGRADED 해소 (중요):
-  - 현상: #45 PATH 주입 수정 후에도 호스트 자체에 `semgrep` 바이너리가 미설치되어 SAST가 `DEGRADED (missing semgrep)`로 유지됨.
-  - 조치: 호스트 환경에 semgrep 설치 (`brew install semgrep` 또는 venv 내 `pip install semgrep`) 및 `docs/setup.md` 요구사항 반영.
+[x] [Prerequisite/Host] 호스트 머신 semgrep 바이너리 미설치로 인한 SAST DEGRADED 해소: semgrep 1.175.0 설치(/opt/homebrew/bin/semgrep) 및 기능 스캔/SAST BLOCK 정상 탐지 검증 완료. shellcheck+semgrep 모두 READY.
+
 [] [Refactor/SAST] `_inject_runtime_path()` 및 Host Runtime Gate 안정화 4종 (#45 피어리뷰 후속):
   1) `_inject_runtime_path()` 선행순서 버그 수정: `parts.insert(0, d)` 반복으로 `~/.local/bin`이 최우선순위가 되어 Homebrew 바이너리를 섀도잉(shadow)할 위험 해소 (reverse iteration 또는 시스템/Homebrew 우선순위 보존).
   2) 빈 PATH 항목(`.`) 처리: `os.environ["PATH"].split(":")` 필터 시 빈 항목 drop 동작 정리 및 명시적 문서화.
