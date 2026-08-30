@@ -175,11 +175,12 @@ def format_pending_queue_badge(
          active slot; ``slot`` is the row's 1-based position in the FIFO line)
       2. ``decision_layer == QUESTION`` -> ``🚨 [Human Action Required]``
          (the user answers in the pane; nothing else can auto-resolve it)
-      3. Otherwise -> ``🔍 [Gatekeeper Checking]`` (adjudication in progress)
+      3. Otherwise -> ``🚨 [Human Action Required]``
 
-    NOTE (logic dependency): for a non-question HEAD we cannot distinguish
-    "gatekeeper autonomous inspection in flight" from "awaiting human
-    /approve" using stored fields alone — both render as Gatekeeper Checking.
+    NOTE (logic dependency): a PENDING/DELIVERED non-question HEAD is ALWAYS
+    awaiting human /approve — the inspector reaches a final verdict BEFORE
+    ``enqueue_pending_escalation`` is called, so in-flight (Phase-1) inspection
+    is never persisted and must not be inferred from stored fields.
     """
     status = esc.get("status", "PENDING")
     if status not in ("PENDING", "DELIVERED"):
@@ -189,7 +190,7 @@ def format_pending_queue_badge(
         return f"[bold yellow]⏳ [Deferred (Slot #{n})][/]"
     if esc.get("decision_layer") == "QUESTION":
         return "[bold red]🚨 [Human Action Required][/]"
-    return "[bold cyan]🔍 [Gatekeeper Checking][/]"
+    return "[bold red]🚨 [Human Action Required][/]"
 
 
 def format_resolved_badge(resolution: Optional[str], approver: Optional[str]) -> str:

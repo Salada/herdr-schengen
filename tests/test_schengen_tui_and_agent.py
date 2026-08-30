@@ -855,13 +855,16 @@ class TestTUIBadgesAndDeepLinks(unittest.TestCase):
     def test_pending_queue_badge_taxonomy(self):
         from cmd.schengen_tui import format_pending_queue_badge
 
-        # Active FIFO head, non-question -> Gatekeeper Checking (in progress)
+        # Active FIFO head, non-question -> Human Action Required (a persisted
+        # PENDING/DELIVERED row is always awaiting human /approve; in-flight
+        # Phase-1 inspection is never persisted, so "Gatekeeper Checking" is
+        # never inferred).
         b = format_pending_queue_badge(
             {"id": 1, "status": "PENDING", "decision_layer": "COMPLEXITY_TAX"},
             active_id=1,
         )
-        self.assertIn("Gatekeeper Checking", b)
-        self.assertNotIn("Human Action Required", b)
+        self.assertIn("Human Action Required", b)
+        self.assertNotIn("Gatekeeper Checking", b)
         self.assertNotIn("Deferred", b)
 
         # Active FIFO head QUESTION -> Human Action Required (user answers in pane)
@@ -889,12 +892,65 @@ class TestTUIBadgesAndDeepLinks(unittest.TestCase):
         )
         self.assertIn("Deferred (Slot #4)", b)
 
-        # No active slot known -> everything is in-progress (no invented state)
+        # No active slot known -> Human Action Required (never "checking")
         b = format_pending_queue_badge(
             {"id": 9, "status": "PENDING", "decision_layer": "SHELL_AST"},
         )
-        self.assertIn("Gatekeeper Checking", b)
+        self.assertIn("Human Action Required", b)
+        self.assertNotIn("Gatekeeper Checking", b)
         self.assertNotIn("Deferred", b)
+
+    def test_non_question_head_awaits_human(self):
+        from cmd.schengen_tui import format_pending_queue_badge
+
+        b = format_pending_queue_badge(
+            {"id": 5, "status": "PENDING", "decision_layer": "GRAY_ZONE"},
+            active_id=5,
+        )
+        self.assertIn("Human Action Required", b)
+        self.assertNotIn("Gatekeeper Checking", b)
+
+    def test_delivered_head_awaits_human(self):
+        from cmd.schengen_tui import format_pending_queue_badge
+
+        b = format_pending_queue_badge(
+            {"id": 6, "status": "DELIVERED", "decision_layer": "SHELL_CRITICAL"},
+            active_id=6,
+        )
+        self.assertIn("Human Action Required", b)
+        self.assertNotIn("Gatekeeper Checking", b)
+
+    def test_question_head(self):
+        from cmd.schengen_tui import format_pending_queue_badge
+
+        b = format_pending_queue_badge(
+            {"id": 7, "status": "PENDING", "decision_layer": "QUESTION"},
+            active_id=7,
+        )
+        self.assertIn("Human Action Required", b)
+        self.assertNotIn("Gatekeeper Checking", b)
+
+    def test_deferred_slot(self):
+        from cmd.schengen_tui import format_pending_queue_badge
+
+        b = format_pending_queue_badge(
+            {"id": 8, "status": "PENDING", "decision_layer": "SECRET_GUARD"},
+            active_id=5,
+            slot=2,
+        )
+        self.assertIn("Deferred (Slot #2)", b)
+        self.assertNotIn("Human Action Required", b)
+
+    def test_terminal_status(self):
+        from cmd.schengen_tui import format_pending_queue_badge
+
+        b = format_pending_queue_badge(
+            {"id": 10, "status": "RESOLVED", "decision_layer": "GRAY_ZONE"},
+            active_id=10,
+        )
+        self.assertIn("RESOLVED", b)
+        self.assertIn("✖", b)
+        self.assertNotIn("Human Action Required", b)
 
     def test_resolved_badge_from_fields(self):
         from cmd.schengen_tui import format_resolved_badge
