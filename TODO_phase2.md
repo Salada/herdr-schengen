@@ -1,20 +1,19 @@
 ## Handoff — Next Pick (맥락 보존 우선순위)
 > 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
 > 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
-> **🎉 Epic Fail-closed 편향 전환 M1~M7 마일스톤 전면 완료 (PR #126~PR #144)**
+> **🎉 Epic Fail-closed 편향 전환 M1~M7 전면 완료 (PR #126~PR #144)**
+> **🎉 Pane-Direct Auto-Eviction & Codex edit_file Stale 해소 완료 (PR #146, INV-PD-1..3)**
 
-1. [#137 후속] Stale-event 회귀 테스트(CHANNEL_TTL 3600 + 수술적 `_norm_req_cmd` 안전성 고정)
-   - 맥락: opencode.py `_norm_req_cmd`(선행 `$` + 공백 축소만, normalize_command 금지) + `inject_approval` fail-closed.
-2. 🚨 [UX/가시성 긴급 승격] '인간 개입 필수(Action Required)' 명시적 가시성 극대화 및 3단 패널 시각적 연동 (Designer & Marketer Persona 협업)
-   - 문제: OpenCode가 계류 중인데 TUI에서는 명시적으로 인간의 의견을 구하지 않고 모호하게 대기하여 인간이 개입해야 할지 AI가 처리 중인지 혼란 발생.
-   - 조치: Top Banner(붉은색 점멸) + Radar 상태 카드(`AWAITING HUMAN`) + 채팅창 구조화 결재 카드 + 인풋 박스 `/approve <id>` 자동 완성 연동.
-3. [Architecture] Persistent Allowlist CUD(#91)
-   - 맥락: fail-closed allowlist(fast-track closed enum) + TUI /allow /revoke + INV-PL-1..3.
-4. [피어리뷰 후속 종합] #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207
-   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, M7 raw목록/reject-flow, #7207 신뢰스토어 검증.
-5. [저맥락 — handoff 후에도 무난] Inspector 병렬성(Concurrency 10), 설정 모달, 발화 주체 분리 등.
-
-
+1. [정합성/보안 기반] Approver Provenance 오귀속 분리 (Gatekeeper-LLM vs Human-TUI vs Machine)
+   - 맥락: `adjudication_log` 및 `pending_escalations.approver`에 `⚡ GATEKEEPER` vs `👤 HUMAN` vs `🤖 MACHINE` vs `❓ OTHER` 명확 분리. #91 Persistent CUD의 신뢰 프로모션 필수 전제.
+2. [Architecture] Persistent Allowlist CUD(#91) — 전역 TUI /allow /revoke + 런타임 핫리로드
+   - 맥락: fail-closed allowlist(fast-track closed enum) + `.schengen/allowlist.json` 전역 보완 + INV-PL-1..3.
+3. [Quick-Win 자율성] AGY 장문 생략 명령(⋯ lines hidden) `ctrl+g` 전개 자율 검증 (#2099)
+   - 맥락: `send-keys ctrl+g` 에디터 전개 ➔ 전체 원문 획득 ➔ 100% AST 검증 및 자율 승인.
+4. [UX/몰입도] Inspector 병렬성(Concurrency 10) & 단일 순차 큐 + '인간 개입 필수(Action Required)' 3단 패널 시각화
+   - 맥락: 백그라운드 Silent 10 병렬 평가 + TUI 화면 단일 FIFO 슬롯 노출 + 붉은색 점멸 배너 & 결재 카드.
+5. [피어리뷰 후속 종합] #137 회귀 / #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207 / #146
+   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, M7 raw목록/reject-flow, #7207 신뢰스토어 검증, #146 liveness 주석.
 
 
 
@@ -34,12 +33,9 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
 [x] #57 full closure (PR #105): `client.permission.reply(permission_id)` 승인 바인딩 + 결정 채널 + plugin decision poller.
     pane-text를 opencode 승인 임계경로에서 제거 (bare enter fail-open 해소). AGY pane-text는 별도.
 [x] escalation poller JSON parse error (PR #100): `runHistoryPending()`이 빈 출력/실패 시 `[]` 반환 + 실패 원인 로깅.
-[] Codex `edit_file` 실제 승인(Pane 직접 입력 'y' 또는 TUI /approve) 완료 후에도 Pending에 잔류하는 현상 수정:
-  - 현상 및 원인:
-    • Codex 모달에서 `Would you like to make the following edits?` 파싱 후 승인(`y` 전송 또는 TUI 승인)이 실행되어 파일 편집이 완료되었음에도, 터미널 뷰포트/스크롤백에 과거 프롬프트 문구가 잔류하거나 다이얼로그 종료 상태가 감지되지 않아 `pending_escalations` 큐에서 RESOLVED로 처리되지 않고 잔류.
-  - 해결 방향:
-    • `codex_adapter`의 프롬프트 활성 상태 검사 강화: "Would you like..." 문구뿐 아니라 실제 하단 활성 선택지(`› 1. Yes, proceed` 또는 `Confirm: y/n`) 존재 여부를 앵커링하여 이미 완료된 과거 스크롤백 텍스트 오인식 방지.
-    • TUI `/approve` 및 pane 직접 `y` 키 입력 후 다이얼로그 해제 감지 시 `resolve_escalation(pane_id, approver=...)` 호출 즉시 보장.
+[x] Codex `edit_file` 실제 승인(Pane 직접 입력 'y' 또는 TUI /approve) 완료 후에도 Pending에 잔류하는 현상 수정 (PR #146 완료):
+  - 해결: `dialog_is_live` tail-anchored 검증(`rfind` 헤더 + `› 1. Yes` focused-row 앵커)으로 과거 스크롤백 오인식 원천 방지 및 auto-eviction 연동.
+
 [] [Refactor/Adapter] `footer_is_live` 공용 유틸 안정화 및 엣지케이스 대응 3종 (#17 피어리뷰 후속):
   1) tail window 동적/유연화: `tail_lines=8` 고정값으로 인해 긴 다이얼로그/스피너/줄바꿈 발생 시 실제 live 다이얼로그를 stale로 오판(over-block)하는 갭 해소 (가변 window 또는 footer 역방향 탐색 검토).
   2) marker 잔류 오인식 방지: 종료된 다이얼로그의 footer marker가 8줄 뷰포트에 잔류할 때 여전히 live 상태로 오판하는 이슈 방지 정밀화.
@@ -64,20 +60,15 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
 
 
 
-[] [Task/Architecture] Pane 직접 승인(Pane-Direct Adjudication) 실시간 감지 및 Stale Escalation 자동 해제(Auto-Eviction) 아키텍처 구현:
+[x] [Task/Architecture] Pane 직접 승인(Pane-Direct Adjudication) 실시간 감지 및 Stale Escalation 자동 해제(Auto-Eviction) 아키텍처 구현 (PR #146 완료):
+  - 해결: (1) `dialog_is_live` 어댑터별 tail 앵커링 (2) watcher `should_evict_pane_direct` 3단계(PD-A/B/C) 실시간 퇴출 (3) TUI pre-render slot validation으로 Stale 에스컬레이션 즉시 자동 정리.
 
-  - Context & Problem (사례: #2108 등):
-    • 사용자가 TUI를 거치지 않고 대상 Pane(AGY/OpenCode/Codex)에서 직접 `1. Yes`나 `y`를 입력하여 승인·진행했음에도, Daemon과 TUI가 이를 실시간으로 감지하지 못해 수 분 동안 `pending_escalations` 큐에 Stale 상태로 잔류하는 현상 발생.
-  - Architecture & Solution Design:
-    1. Daemon 감시 루프 실시간 상태 검증(Live Revalidation):
-       - Herdr `state_change_seq` 변경 또는 매 폴링 시 활성 에스컬레이션 대상 Pane의 실시간 다이얼로그 존재 여부 즉시 재확인.
-       - 프롬프트 텍스트가 사라졌거나 에이전트 상태가 `blocked` → `working` / `idle`로 전이된 경우, 즉시 `resolve_escalation(pane_id, resolution="APPROVED", approver="pane-direct")` 호출.
-    2. TUI 화면 렌더링 전 Live Slot 검증(Pre-Render Slot Validation):
-       - TUI가 인간에게 새 에스컬레이션 모달/배너를 띄우기 직전, 해당 Pane의 실제 다이얼로그 생존 여부를 1회 즉시 조회.
-       - 이미 Pane에서 처리되어 사라진 경우, 사용자 화면에 알림을 띄우지 않고 큐에서 즉시 자동 퇴출(Silent Eviction).
-    3. Event-Driven State Channel (선택):
-       - Herdr 에이전트 상태 이벤트(Status Change Notification)를 리스닝하여 폴링 타이머 대기 없이 즉각적인 큐 클리어 트리거.
+[] [Refactor/Adapters] Codex 및 AGY 다이얼로그 앵커 liveness 한정 주석 명시 2종 (#146 피어리뷰 후속):
+  1) Codex 앵커(digit) 확대는 liveness-only 전용: 향후 옵션 번호 -> 승인/거절 매핑 시 '1=Yes' 가정 금지 주의.
+  2) AGY 앵커(digit) liveness-only 주석 명시: liveness 검사 외 다른 용도로의 전용 방지.
+
 [] [Refactor/Eviction] Stale Escalation Eviction 로직 정밀화 3종 (#33 피어리뷰 후속):
+
   1) 에이전트 상태 문자열 대소문자 무시: `_should_evict_stale_escalation`의 `blocked` vs `working/idle/done` 매칭에 `.lower()` 또는 공용 상태 상수 적용 (Herdr 상태 케이싱 차이로 인한 eviction 누락 방지).
   2) 해소 상태값 표준화 및 검증: `resolve_escalation`의 `RESOLVED` vs `CANCELLED` 처리 경로 일관성 점검 및 `approver="pane-direct"` 다운스트림 정상 연동 확인.
   3) 명령 일치성(Command-Match) 검사 추가: `pane_id` 단독 키 매칭 외에 `raw_command` 동일성 확인을 추가하여, 다이얼로그 내용이 다른 미승인 명령으로 교체된 경우의 오퇴출 방지.
