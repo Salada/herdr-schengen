@@ -35,8 +35,14 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   - 해결 방안:
     • OpenCode 서브에이전트 권한 다이얼로그에 대한 RPC permission reply 채널 매핑 강화 및 fallback PTY 주입(Enter / Space) 보장.
     • `inject_approval()`의 실제 전송 성공 여부를 검증하고 실패 시 Gatekeeper에게 명확한 에러 반환 및 재시도 체계 확립.
+[] [Refactor/Approval] 승인 주입 파이프라인 견고성 및 타임아웃/트랜잭션 4종 (#23 피어리뷰 후속):
+  1) `run_cmd` subprocess bounded timeout 보장: `AgyAdapter.inject_approval` 등 herdr CLI 호출 시 무한 블로킹 방지를 위한 5초 timeout 명시.
+  2) Resolve-before-delivery 트랜잭션 역전 방지: 승인 키 주입 실패 시 에스컬레이션이 이미 `RESOLVED`로 남아 2차 재시도가 거부되는 결함 해소 (주입 성공 확인 후 resolve 처리 또는 실패 시 re-open/rollback).
+  3) 다이얼로그 변경(`INJECT_SKIP_CHANGED`) 에러 세분화: TUI Tool이 전달한 stored command와 실시간 req_cmd 불일치 시 'dialog changed/deferred' vs 'hard failure' 명확 구분 리포트.
+  4) `_get_escalation_row` None 방어: 대상 레코드 부재 시 키 주입 누락된 채 허위 성공(false success) 반환하는 갭 차단.
 
 [] [Task/Architecture] Pane 직접 승인(Pane-Direct Adjudication) 실시간 감지 및 Stale Escalation 자동 해제(Auto-Eviction) 아키텍처 구현:
+
   - Context & Problem (사례: #2108 등):
     • 사용자가 TUI를 거치지 않고 대상 Pane(AGY/OpenCode/Codex)에서 직접 `1. Yes`나 `y`를 입력하여 승인·진행했음에도, Daemon과 TUI가 이를 실시간으로 감지하지 못해 수 분 동안 `pending_escalations` 큐에 Stale 상태로 잔류하는 현상 발생.
   - Architecture & Solution Design:
