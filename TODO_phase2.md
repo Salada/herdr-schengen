@@ -36,7 +36,20 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
 [x] Codex `edit_file` 실제 승인(Pane 직접 입력 'y' 또는 TUI /approve) 완료 후에도 Pending에 잔류하는 현상 수정 (PR #146 완료):
   - 해결: `dialog_is_live` tail-anchored 검증(`rfind` 헤더 + `› 1. Yes` focused-row 앵커)으로 과거 스크롤백 오인식 원천 방지 및 auto-eviction 연동.
 
+[] [Bug/Question] Pane 질문(decision_layer='QUESTION') 답변 완료 후에도 TUI 상단 배너 및 Pending 큐에 영구 잔류하는 현상 수정 (사례: #2800):
+  - 현상 및 원인 (사례: Escalation #2800 Codex 질문 등):
+    • 에이전트가 사용자에게 질문(`Question 1/1 ...`)을 하여 `decision_layer='QUESTION'`으로 에스컬레이션된 후, 사용자가 해당 Pane에서 직접 엔터를 쳐서 답변을 완료했음에도 TUI의 상단 배너와 `pending_escalations` 큐에서 제거되지 않고 계속 Pending 상태로 고착됨.
+    • 근본 원인:
+      1) `schengen_tui.py`: `pre-render slot validation`에서 `if not is_question`으로 `QUESTION` 레이어를 의도적으로 제외하여, TUI 렌더링 시 다이얼로그 소멸 검사 및 Auto-Eviction이 전혀 발동하지 않음.
+      2) `schengen_watcher.py`: `pane_direct_maybe_evict`가 `not is_safe`인 UNSAFE 에스컬레이션만 검사(`is_safe=True`인 QUESTION은 제외)하여 데몬 루프에서도 소멸 감지 누락.
+      3) Cross-Workspace/Idle 감시 갭: 감시 대상이 아닌 워크스페이스/Pane이거나 답변 후 에이전트가 즉시 다음 작업/idle로 전이될 때 `not req_cmd` 트리거가 유실됨.
+  - 해결 방향:
+    1) TUI Slot Validation 확장: `schengen_tui.py`에서 `is_question`인 경우에도 `adapter.dialog_is_live(pane_text) == False`일 때 즉시 `resolve_escalation(pane_id, resolution="ANSWERED", approver="human-pane")` 호출하여 배너/큐 자동 클리어.
+    2) Watcher Eviction 보강: `decision_layer == "QUESTION"` 에스컬레이션도 `dialog_is_live` 소멸 시 즉시 auto-evict 및 해소 처리.
+    3) 어댑터별 Question 다이얼로그 생존 검사 정밀화: `_QUESTION_HEADER_RE` 및 `_QUESTION_FOOTER_RE`가 사라진 경우 확실한 `False` 반환 보장.
+
 [] [Refactor/Adapter] `footer_is_live` 공용 유틸 안정화 및 엣지케이스 대응 3종 (#17 피어리뷰 후속):
+
   1) tail window 동적/유연화: `tail_lines=8` 고정값으로 인해 긴 다이얼로그/스피너/줄바꿈 발생 시 실제 live 다이얼로그를 stale로 오판(over-block)하는 갭 해소 (가변 window 또는 footer 역방향 탐색 검토).
   2) marker 잔류 오인식 방지: 종료된 다이얼로그의 footer marker가 8줄 뷰포트에 잔류할 때 여전히 live 상태로 오판하는 이슈 방지 정밀화.
   3) tail window 경계 단위테스트: footer 위치(8줄 vs 9줄 등)에 따른 경계 조건 테스트케이스 추가.
