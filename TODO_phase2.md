@@ -6,14 +6,16 @@
 
 1. [정합성/보안 기반] Approver Provenance 오귀속 분리 (Gatekeeper-LLM vs Human-TUI vs Machine)
    - 맥락: `adjudication_log` 및 `pending_escalations.approver`에 `⚡ GATEKEEPER` vs `👤 HUMAN` vs `🤖 MACHINE` vs `❓ OTHER` 명확 분리. #91 Persistent CUD의 신뢰 프로모션 필수 전제.
-2. [Architecture] Persistent Allowlist CUD(#91) — 전역 TUI /allow /revoke + 런타임 핫리로드
+2. 🚨 [긴급 승격 — Codex 마찰 해소] Codex `edit_file` 파서 정밀화 & 경로 누락(Bare `edit_file`) 방지 (사례: #7759)
+   - 현상: Codex 편집 다이얼로그에서 다중 파일(`len(dests)>1`) 또는 선행 공백/박스 문자로 인해 타겟 경로가 유실된 bare `edit_file`이 추출되어 매번 `NOT_ALLOWLISTED` 차단 및 `.schengen/` 프로모션 불가.
+   - 조치: (1) `^\s*(?:│\s*)?(?:Destination|File):` 인덴트/프레임 허용 (2) `re.IGNORECASE` (3) 다중 파일 워크스페이스 경로 검증 지원.
+3. [Architecture] Persistent Allowlist CUD(#91) — 전역 TUI /allow /revoke + 런타임 핫리로드
    - 맥락: fail-closed allowlist(fast-track closed enum) + `.schengen/allowlist.json` 전역 보완 + INV-PL-1..3.
-3. [Quick-Win 자율성] AGY 장문 생략 명령(⋯ lines hidden) `ctrl+g` 전개 자율 검증 (#2099)
-   - 맥락: `send-keys ctrl+g` 에디터 전개 ➔ 전체 원문 획득 ➔ 100% AST 검증 및 자율 승인.
-4. [UX/몰입도] Inspector 병렬성(Concurrency 10) & 단일 순차 큐 + '인간 개입 필수(Action Required)' 3단 패널 시각화
-   - 맥락: 백그라운드 Silent 10 병렬 평가 + TUI 화면 단일 FIFO 슬롯 노출 + 붉은색 점멸 배너 & 결재 카드.
-5. [피어리뷰 후속 종합] #137 회귀 / #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207 / #146
-   - 맥락: base.py `footer_is_live`, codex.py `Destination`/`File` regex, watcher `_inject_runtime_path`, M7 raw목록/reject-flow, #7207 신뢰스토어 검증, #146 liveness 주석.
+4. [Quick-Win 자율성] AGY `ctrl+g` / OpenCode `ctrl+f` 전개 자율 검증 (#2099 & 장문 커밋)
+   - 맥락: 에디터/풀스크린 모드 전개 ➔ 전체 원문 획득 ➔ 100% AST 검증 및 자율 승인.
+5. [UX/몰입도] Inspector 병렬성(Concurrency 10) & 단일 순차 큐 + '인간 개입 필수(Action Required)' 3단 패널 시각화
+6. [피어리뷰 후속 종합] #137 회귀 / #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207 / #146
+
 
 
 
@@ -92,11 +94,16 @@ Bug (HIGHEST PRIORITY — handoff 후 최우선):
   3) 명령 일치성(Command-Match) 검사 추가: `pane_id` 단독 키 매칭 외에 `raw_command` 동일성 확인을 추가하여, 다이얼로그 내용이 다른 미승인 명령으로 교체된 경우의 오퇴출 방지.
 [x] [Bug/SAST] Daemon 실행 환경 PATH 누락으로 인한 SAST(shellcheck/semgrep) Degraded 과에스컬레이션 버그 (PR #132): `_inject_runtime_path()`로 런타임 bin 디렉터리 주입 완료.
 
-[x] [Bug/Adapter] Codex Adapter edit-dialog 포맷 불일치(`Destination:` vs `*** Update File:`)로 인한 Fail-closed 오차단 버그 (PR #133): `Destination:` 및 `File:` 정규식 템플릿 지원 완료.
-[] [Refactor/Codex] Codex edit-dialog 파서 정밀화 3종 (#52 피어리뷰 후속):
-  1) `Destination:` 우선 요구 및 `File:` 과포괄(다이얼로그 내 임의의 File: 라인 캡처) 방지 정밀 매칭.
-  2) `re.IGNORECASE` 적용: 소문자 `destination:` / `file:` 매칭 누락으로 인한 오차단(over-block) 방지.
-  3) `edit_file {dests[0].strip()}`의 중복 `.strip()` 제거 정리.
+[] [Refactor/Codex] Codex edit-dialog 파서 정밀화 및 경로 누락(Bare `edit_file`) 방지 (#52 후속 및 #7759 해소):
+  - 현상 및 원인 (사례: #7759 등):
+    • Codex 편집 모달에서 경로가 누락된 단독 `edit_file`이 추출되어 `NOT_ALLOWLISTED` fail-closed 차단 및 `.schengen/` 프로모션 불가 현상 반복.
+    • 원인: `Destination:`/`File:` 앞 선행 공백/박스 문자(`│`) 미매칭 또는 다중 파일 패치(`len(dests) > 1`) 발생 시 단독 `edit_file`로 축소 반환.
+  - 조치:
+    1) 인덴트 및 프레임 허용 정규식: `r"^\s*(?:│\s*)?(?:Destination|File):\s*(.+?)\s*$"`
+    2) `re.IGNORECASE` 적용으로 대소문자 변종 완벽 포용.
+    3) 다중 파일 워크스페이스 검증: 여러 파일 수정 시 모든 대상 파일 경로를 추출(`edit_file <p1> <p2>...`)하여 각각 민감 경로(Denylist) 검증을 거친 후 안전 시 승인/프로모션 지원.
+    4) 중복 `.strip()` 제거 및 단위테스트 보강.
+
 [x] [Prerequisite/Host] 호스트 머신 semgrep 바이너리 미설치로 인한 SAST DEGRADED 해소: semgrep 1.175.0 설치(/opt/homebrew/bin/semgrep) 및 기능 스캔/SAST BLOCK 정상 탐지 검증 완료. shellcheck+semgrep 모두 READY.
 [] [Task/Dependency] semgrep 필수 디펜던시(Required Dependency) 체계적 관리 및 자동화 방안 수립:
   - Context & Objective:
