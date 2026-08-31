@@ -98,10 +98,12 @@ from tools.schengen_agent_llm import (
     SchengenAgentChat,
     approve_batch_escalations,
     get_current_active_escalation,
+    get_current_command_escalation,
+    get_oldest_question_escalation,
     reject_batch_escalations,
 )
 from adapters.agent_adapters import get_adapter
-from adapters.herdr_client import get_pane_info, get_pane_text
+from adapters.herdr_client import get_pane_info, get_pane_text, run_cmd
 from cmd.schengen_watcher import list_active_guard_locks
 
 
@@ -130,6 +132,15 @@ def format_resolution_badge(resolution: Optional[str], short: bool = False) -> s
     if resolution == "ANSWERED":
         return "[cyan]ANS[/]" if short else "[cyan]ANSWERED[/]"
     return "[dim]—[/]"
+
+
+def format_question_hint(q_esc: dict) -> str:
+    """Render the non-blocking sidebar hint for the oldest pending question.
+
+    A QUESTION stays PENDING (for the hint + #2800 auto-dissolve) but never
+    occupies the Command Approval slot (INV-QN-2/3).
+    """
+    return f"[bold yellow]💬 [{q_esc['pane_id']} Question Awaiting Answer][/]"
 
 
 def format_approver_badge(approver: Optional[str], decision: str = "") -> str:
@@ -1644,6 +1655,7 @@ class SchengenTUIApp(App):
             with Vertical(id="radar-column"):
                 yield Button("⚡ Toggle Guard", id="btn-toggle-guard", variant="warning")
                 yield Static(id="status-card")
+                yield Static(id="question-hint")
                 yield Static(id="action-card")
                 with Vertical(id="instruction-control"):
                     yield Button("📤 Approve Instr: OFF", id="btn-toggle-approve-instr")
@@ -1699,6 +1711,23 @@ class SchengenTUIApp(App):
 
     def on_click(self, event: events.Click) -> None:
         self._log_mouse_event("click", event)
+        widget = getattr(event, "widget", None)
+        if widget is not None and getattr(widget, "id", None) == "question-hint":
+            self._focus_question_pane()
+
+    def _focus_question_pane(self) -> None:
+        """Focus the pane of the oldest pending question (same as /jump).
+
+        Non-adjudicating navigation: a QUESTION is answered in the agent pane
+        (AGENTS.md rule 10); the hint click / /jump just brings it into view.
+        """
+        q_esc = get_oldest_question_escalation()
+        if q_esc:
+            target = q_esc["pane_id"]
+            run_cmd(["herdr", "pane", "focus", target])
+            self._write(f"[bold cyan]↩ Focusing question pane {target}...[/]")
+        else:
+            self._write("[dim]No pending question to focus.[/]")
 
     def on_mount(self) -> None:
         self.title = "Herdr Schengen Security Gatekeeper"
@@ -1798,7 +1827,9 @@ class SchengenTUIApp(App):
             )
             self._refresh_instruction_buttons()
         elif event.button.id == "btn-go-to-pane":
-            active_esc = get_current_active_escalation()
+            # Command-slot head excludes questions (INV-QN-1/2); the "Go to
+            # agent pane" button focuses the ACTIVE COMMAND's pane.
+            active_esc = get_current_command_escalation()
             if active_esc:
                 target = active_esc["pane_id"]
                 subprocess.Popen(
@@ -1976,6 +2007,22 @@ class SchengenTUIApp(App):
         )
         _update_static_if_changed(status_card, status_card_text)
 
+        # 0b. Non-blocking QUESTION hint (INV-QN-3): the oldest pending question
+        #     is surfaced here instead of the Command Approval slot; clicking it
+        #     focuses the pane (same as /jump). Auto-dissolves when the #2800
+        #     ANSWERED sweep resolves it.
+        try:
+            question_hint = self.query_one("#question-hint", Static)
+        except Exception:
+            question_hint = None
+        if question_hint is not None:
+            q_esc = get_oldest_question_escalation()
+            if q_esc:
+                _update_static_if_changed(question_hint, format_question_hint(q_esc))
+                question_hint.display = True
+            else:
+                question_hint.display = False
+
         # 1. Guard state edge detection (external kill alert) — the ACTIVE/
         #    INACTIVE display itself now lives in the #status-card above.
         is_guard_active = bool(locks)
@@ -1997,8 +2044,11 @@ class SchengenTUIApp(App):
         )
         _update_static_if_changed(meter_box, meter_text)
 
-        # 3. Active Target Banner + radar Action-Required card (Phase 2)
-        active_esc = get_current_active_escalation()
+        # 3. Active Target Banner + radar Action-Required card (Phase 2).
+        #    Command-slot head EXCLUDES questions (INV-QN-1/2): a PENDING
+        #    QUESTION is surfaced via the sidebar #question-hint instead of
+        #    occupying the Command Approval slot.
+        active_esc = get_current_command_escalation()
         banner = self.query_one("#active-target-banner", Static)
         action_card = self.query_one("#action-card", Static)
 
@@ -2391,7 +2441,7 @@ class SchengenTUIApp(App):
             self._write("[dim]⏳ Another investigation/chat is currently in-flight. Press ESC twice or type [bold yellow]/interrupt[/] to abort.[/]")
             return
 
-        if not self.is_controller and (user_msg.startswith("/approve") or user_msg.startswith("/reject") or user_msg.startswith("/start") or user_msg.startswith("/stop") or user_msg.startswith("/allow") or user_msg.startswith("/revoke")):
+        if not self.is_controller and (user_msg.startswith("/approve") or user_msg.startswith("/reject") or user_msg.startswith("/start") or user_msg.startswith("/stop") or user_msg.startswith("/allow") or user_msg.startswith("/revoke") or user_msg.startswith("/jump")):
             self._write(f"[bold yellow]⚠️ [Observer Mode]:[/] Read-only instance. Leader PID {self.leader_pid} controls execution.")
             return
 
@@ -2441,6 +2491,20 @@ class SchengenTUIApp(App):
                     result = await asyncio.to_thread(reject_batch_escalations, reason or "Rejected in batch via TUI")
                 self._write(f"{self._timestamp()} 🤖 [bold cyan]Batch Gatekeeper[/]:")
                 self._write_markdown(f"```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```")
+                self.update_radar_data(force=True)
+                return
+
+            # Question 분리 (INV-QN-2): focus an arbitrary agent pane — e.g. the
+            # pane showing a pending question (answered in-pane, never
+            # adjudicated). Non-adjudicating navigation (AGENTS.md rule 10).
+            if user_msg.startswith("/jump"):
+                parts = user_msg.split(maxsplit=1)
+                pane_id = parts[1].strip() if len(parts) > 1 else ""
+                if not pane_id:
+                    self._write("[bold yellow]⚠️ Usage: /jump <pane_id>[/]")
+                    return
+                run_cmd(["herdr", "pane", "focus", pane_id])
+                self._write(f"[bold cyan]↩ Focusing agent pane {pane_id}...[/]")
                 self.update_radar_data(force=True)
                 return
 

@@ -1564,6 +1564,25 @@ def get_pending_escalations(
     return valid_escalations
 
 
+def get_pending_command_escalations(
+    pane_id: Optional[str] = None,
+    include_delivered: bool = False,
+    active_session_map: Optional[dict[str, Optional[str]]] = None,
+) -> list[dict]:
+    """Return pending escalations EXCLUDING QUESTION rows.
+
+    A QUESTION escalation must not occupy the Command Approval slot (strict
+    FIFO) — it stays PENDING for the sidebar hint / auto-dissolve (#2800), but
+    the command-slot head excludes questions (INV-QN-1).
+    """
+    rows = get_pending_escalations(
+        pane_id=pane_id,
+        include_delivered=include_delivered,
+        active_session_map=active_session_map,
+    )
+    return [r for r in rows if r.get("decision_layer") != "QUESTION"]
+
+
 def group_pending_escalations(escalations: list[dict]) -> list[dict]:
     """Group pending rows into (decision_layer, canonical_pattern) batches, FIFO order."""
     groups = {}
