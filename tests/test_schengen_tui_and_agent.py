@@ -900,6 +900,28 @@ class TestTUIBadgesAndDeepLinks(unittest.TestCase):
         self.assertNotIn("Gatekeeper Checking", b)
         self.assertNotIn("Deferred", b)
 
+    def test_queue_badge_judging_shows_checking(self):
+        from cmd.schengen_tui import format_pending_queue_badge
+
+        # Active head while the judge LLM is investigating -> "Gatekeeper
+        # Checking" (INV-HR-1/2), NOT "Human Action Required".
+        b = format_pending_queue_badge(
+            {"id": 1, "status": "PENDING", "decision_layer": "COMPLEXITY_TAX"},
+            active_id=1,
+            judging=True,
+        )
+        self.assertIn("Gatekeeper Checking", b)
+        self.assertNotIn("Human Action Required", b)
+
+        # Once judging is False (judge finished), the head shows Human Required.
+        b = format_pending_queue_badge(
+            {"id": 1, "status": "PENDING", "decision_layer": "COMPLEXITY_TAX"},
+            active_id=1,
+            judging=False,
+        )
+        self.assertIn("Human Action Required", b)
+        self.assertNotIn("Gatekeeper Checking", b)
+
     def test_non_question_head_awaits_human(self):
         from cmd.schengen_tui import format_pending_queue_badge
 

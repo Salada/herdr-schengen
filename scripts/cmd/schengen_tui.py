@@ -189,21 +189,25 @@ def format_pending_queue_badge(
     esc: dict,
     active_id: Optional[int] = None,
     slot: Optional[int] = None,
+    judging: bool = False,
 ) -> str:
     """Render the phase3 pending-queue status badge from existing fields.
 
-    Precedence (only what is determinable from stored data):
+    Precedence (only what is determinable from stored data + judging state):
       1. Not the active FIFO slot  -> ``⏳ [Deferred (Slot #N)]``
          (strict single-pending FIFO: every non-head row waits behind the
          active slot; ``slot`` is the row's 1-based position in the FIFO line)
-      2. ``decision_layer == QUESTION`` -> ``🚨 [Human Action Required]``
+      2. ``judging`` (active head, judge LLM investigating) ->
+         ``🔍 [Gatekeeper Checking]`` (INV-HR-1/2: NOT yet "Human Required")
+      3. ``decision_layer == QUESTION`` -> ``🚨 [Human Action Required]``
          (the user answers in the pane; nothing else can auto-resolve it)
-      3. Otherwise -> ``🚨 [Human Action Required]``
+      4. Otherwise -> ``🚨 [Human Action Required]``
 
     NOTE (logic dependency): a PENDING/DELIVERED non-question HEAD is ALWAYS
     awaiting human /approve — the inspector reaches a final verdict BEFORE
     ``enqueue_pending_escalation`` is called, so in-flight (Phase-1) inspection
-    is never persisted and must not be inferred from stored fields.
+    is never persisted and must not be inferred from stored fields. The judge
+    round-trip (Phase 2a) is a TUI-local state passed via ``judging``.
     """
     status = esc.get("status", "PENDING")
     if status not in ("PENDING", "DELIVERED"):
@@ -211,6 +215,8 @@ def format_pending_queue_badge(
     if active_id is not None and esc.get("id") != active_id:
         n = int(slot) if slot else 1
         return f"[bold yellow]⏳ [Deferred (Slot #{n})][/]"
+    if judging:
+        return "[bold cyan]🔍 [Gatekeeper Checking][/]"
     if esc.get("decision_layer") == "QUESTION":
         return "[bold red]🚨 [Human Action Required][/]"
     return "[bold red]🚨 [Human Action Required][/]"
@@ -2423,7 +2429,10 @@ class SchengenTUIApp(App):
                 if len(cmd_short) > 24:
                     cmd_short = cmd_short[:24] + "…"
                 badge = format_pending_queue_badge(
-                    esc, active_id=active_id, slot=fifo_slots.get(esc["id"])
+                    esc,
+                    active_id=active_id,
+                    slot=fifo_slots.get(esc["id"]),
+                    judging=(esc["id"] == self._judging_escalation_id),
                 )
                 item_label = Text()
                 item_label.append(f"[#{esc['id']}]", style="bold cyan")
