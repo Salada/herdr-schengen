@@ -247,45 +247,24 @@
         - 원격/로컬 컨테이너(Synology Docker / 로컬 서비스) 자동 재시작 스크립트/Webhook 연계 가능성 검토.
         - LLM 서버 다운 시 무한 대기 방지 및 안전한 Fail-Closed 에스컬레이션 보장.
 
-[] [Task/UX] TUI 토글/설정 옵션 전용 윈도우(Settings Modal) 분리 및 사이드바 상태 카드 위젯(Status Card Widget) 도입
-   - Context & Problem:
-     - 기능 확장(Guard 토글, Controller/Observer 모드, 승인/거절 지침 토글, 다국어 선택, Approval Bias, Fast-Track 모드 등)에 따라 메인 TUI 화면에 토글 버튼이 과도하게 증식하여 화면이 복잡해지고 시인성이 저하됨.
+[] [Task/UX] TUI 토글/설정 옵션 전용 윈도우(Settings Modal) 분리 및 첫 화면(Main/Sidebar) 핵심 상태 직관화
+   - Context & Feedback:
+     - 기능 확장(Guard 토글, Controller/Observer 모드, 승인/거절 지침 토글, 다국어 선택, Approval Bias, Fast-Track 모드 등)에 따라 메인 TUI 화면에 토글 버튼이 과도하게 증식하여 화면이 복잡해지는 문제 해소.
+     - **사용자 핵심 피드백**: 가장 자주 확인하고 조작하는 `Guard daemon (ACTIVE/INACTIVE)` 및 `Mode (Controller/Observer)`는 깊은 모달 진입 없이도 **TUI 첫 화면(상단 헤더 또는 우측 사이드바 최상단)**에서 직관적으로 즉시 확인 및 원클릭 토글이 가능해야 함.
    - Solution & Architecture:
-     1. 사이드 패널(Radar Column) 상태 요약 카드 위젯 (Status Card Widget) 배치:
-        - 메인 채팅 영역을 전혀 침범하지 않고, 우측 사이드 패널 상단에 정돈된 구조화 미니 카드(Info Box) 위젯 배치:
-          ```text
-          ┌─ System Status ──────────┐
-          │ Mode  : Controller (👑)  │
-          │ Guard : ACTIVE (🛡️)      │
-          │ Bias  : Conservative     │
-          │ Lang  : Korean (KO)      │
-          │ Instr : Reject-only      │
-          └──────────────────────────┘
-          ```
-     2. 전용 설정 모달 서브 윈도우(SettingsModal) 도입:
+     1. 첫 화면(Main Header / Sidebar Top) 상시 노출:
+        - `Guard Daemon` 및 `Leader Mode`는 첫 화면 핵심 위젯으로 상시 노출하여 즉시 시인성 확보.
+     2. 세부 설정 모달(SettingsModal):
         - 진입 방법: 단축키 `^s` (Settings), `F2`, 설정 버튼 클릭, 또는 Slash Command `/config`, `/settings`
-        - 모달 내부 카테고리별 정돈된 편집 UI 제공:
-          • [운영 모드]: Guard Daemon ON/OFF, Controller vs Observer Leader 선택
-          • [지침 주입]: 승인(Approve) 시 지침 전달 ON/OFF, 거절(Reject) 시 지침 전달 ON/OFF
-          • [로컬라이제이션]: Gatekeeper 응답 언어 선택 (한국어 / English / 日本語)
-          • [보안 정책]: Approval Bias (Conservative / Balanced / Permissive), Fast-Track 모드 토글
-        - 설정 모달 내 변경 사항 즉시 SQLite `guard_config` 영속화 및 우측 상태 카드에 실시간 동기화.
+        - 세부 카테고리(지침 주입 토글, Gatekeeper 다국어 KO/EN/JA 선택, Approval Bias, Fast-Track 모드) 관리.
 
-[] [Task/UX] 에스컬레이션 배너/메시지 타이밍 및 상태 전이 명확화: Gatekeeper 조사 중(Cyan/Dim) vs 인간 개입 필수(Bold Red Blink) 색상·시각적 분리 (사례: #3363):
-   - Context & Problem (사례: Escalation #3363 Codex SKILL.md 읽기 등):
-     - 현재 에스컬레이션 발생 직후 Inspector가 자체 툴콜 조사를 진행 중인 상태임에도 `Not in fast-track allowlist` 및 붉은색 경고 UI가 미리 화면에 노출되어, 인간 지휘관 입장에서 "지금 내가 즉시 개입해야 하는지, AI 판단을 기다려야 하는지" 심각한 인지 혼란 초래.
-   - Solution & State Machine UX Design:
-     1. [Phase 1: 자율 조사 진행 중 (In-Flight Autonomous Inspection)]:
-        - 색상/스타일: **은은한 Cyan / Dim Blue / 황갈색**: `🔍 [dim cyan]⚡ Gatekeeper Inspecting Escalation #<id> (AI evaluating tools... Stand by)[/]`
-        - 붉은색(Red), 점멸(Blink), 경고음(Alert Sound), 인간 개입 유도 문구 일체 금지.
-     2. [Phase 2: 자율 판정 종료 & 인간 승인 필요 확정 (Action Required)]:
-        - Inspector/Judge가 자체 해결 불가(Gray-Zone / Fail-Closed Denylist)로 최종 결론을 내렸을 때만 빨간색으로 전환.
-        - 화면에 **진한 붉은색 점멸(Bold Red Blink)** 및 명확한 액션 유도 메시지 노출:
-          `🚨 [bold red blink]▶ ACTION REQUIRED: Escalation #<id> Awaiting Human Decision[/]`
-          `   [bold white]Cmd:[/] <command>`
-          `   [bold yellow]Reason:[/] <최종 자율 판정 실패 및 인간 검토 필요 사유>`
-     3. [Phase 3: 자율 판정 통과 시 (Auto-Approved)]:
-        - 인간 화면에 어떤 방해/경고도 남기지 않고 조용히 `[green]✔ Auto-Approved (Gatekeeper)[/]` 처리 후 큐 클리어.
+[x] [Task/UX] 에스컬레이션 배너/메시지 타이밍 및 상태 전이 명확화: Phase-1 In-flight IPC 기반 조사 중 vs 인간 개입 필수 색상·시각적 분리 (PR #161 완료, INV-PH1-1..6):
+   - 해결:
+     1) **Phase-1 in-flight IPC**: inspector 평가 진행 중(escalation 전) 상태를 JSON 상태파일(`in_flight_state.json`, 단일 writer 원자적 쓰기 + STALE_TTL 30s)로 TUI에 노출.
+     2) **2단계 Phase 구분**: `🔍 Inspector: checking`(dim, 결정론적 AST ms 단위) vs `🤖 Gatekeeper: judging`(dim magenta, LLM/cloud-judge 초 단위) 시각 분리.
+     3) **인간 개입 필수 시각화**: PENDING(인간 개입 필수 확정)일 때만 `🚨 Human Action Required`(bold red) 배너 노출하여 #3363 인지 혼선 완벽 해소.
+     4) **불변식 & 테스트**: INV-PH1-1..6 불변식 확립, 단위테스트 14종 추가 (총 560 OK).
+
 
 
 [] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅 및 카피라이팅 혁신 (Designer & Marketer Persona 협업)
