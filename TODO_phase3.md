@@ -33,11 +33,16 @@
        - 모든 `docs/adr-*.md` -> `docs/adr/` 이동.
        - `docs/setup*.md`, `github-mirror.md`, `json_data_beautify.md` -> `docs/guides/` 이동.
        - 과거 세션 기록물(`BENCHMARK_SLM_CHOICE.md`, `diary.md`, `handoff-*.md`) -> `docs/archive/` 이동.
-    2) `README.md` 다이어트, 포터블 셋업 & 보조도구 분리:
+    2) `README.md` 다이어트, 라이선스/미러링 정책 & 보조도구 분리:
        - `Project Maintenance`: 레거시 서술을 쳐내고, 에이전트 필수 불변식만 추출하여 `AGENTS.md`로 이전.
        - `The Motivation & Design Philosophy`: TUI 일원화 시점 기준 과도한 개인적/역사적 배경은 `docs/archive/motivation.md`로 이관하고, `README.md`에는 핵심 목적/9개 레이어만 간결하게 유지.
+       - `License & Mirror Policy ('open-source ready' 레거시 대체)`:
+         • MIT License 하에 자유로운 사용 및 포크(Fork) 허용.
+         • 내부 Forgejo(`InhouseOriented/herdr-schengen`)에서만 정식 개발/이슈/CI 관리, GitHub는 오로지 단방향(1-way) 배포 미러로만 운영됨을 명시.
+         • 외부로부터의 PR/이슈 등 적극적인 기여를 관리할 계획이 없으며, 필요 시 독립 포크 활용을 권장하는 솔직하고 명확한 기여 정책 확립.
        - `Quick Commands 포터블화`: `~/.local/share/herdr-schengen-tui-venv` 등 고정 dotfiles 경로를 제거하고, 표준 가상환경(`python3 scripts/cmd/schengen_tui.py` 또는 `"$SCHENGEN_HOME/.venv/bin/python"`) 기준으로 포터블화.
        - `History CLI 보조 도구(Companion Tools) 분리`: `schengen_history.py` (감사 로그 검색, 레이어 필터, CSV/통계)를 핵심 데몬과 분리하여 **"🛠️ Companion Tools / Auxiliary Utilities"** 섹션으로 독립 편성.
+
     3) 환경변수 & 설정 종합 문서화 (`docs/guides/configuration.md`):
        - 핵심 환경변수(`HERDR_ENV`, `HERDR_PANE_ID`, `SCHENGEN_HOME`, `SCHENGEN_HISTORY_PATH`), LLM 설정(`OPENAI_API_KEY`, `GUARD_LLM_MODEL`), 어댑터 튜닝 변수, `config/schengen_watcher.json` 기본값 및 SQLite 런타임 상태 디렉터리(`~/.local/state/herdr-schengen/`) 구조 명확화.
     4) ADR 전수조사: 13개 ADR 상단에 상태 메타데이터(`Active` vs `Superseded / Evolved`: ADR-006, ADR-011) 명시 및 상대 경로 일괄 보정.
