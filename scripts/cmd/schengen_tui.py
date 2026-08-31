@@ -921,6 +921,249 @@ class AuditDetailModal(ModalCloseMixin, ModalScreen):
 
 
 
+class SettingsModal(ModalCloseMixin, ModalScreen):
+    """Consolidated settings window (^s / F2 / /config / /settings).
+
+    Every control reads from and writes to the EXISTING guard_config setters
+    (instruction delivery, channel approve, answer language) or the existing
+    daemon lifecycle toggle. Settings that have no backing config key
+    (Approval Bias, Fast-Track) are intentionally absent — see TODO_phase3.
+    """
+
+    CSS = """
+    SettingsModal {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.85);
+    }
+    #settings-dialog {
+        width: 64;
+        max-width: 90%;
+        height: auto;
+        max-height: 92%;
+        background: $surface-darken-1;
+        border: tall $accent;
+        padding: 1;
+        layout: vertical;
+        overflow-y: auto;
+    }
+    #settings-dialog .settings-category {
+        color: $text-muted;
+        text-style: bold;
+        margin-top: 1;
+        margin-bottom: 0;
+    }
+    .settings-row {
+        layout: horizontal;
+        height: 3;
+        margin-top: 0;
+        margin-bottom: 0;
+    }
+    .settings-row > Label {
+        width: 1fr;
+        height: 3;
+        content-align: left middle;
+    }
+    .settings-row > Button {
+        width: 24;
+        height: 3;
+        min-width: 24;
+        padding: 0 1;
+    }
+    .settings-row > Static {
+        width: 24;
+        height: 3;
+        content-align: right middle;
+    }
+    #settings-help {
+        dock: bottom;
+        color: $text-muted;
+        text-align: center;
+        margin-top: 1;
+    }
+    """
+    CSS += MODAL_CLOSE_CSS
+
+    BINDINGS = [
+        Binding("escape", "app.pop_screen", "Close (ESC)", show=True),
+        Binding("q", "app.pop_screen", "Close (q)", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-dialog"):
+            with Horizontal(id="modal-title-bar"):
+                yield Label("[bold cyan]⚙️ Settings[/]")
+                yield Button("✕", id="modal-close", classes="modal-close")
+            yield Label("🛡 Operation", classes="settings-category")
+            with Horizontal(classes="settings-row"):
+                yield Label("Guard daemon")
+                yield Button("—", id="set-guard-daemon")
+            with Horizontal(classes="settings-row"):
+                yield Label("Mode (runtime role)")
+                yield Static("—", id="set-mode")
+            yield Label("📤 Instruction Delivery", classes="settings-category")
+            with Horizontal(classes="settings-row"):
+                yield Label("Send approve instruction")
+                yield Button("—", id="set-approve-instr")
+            with Horizontal(classes="settings-row"):
+                yield Label("Send reject instruction")
+                yield Button("—", id="set-reject-instr")
+            with Horizontal(classes="settings-row"):
+                yield Label("OpenCode channel approve")
+                yield Button("—", id="set-channel-approve")
+            yield Label("🗣️ Answer Language", classes="settings-category")
+            with RadioSet(id="settings-lang-set"):
+                yield RadioButton("English", id="lang-english")
+                yield RadioButton("한국어", id="lang-korean", value=True)
+                yield RadioButton("日本語", id="lang-japanese")
+            yield Label("[dim]Changes apply immediately · ESC / q closes · ^s or F2 reopens[/]", id="settings-help")
+
+    def on_mount(self) -> None:
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """Re-read live config and daemon state into the modal controls."""
+        app = getattr(self, "app", None)
+        try:
+            locks = list_active_guard_locks()
+            self.query_one("#set-guard-daemon", Button).label = (
+                f"🛡️ Guard: ACTIVE (PID {locks[0][2]})" if locks else "🛡️ Guard: INACTIVE"
+            )
+            if app is not None:
+                if app.is_controller:
+                    self.query_one("#set-mode", Static).update(
+                        f"[green]Controller (👑) PID {os.getpid()}[/]"
+                    )
+                else:
+                    self.query_one("#set-mode", Static).update(
+                        f"[yellow]Observer (👁) — Leader PID {app.leader_pid or 'active'}[/]"
+                    )
+        except Exception:
+            pass
+        cfg = get_instruction_delivery_config()
+        try:
+            self.query_one("#set-approve-instr", Button).label = (
+                "Approve Instr: ON" if cfg.get("send_approve_instruction") else "Approve Instr: OFF"
+            )
+            self.query_one("#set-reject-instr", Button).label = (
+                "Reject Instr: ON" if cfg.get("send_reject_instruction") else "Reject Instr: OFF"
+            )
+            self.query_one("#set-channel-approve", Button).label = (
+                "Channel Approve: ON" if get_channel_approve_config() else "Channel Approve: OFF"
+            )
+        except Exception:
+            pass
+        # language radios
+        try:
+            lang = get_answer_language()
+            btn_id = _BUTTON_ID_BY_LANG.get(lang)
+            if btn_id:
+                btn = self.query_one(f"#{btn_id}", RadioButton)
+                btn.value = True
+        except Exception:
+            pass
+
+    def _notify_app(self) -> None:
+        """Sync the sidebar controls + status card after a change."""
+        app = getattr(self, "app", None)
+        if app is None:
+            return
+        try:
+            app._refresh_instruction_buttons()
+        except Exception:
+            pass
+        # Sync the sidebar language radios (scoped to the sidebar RadioSet —
+        # the modal carries RadioButtons with the same ids).
+        try:
+            lang = get_answer_language()
+            btn_id = _BUTTON_ID_BY_LANG.get(lang)
+            if btn_id:
+                sidebar_set = app.query_one("#answer-language-set", RadioSet)
+                for rb in sidebar_set.query(RadioButton):
+                    if rb.id == btn_id:
+                        rb.value = True
+                        break
+        except Exception:
+            pass
+        try:
+            app.update_radar_data(force=True)
+        except Exception:
+            pass
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = getattr(event.button, "id", None)
+        if bid == "modal-close":
+            return  # ModalCloseMixin's handler (MRO) pops the screen once
+        app = getattr(self, "app", None)
+        if bid == "set-guard-daemon":
+            if app is not None and hasattr(app, "toggle_guard_daemon"):
+                msg = app.toggle_guard_daemon()
+                try:
+                    app._write(f"[bold yellow]⚙️ [Daemon Control]:[/] {msg}")
+                except Exception:
+                    pass
+        elif bid == "set-approve-instr":
+            cfg = get_instruction_delivery_config()
+            set_instruction_delivery_config(send_approve_instruction=not cfg.get("send_approve_instruction", False))
+        elif bid == "set-reject-instr":
+            cfg = get_instruction_delivery_config()
+            set_instruction_delivery_config(send_reject_instruction=not cfg.get("send_reject_instruction", True))
+        elif bid == "set-channel-approve":
+            set_channel_approve_config(not get_channel_approve_config())
+        else:
+            return
+        self._refresh()
+        self._notify_app()
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        lang = _LANG_BY_BUTTON_ID.get(event.pressed.id or "")
+        if not lang:
+            return
+        event.stop()  # the app-level handler targets the sidebar RadioSet
+        set_answer_language(lang)
+        self._refresh()
+        self._notify_app()
+
+
+def format_status_card_text(
+    *,
+    is_controller: bool,
+    leader_pid: Optional[int],
+    guard_pid: Optional[int],
+    guard_target: Optional[str] = None,
+    lang: str,
+    send_approve_instruction: bool,
+    send_reject_instruction: bool,
+) -> str:
+    """Render the sidebar System Status card from EXISTING live state.
+
+    Mirrors the phase3 mockup (TODO_phase3.md "Sidebar Status Card Widget").
+    No approval-bias or fast-track keys exist in guard_config, so those rows
+    are omitted rather than invented.
+    """
+    mode = "Controller (👑)" if is_controller else f"Observer (👁) — Leader PID {leader_pid or 'active'}"
+    if guard_pid:
+        guard = f"ACTIVE (🛡️) PID {guard_pid}"
+        if guard_target:
+            guard += f" · {guard_target}"
+    else:
+        guard = "INACTIVE (○)"
+    if send_approve_instruction and send_reject_instruction:
+        instr = "Approve+Reject"
+    elif send_approve_instruction:
+        instr = "Approve-only"
+    elif send_reject_instruction:
+        instr = "Reject-only"
+    else:
+        instr = "None"
+    lang_label = {"korean": "Korean (KO)", "english": "English (EN)", "japanese": "Japanese (JA)"}.get(lang, lang)
+    return (
+        f"[bold]Mode  :[/] {mode}\n"
+        f"[bold]Guard :[/] {guard}\n"
+        f"[bold]Lang  :[/] {lang_label}\n"
+        f"[bold]Instr :[/] {instr}"
+    )
+
+
 class FixedHeader(Header):
     """Header that does not expand or toggle tall mode on click."""
     ALLOW_SELECT = False
@@ -1226,26 +1469,13 @@ class SchengenTUIApp(App):
         dock: bottom;
         margin-bottom: 1;
     }
-    #status-container {
-        height: 4;
-        layout: horizontal;
-        margin-top: 1;
-        margin-bottom: 1;
-    }
-    #status-box {
-        width: 1fr;
-        height: 100%;
-        background: $surface-darken-1;
-        border: solid $surface-lighten-1;
-        padding: 0;
-        content-align: center middle;
-    }
+    /* Guard daemon toggle: full-width row (guard state lives in #status-card) */
     #btn-toggle-guard {
-        width: 12;
-        height: 100%;
-        margin-left: 1;
+        width: 100%;
+        height: 3;
         min-width: 10;
-        padding: 0;
+        margin-bottom: 1;
+        padding: 0 1;
     }
     #instruction-control {
         layout: vertical;
@@ -1267,10 +1497,14 @@ class SchengenTUIApp(App):
         width: auto;
         margin-right: 1;
     }
-    #role-box {
-        height: 4;
+    /* Sidebar System Status card: live consolidated guard state (phase3). */
+    #status-card {
+        height: auto;
+        min-height: 6;
+        max-height: 8;
         background: $surface-darken-1;
         border: solid $surface-lighten-1;
+        border-left: heavy $accent;
         padding: 0 1;
         margin-bottom: 1;
         content-align: left middle;
@@ -1334,6 +1568,8 @@ class SchengenTUIApp(App):
         Binding("ctrl+t", "toggle_daemon", "Toggle Guard", show=True),
         Binding("ctrl+y", "copy_chat", "Copy Chat", show=True),
         Binding("ctrl+a", "open_audit_modal", "Audit Ledger", show=True),
+        Binding("ctrl+s", "open_settings", "Settings", show=True),
+        Binding("f2", "open_settings", "Settings", show=False),
     ]
 
     def __init__(self):
@@ -1406,10 +1642,8 @@ class SchengenTUIApp(App):
 
             # Right: Compact Radar with Token Meter
             with Vertical(id="radar-column"):
-                with Horizontal(id="status-container"):
-                    yield Static(id="status-box")
-                    yield Button("⚡ Toggle", id="btn-toggle-guard", variant="warning")
-                yield Static(id="role-box")
+                yield Button("⚡ Toggle Guard", id="btn-toggle-guard", variant="warning")
+                yield Static(id="status-card")
                 yield Static(id="action-card")
                 with Vertical(id="instruction-control"):
                     yield Button("📤 Approve Instr: OFF", id="btn-toggle-approve-instr")
@@ -1431,6 +1665,11 @@ class SchengenTUIApp(App):
     def action_open_audit_modal(self) -> None:
         if len(self.screen_stack) == 1:
             self.push_screen(AuditFullscreenModal())
+
+    def action_open_settings(self) -> None:
+        """Open the consolidated settings modal (^s / F2 / /config / /settings)."""
+        if len(self.screen_stack) == 1:
+            self.push_screen(SettingsModal())
 
     def _log_mouse_event(self, kind: str, event: events.MouseEvent) -> None:
         if not _mouse_debug_enabled():
@@ -1718,33 +1957,32 @@ class SchengenTUIApp(App):
         if not self._columns_initialized:
             return
 
-        # 0. Update Role header box (full width, dedicated panel)
+        # 0. Update Sidebar System Status card (consolidated live state)
         try:
-            role_box = self.query_one("#role-box", Static)
+            status_card = self.query_one("#status-card", Static)
         except Exception:
             return
 
-        if self.is_controller:
-            role_text = f"[bold green]👑 CONTROLLER MODE[/]  [dim]PID {os.getpid()}[/]\n[dim]Autonomous LLM & Key Injection active[/]"
-        else:
-            role_text = f"[bold yellow]👁 OBSERVER MODE[/]  [dim]Leader PID {self.leader_pid or 'active'}[/]\n[dim]Read-only monitoring (Actions disabled)[/]"
-        _update_static_if_changed(role_box, role_text)
-
-        # 1. Update status header box (muted tones — accent only on state)
         locks = list_active_guard_locks()
+        instr_cfg = get_instruction_delivery_config()
+        status_card_text = format_status_card_text(
+            is_controller=self.is_controller,
+            leader_pid=self.leader_pid,
+            guard_pid=locks[0][2] if locks else None,
+            guard_target=locks[0][0] if locks else None,
+            lang=get_answer_language(),
+            send_approve_instruction=bool(instr_cfg.get("send_approve_instruction", False)),
+            send_reject_instruction=bool(instr_cfg.get("send_reject_instruction", True)),
+        )
+        _update_static_if_changed(status_card, status_card_text)
+
+        # 1. Guard state edge detection (external kill alert) — the ACTIVE/
+        #    INACTIVE display itself now lives in the #status-card above.
         is_guard_active = bool(locks)
         if self._last_guard_active and not is_guard_active:
             # External kill detected!
             self._write("\n[bold red]⚠️ [Guard Daemon Alert]:[/] SmartGate 가드 데몬이 외부에서 종료되었습니다 (INACTIVE). 다시 시작하려면 [bold yellow]Ctrl+T[/] 또는 ⚡ Toggle을 누르십시오.\n")
         self._last_guard_active = is_guard_active
-
-        status_box = self.query_one("#status-box", Static)
-        if locks:
-            tgt, lpath, pid = locks[0]
-            status_text = f"[green]● ACTIVE[/]  [dim]PID {pid}[/]\n[dim]{tgt}[/]"
-        else:
-            status_text = "[dim]○ Inactive[/]\n[dim]Toggle / Ctrl+T to start[/]"
-        _update_static_if_changed(status_box, status_text)
 
         # 2. Update Token Meter (muted: data in white, labels in dim)
         stats = self.agent.get_token_usage_stats()
@@ -2141,6 +2379,12 @@ class SchengenTUIApp(App):
             if new_msg:
                 # Dispatch the new message immediately after abort
                 self.process_user_chat(new_msg)
+            return
+
+        # 2b. Settings modal entry (works even while an investigation is in-flight)
+        if trimmed in ("/config", "/settings"):
+            self._write("[dim]⚙ Opening settings… (ESC/q closes · changes apply immediately)[/]")
+            self.action_open_settings()
             return
 
         if self._processing_chat:
