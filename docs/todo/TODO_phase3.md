@@ -16,8 +16,8 @@
 
 2. 🎨 **[Sprint 2 — 관측성 & 인터랙션 극대화]** Action Required 3단 패널 + Queue Taxonomy + Universal Deep-Link
    - Top Banner(붉은 점멸) + Radar 상태 카드 + 채팅창 결재 카드 + 큐 4단계 배지 + `[#ID]` 원클릭 Audit 점프.
-3. 🧹 **[Sprint 3 — 코드베이스 위생 & 테스트 수렴]** 피어리뷰 후속 일괄 수렴
-   - #137 회귀 / #17 / #52 / #45 / #33 / M6 / M7 / #2555 / #7207 / #146 등 종합 정리.
+3. 🎉 **[Sprint 3 — 코드베이스 위생 & 테스트 수렴]** 피어리뷰 후속 일괄 수렴 (PR #171 완료 — 606 pass, 3 skipped)
+   - #139 Complexity / #2555 TestRunner / M6 CloudJudge / #33 Eviction / #45 SAST / #146 Adapter / M7 AntiFatigue / #7207 WorkspacePolicy 전면 완료.
 4. ⚙️ **[Sprint 4 — 대형 동시성 엔진]** [EPIC] Parallel Silent Inspection & Single-Slot Deferred UI
    - M1(WAL/Lock) ➔ M2(ThreadPool 10) ➔ M3(DeferredHumanQueue) ➔ M4(Pre-Display Purge).
 
@@ -122,12 +122,11 @@
     3) [자동 소멸 생명주기]:
        - 사용자가 해당 Pane에서 답변을 제출하면 `dialog_is_live == False` 감지와 함께 사이드바 힌트 배지가 무음 소멸.
 
-[] [Refactor/Adapters] Codex 및 AGY 다이얼로그 앵커 liveness 한정 주석 명시 2종 (#146 피어리뷰 후속):
+[x] [Refactor/Adapters] Codex 및 AGY 다이얼로그 앵커 liveness 한정 주석 명시 2종 (#146 피어리뷰 후속, PR #171 완료):
   1) Codex 앵커(digit) 확대는 liveness-only 전용: 향후 옵션 번호 -> 승인/거절 매핑 시 '1=Yes' 가정 금지 주의.
   2) AGY 앵커(digit) liveness-only 주석 명시: liveness 검사 외 다른 용도로의 전용 방지.
 
-[] [Refactor/Eviction] Stale Escalation Eviction 로직 정밀화 3종 (#33 피어리뷰 후속):
-
+[x] [Refactor/Eviction] Stale Escalation Eviction 로직 정밀화 3종 (#33 피어리뷰 후속, PR #171 완료):
   1) 에이전트 상태 문자열 대소문자 무시: `_should_evict_stale_escalation`의 `blocked` vs `working/idle/done` 매칭에 `.lower()` 또는 공용 상태 상수 적용 (Herdr 상태 케이싱 차이로 인한 eviction 누락 방지).
   2) 해소 상태값 표준화 및 검증: `resolve_escalation`의 `RESOLVED` vs `CANCELLED` 처리 경로 일관성 점검 및 `approver="pane-direct"` 다운스트림 정상 연동 확인.
   3) 명령 일치성(Command-Match) 검사 추가: `pane_id` 단독 키 매칭 외에 `raw_command` 동일성 확인을 추가하여, 다이얼로그 내용이 다른 미승인 명령으로 교체된 경우의 오퇴출 방지.
@@ -144,43 +143,48 @@
     3) [CI / Forgejo Runner 및 Dotfiles 연동]:
        - `.forgejo/workflows/` CI 테스트 환경 및 배포 스크립트에 semgrep 설치 스텝 공식화.
 
-[] [Refactor/SAST] `_inject_runtime_path()` 및 Host Runtime Gate 안정화 4종 (#45 피어리뷰 후속):
+[x] [Refactor/SAST] `_inject_runtime_path()` 및 Host Runtime Gate 안정화 4종 (#45 피어리뷰 후속, PR #171 완료):
   1) `_inject_runtime_path()` 선행순서 버그 수정: `parts.insert(0, d)` 반복으로 `~/.local/bin`이 최우선순위가 되어 Homebrew 바이너리를 섀도잉(shadow)할 위험 해소 (reverse iteration 또는 시스템/Homebrew 우선순위 보존).
   2) 빈 PATH 항목(`.`) 처리: `os.environ["PATH"].split(":")` 필터 시 빈 항목 drop 동작 정리 및 명시적 문서화.
   3) 플랫폼 가드: `_RUNTIME_BIN_DIRS`에 macOS 전용(`/opt/homebrew`, `/usr/local`) 외 `sys.platform` 분기 및 Linux 경로 지원.
   4) 실행 순서 최적화: `SAST telemetry print`가 host-runtime gate 검증 완료 후 출력되도록 순서 조정.
 
-[] [Refactor/Complexity] Complexity Tax 정밀화 및 DB 쿼리 최적화 5종 (#139 피어리뷰 후속):
+[x] [Refactor/Complexity] Complexity Tax 정밀화 및 DB 쿼리 최적화 5종 (#139 피어리뷰 후속, PR #171 완료):
   1) `2>&1` over-count 보정: `&`가 분리자로 취급되어 `ls 2>&1`이 3점으로 과계산되는 엣지케이스(`n>&m` 리다이렉션 특수처리) 보정.
   2) Herestring(`<<<`) under-count 보강: `_COMPLEXITY_REDIR_RE`에 `<<<` 리다이렉션 패턴 추가.
   3) 산술확장(`$((...))`) vs 커맨드 치환(`$(...)`): 산술확장이 커맨드 치환으로 오인식되어 과계산되는 갭 정밀화 (fail-closed 무해).
   4) `get_complexity_tax_config()` in-memory 캐싱: 비-allowlist 명령마다 SQLite `init_db` 및 `SELECT` 2회 반복 조회를 1회 캐시/read-once로 최적화.
   5) `complexity_mode='judge'` 모드 M6 Cloud Judge 라우팅 연계 완료.
 
-[] [Refactor/CloudJudge] Cloud Judge Confidence & Complexity Mode 안정화 4종 (M6 피어리뷰 후속):
+[x] [Refactor/CloudJudge] Cloud Judge Confidence & Complexity Mode 안정화 4종 (M6 피어리뷰 후속, PR #171 완료):
   1) Judge 모드 gray-zone guidance(`format_decision_guidance`) 유실 방지: judge-mode context 병합 검토.
   2) Cloud-Judge 캐시 키에 `confidence_threshold` 포함: 런타임 threshold 변경 시 TTL 만료 전까지 스테일되는 현상 방지.
   3) `set_cloud_judge_config` clamp 하한선 상향: 0.5 하한이 약하므로 0.7 상향 검토.
   4) LLM Inspector(`audit_dynamic_substitution_with_llm`)의 의도적 confidence 무-게이트 범위 명문화.
 
-[] [Refactor/TestRunner] Test Runner 및 읽기/진단용 체인 명령 파이프라인 정밀화 (사례: #3670, #2555 피어리뷰 후속):
+[x] [Refactor/TestRunner] Test Runner 및 읽기/진단용 체인 명령 파이프라인 정밀화 (사례: #3670, #2555 피어리뷰 후속, PR #171 완료):
   1) fd-redirect 스트립 대칭화: `2>&1` 외 `1>&2`, `&>` 미커버 갭 해소.
   2) 공백 포함 엣지케이스: `2 >&1` 등 스페이스 포함 시 미스트립(over-block) 방어.
-  3) **[Fast-Track/TestRunner 연쇄 진단 명령 확장 (사례 #3670)]**:
+  3) **[보안 갭 폐쇄 (INV-5/6)]**: Test Runner 체인 정규식 대칭화 과정에서 `pytest 2>&1 && rm -rf /`와 같은 메타문자 체인이 fast-track으로 빠져나가던 기존 보안 갭을 완전 차단.
+  4) **[Fast-Track/TestRunner 연쇄 진단 명령 확장 (사례 #3670 후속 백로그)]**:
      - 에이전트들의 일상적인 검증/진단용 안전 체인 명령(`cd <worktree> && python3 -m unittest discover -s tests 2>&1 | tail -30`, `git status --short && echo "..." && git diff --stat`)이 `NOT_ALLOWLISTED`로 인간 승인을 매번 요구하는 피로도 해소.
      - `cd <safe_dir> && <safe_runner>` 결합 체인 및 `| tail -N` / `| head -N` 안전 파이프라인의 AST Fast-Track / Test-Runner 인정 규칙 정밀화.
 
-
-[] [Refactor/AntiFatigue] Anti-Fatigue 배치 집계 및 동의 품질 개선 4종 (M7 피어리뷰 후속):
+[x] [Refactor/AntiFatigue] Anti-Fatigue 배치 집계 및 동의 품질 개선 4종 (M7 피어리뷰 후속, PR #171 완료):
   1) 배치 배너 raw 명령 목록 표시: quoted string/path 축약 패턴 대신 실제 raw 명령 목록을 표시하여 사용자 동의 품질 개선.
   2) 실패-inject 경로 회귀 테스트 추가: 키 주입 실패 시의 롤백 및 에러 핸들링 단위테스트 작성.
   3) Novelty `cwd` 차원 제거 트레이드오프 문서화: 스코프가 pane-only로 확장됨에 따른 영향 정리.
   4) `reject_batch` OpenCode 거절 플로우 연계: bare escape 대신 에이전트별 reject 프로토콜 연동.
 
-[] [Refactor/WorkspacePolicy] Workspace `.schengen/` 정책 신뢰스토어 검증 3종 (#7207 피어리뷰 후속):
+[x] [Refactor/WorkspacePolicy] Workspace `.schengen/` 정책 신뢰스토어 검증 3종 (#7207 피어리뷰 후속, PR #171 완료):
   1) INV-WS-3 Origin 게이트 연동: watcher의 INJECTED/EMERGENT origin 생산 연동.
   2) 신뢰 스토어 agent-writable 방어: read-time 위치 파생 `workspace_root` 검증으로 에이전트의 임의 룰 변조 차단.
   3) 경로 포함 exec 프로모션 차단 명문화: 절대경로 거부 동작 문서화.
+
+[] [Deferred/ConfigCache] `get_complexity_tax_config()` 프로세스-로컬 캐시 무효화 및 런타임 동기화 (#171 후속 피어리뷰 제안):
+  - Context: PR #171에서 적용된 read-once 메모리 캐시는 프로세스 단위로 동작하여, TUI에서 임계치(Threshold)를 변경하더라도 Watcher 데몬 프로세스가 SIGHUP 리로드 전까지 변경사항을 즉시 인지하지 못함.
+  - Solution: 짧은 TTL (예: 5~10s) 도입, SIGHUP/인메모리 invalidate 연동 또는 동기화 문서화. (Non-blocking Deferred)
+
 
 [] codex 지원 잔여: network/edit 등 템플릿 live 검증, reject 경로, Ctrl+A fullscreen long-command 경로.
 
