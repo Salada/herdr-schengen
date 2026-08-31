@@ -94,6 +94,7 @@
       3) **Instruction Delivery 정책 기본값**: `send_approve_instruction` 기본값이 `False`(Reject-only)로 설정되어 있어 승인 시에는 메시지가 전송되지 않는 기본 설정 영향.
   - 해결 방안:
     1) **[최우선] 실시간 다이얼로그 재동기화 및 연속 다이얼로그 연쇄 승인(Auto-Advance)**: `INJECT_SKIP_CHANGED` 발생 시 단순히 실패로 끝내지 않고, live pane 모달을 즉시 재파싱하여 변경된 다이얼로그가 안전한 경우 즉시 승인 키(`Enter`)를 주입하도록 승인 루프 연속성 보장.
+       - *(구현 시점 불변식 주석 / Non-blocking Caveat)*: Auto-Advance는 **prior-approval 상속 금지**. `INJECT_SKIP_CHANGED`로 변경된 다이얼로그는 직전 승인을 상속하지 않고, 반드시 동일 evaluator(AST/denylist/gray-zone/SAST)를 **전체 재통과**해야만 Enter를 주입한다. "직전 다이얼로그가 승인됐으니 다음 것도 자동 승인"은 다른 명령을 오승인하는 fail-open이며, INV-PD/INV-EX가 방어하는 것과 동일한 fail-open 클래스다.
     2) 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
     3) OpenCode 플러그인 레벨에서의 지침 전달 채널 확장 (`opencode_permissions` IPC 연계).
     4) 연쇄 명령 다이얼로그 연속 발생 시 디바운스 및 실시간 뷰포트 재동기화 강화.
