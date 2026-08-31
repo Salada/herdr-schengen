@@ -1,6 +1,6 @@
 # ADR-001: Runtime & Architecture Selection (Python vs. Compiled Go Binary)
 
-- **Status**: Accepted
+- **Status**: Active
 - **Date**: 2026-08-18
 - **Context**: Herdr Schengen (`smartgate` / `trusted-clearance`) Security Gatekeeper Runtime Choice
 - **Deciders**: Human Architect & Antigravity (AGY) Coding Agent

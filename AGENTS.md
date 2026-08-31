@@ -10,7 +10,7 @@
 ## 🧭 1. Core Operating Principles (Self-Contained Rules)
 
 1. **Autonomous Repository Autonomy**:
-   - `herdr-schengen` is a 100% self-contained codebase. All architectural specifications, evaluation matrices, and multi-agent protocols are fully defined within this repository's `docs/adr-*.md` series.
+   - `herdr-schengen` is a 100% self-contained codebase. All architectural specifications, evaluation matrices, and multi-agent protocols are fully defined within this repository's `docs/adr/adr-*.md` series.
    - Do not create external documentation dependencies or hard-link assumptions to other repositories.
 
 2. **Dual-Sync Contract with Runtime Skills**:
@@ -52,6 +52,14 @@
     - ❌ **Never** auto-approve, auto-reject, or adjudicate a question. The gatekeeper LLM, if invoked to surface/interpret a question, MUST run in **read-only interpretation mode** (`allow_adjudication=False` — `approve_escalation` / `reject_escalation` tools are removed for that turn).
     - ✅ The question MAY be surfaced via the gatekeeper LLM for visibility (interpretation/suggestion), but with **no adjudication capability**.
     - ✅ **Always** leave it **pending until the user answers directly in the agent pane**; the escalation auto-resolves solely when the dialog clears.
+
+11. **Single-Writer Invariant**:
+    - Only **one** process owns each stateful resource: the TUI owns the daemon lifecycle and the FIFO escalation queue; the watcher is the single writer of audit/queue records; companion CLIs (`schengen_history.py`, `schengen_feature.py`, `schengen_mcp.py`) are read-only or operate on their own storage.
+    - ❌ **Never** spawn, kill, or reload the daemon outside the TUI (`Ctrl+T`) — non-TUI daemon lifecycle is deprecated (ADR-008/009, Issue #114).
+
+12. **Fail-Closed Bias**:
+    - When an analyzer errors, a cache misses, or the LLM is unreachable, ambiguous commands MUST be deferred to the human operator — never auto-approved.
+    - Fail-open is permitted **only** for provably side-effect-free, in-workspace local reads (`ls`, `cat src/`, `git status`), with a visible `[GATE DEGRADED]` banner (ADR-006).
 ---
 
 ## 🗺️ 2. Architecture & Decision Records (ADR SSOT)
@@ -60,22 +68,22 @@ This repository serves as the single source of truth (SSOT) for the Schengen Sec
 
 | ADR File | Title & Core Scope |
 | :--- | :--- |
-| **[ADR-001](./docs/adr-001-runtime-architecture-python-vs-go.md)** | Runtime & Architecture Selection (Python In-Process AST vs Go Binary) |
-| **[ADR-002](./docs/adr-002-dynamic-substitution-tool-calling-inspector.md)** | Dynamic Tool-Calling Semantic Inspector for Subshell Substitutions |
-| **[ADR-003](./docs/adr-003-agy-native-task-integration-and-singleton-governance.md)** | AGY Native Streaming Task Integration & Proactive Watcher Recovery |
-| **[ADR-004](./docs/adr-004-non-vcs-irreversible-mutation-governance.md)** | Non-VCS Irreversible Mutation Governance & Filesystem Gray-Zone Evaluation |
-| **[ADR-005](./docs/adr-005-autonomous-orchestration-and-deadlock-defense.md)** | Autonomous Multi-Agent Orchestration & Deadlock Defense Protocol |
-| **[ADR-006](./docs/adr-006-destructive-intent-taxonomy-and-sast-pre-execution-gate.md)** | Destructive Intent Taxonomy & Hybrid SAST Pre-Execution Security Gate |
-| **[ADR-007](./docs/adr-007-graceful-dynamic-reload-and-target-scoped-lockfiles.md)** | Graceful Dynamic Reload (SIGHUP) & Target-Scoped Lockfile Architecture |
-| **[ADR-008](./docs/adr-008-opencode-alternative-host-runtime.md)** | OpenCode as Alternative Host Runtime (Agent-Agnostic Session-Bound Governance) |
-| **[ADR-009](./docs/adr-009-smartgate-tui-dual-model-and-fifo-governance.md)** | SmartGate TUI, Dual-Model Phase Routing, and Strict Sequential FIFO Escalation Governance |
-| **[ADR-010](./docs/adr-010-modular-architecture-core-tools-cmd-adapters.md)** | Modular Architecture: Core, Tools, Cmd, and Adapters Separation |
+| **[ADR-001](./docs/adr/adr-001-runtime-architecture-python-vs-go.md)** | Runtime & Architecture Selection (Python In-Process AST vs Go Binary) |
+| **[ADR-002](./docs/adr/adr-002-dynamic-substitution-tool-calling-inspector.md)** | Dynamic Tool-Calling Semantic Inspector for Subshell Substitutions |
+| **[ADR-003](./docs/adr/adr-003-agy-native-task-integration-and-singleton-governance.md)** | AGY Native Streaming Task Integration & Proactive Watcher Recovery |
+| **[ADR-004](./docs/adr/adr-004-non-vcs-irreversible-mutation-governance.md)** | Non-VCS Irreversible Mutation Governance & Filesystem Gray-Zone Evaluation |
+| **[ADR-005](./docs/adr/adr-005-autonomous-orchestration-and-deadlock-defense.md)** | Autonomous Multi-Agent Orchestration & Deadlock Defense Protocol |
+| **[ADR-006](./docs/adr/adr-006-destructive-intent-taxonomy-and-sast-pre-execution-gate.md)** | Destructive Intent Taxonomy & Hybrid SAST Pre-Execution Security Gate |
+| **[ADR-007](./docs/adr/adr-007-graceful-dynamic-reload-and-target-scoped-lockfiles.md)** | Graceful Dynamic Reload (SIGHUP) & Target-Scoped Lockfile Architecture |
+| **[ADR-008](./docs/adr/adr-008-opencode-alternative-host-runtime.md)** | OpenCode as Alternative Host Runtime (Agent-Agnostic Session-Bound Governance) |
+| **[ADR-009](./docs/adr/adr-009-smartgate-tui-dual-model-and-fifo-governance.md)** | SmartGate TUI, Dual-Model Phase Routing, and Strict Sequential FIFO Escalation Governance |
+| **[ADR-010](./docs/adr/adr-010-modular-architecture-core-tools-cmd-adapters.md)** | Modular Architecture: Core, Tools, Cmd, and Adapters Separation |
 
 ---
 
 ## 📦 3. Setup, Dependencies & OpenCode Integration
 
-For full setup, installation, and environment variable configuration, refer to **[docs/setup.md](./docs/setup.md)**:
+For full setup, installation, and environment variable configuration, refer to **[docs/guides/setup.md](./docs/guides/setup.md)** and **[docs/guides/configuration.md](./docs/guides/configuration.md)**:
 
 - **Dedicated Virtualenv**: `~/.local/share/herdr-schengen-tui-venv`
 - **Core TUI Dependencies**: `textual`, `rich`, `httpx`
@@ -105,7 +113,7 @@ python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --reload
 
 ### SOP-03: Documenting New Architectural Decisions
 ```bash
-# 1. Create docs/adr-00X-<title>.md
+# 1. Create docs/adr/adr-00X-<title>.md
 # 2. Link only to internal ADRs using relative paths (./adr-00X-*.md)
 # 3. Sync to skill docs
 cp -r ~/code/herdr-schengen/docs/ ~/.agents/skills/herdr-schengen/docs/

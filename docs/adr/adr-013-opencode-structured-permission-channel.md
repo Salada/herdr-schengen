@@ -1,7 +1,7 @@
 # ADR-013: OpenCode Structured Permission Channel & Programmatic Approval
 
 ## Status
-**Accepted**
+**Active**
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-005: Autonomous Multi-Agent Orchestration & Deadlock Defense Protocol
 
-- **Status**: Accepted
+- **Status**: Evolved (extended by ADR-009 strict-sequential FIFO escalation governance)
 - **Date**: 2026-08-19
 - **Deciders**: SaladaQoo (Human Lead), Antigravity (AGY Commander), Hermes (Governance Reviewer)
 - **Consulted**: `ciso-reviewer`, `devops-reviewer`, `english-reviewer`

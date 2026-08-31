@@ -1,6 +1,6 @@
 # ADR-006: Destructive Intent Taxonomy & Hybrid SAST Pre-Execution Security Gate Architecture
 
-- **Status**: Accepted
+- **Status**: Evolved (2D taxonomy retained; tiered manifest gate reorganized into the 9-layer DecisionLayer model)
 - **Date**: 2026-08-21
 - **Deciders**: SaladaQoo (Human Lead), Antigravity (AGY Orchestrator), Hermes DevOps Lead (`devops-hermes`), Hermes CISO (`ciso-hermes`)
 - **Consulted**: `ciso-reviewer`, `devops-reviewer`, `english-reviewer`

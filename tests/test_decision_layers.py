@@ -1064,8 +1064,8 @@ class TestStandaloneReadOnlySed(unittest.TestCase):
     def test_readonly_sed_n_fast_tracks(self):
         safe_cmds = (
             "sed -n '1,260p' /Users/kyjbusan/code/herdr-schengen/scripts/core/security_evaluator.py",
-            "sed -n '1,10p' docs/setup.md",
-            "sed -n '10p' docs/setup.md",
+            "sed -n '1,10p' docs/guides/setup.md",
+            "sed -n '10p' docs/guides/setup.md",
             "sed -n '1,10!p' file.txt",
         )
         for cmd in safe_cmds:

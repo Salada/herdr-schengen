@@ -9,30 +9,16 @@
 
 ---
 
-## 📌 Project Maintenance & Long-Term Support Commitment
+## 🏛️ Core Purpose
 
-> **Notice to Developers, AI Agents & Contributors**:  
-> This repository (`InhouseOriented/herdr-schengen`) is an **actively maintained, tier-1 core developer asset**. It is **NOT** a one-off experimental script.
->
-> 1. **Continuous Rule & Heuristic Refinement**: Security patterns, AST evaluators, and denylist boundaries are continually updated to adapt to evolving multi-agent behaviors and shell patterns.
-> 2. **Automated Weekly Quality Assurance**: Weekly scheduled CI runs ([`.forgejo/workflows/llm_security_eval.yml`](.forgejo/workflows/llm_security_eval.yml)) execute full unit and live integration tests against the OpenAI-compatible cloud judge to prevent regression.
-> 3. **Active Issue-First Governance**: Bug reports, edge-case vulnerability disclosures, and feature proposals are actively triaged via the [Forgejo Issue Tracker](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/issues).
-> 4. **Long-Term Dotfiles Integration**: This repository serves as the definitive upstream source for all agent skill syncs (`npx skills`, Chezmoi dotfiles). It will remain maintained and backward-compatible.
+**Herdr Schengen (SmartGate)** is a pre-execution security gatekeeper for coding agents
+running inside the [Herdr](https://github.com/michaellperry/herdr) terminal multiplexer.
+Every agent command is intercepted at the PTY boundary and routed through **9 deterministic
+Decision Layers** (AST/SAST + LLM inspector) that auto-approve provably-safe operations and
+delegate ambiguous or destructive ones to a human operator — replacing both per-command
+interactive prompts and blanket `--dangerously-skip-permissions`.
 
----
-
-## 🧭 The Motivation & Design Philosophy
-
-### The Context: High-Velocity, Zero-Marginal-Cost AI Automation
-As an active user of **Google Antigravity (AGY)** authenticated via **Google OAuth (Google One)**, our engineering environment leverages subscription-backed model access to achieve near-unlimited agent capabilities without incurring heavy per-token API bills from commercial pay-as-you-go providers (such as Anthropic Claude or OpenAI Codex).
-
-### The Trade-Off: Autonomous Velocity vs. YOLO Disasters
-When orchestrating multi-agent workflows across terminal multiplexers like [Herdr](https://github.com/michaellperry/herdr):
-1. **The Friction Dilemma**: Standard interactive permission prompts require human intervention dozens of times per session, destroying autonomous agent velocity and cognitive flow.
-2. **The "YOLO" Hazard**: Blindly granting unconditional auto-approval (`--dangerously-skip-permissions`) is a disaster waiting to happen. Autonomous coding agents can inadvertently run destructive commands (`rm -rf`, `git reset --hard`, `git push --force`), leak sensitive credentials (`.env`, `~/.ssh/id_rsa`, `.aws/credentials`), or mutate isolated sandboxes.
-
-### The Solution: Herdr Schengen (SmartGate)
-**Herdr Schengen** acts as an automated immigration border control for coding agents:
+Design background and history: [`docs/archive/motivation.md`](docs/archive/motivation.md).
 
 ## 🏛️ 9 Decision Layers Architecture
 
@@ -94,8 +80,7 @@ flowchart TD
 4. **Self-Exclusion & Agent Isolation**:
    - The caller pane running the watcher is automatically excluded (`HERDR_PANE_ID`) to prevent self-recursive auto-approval.
    - Auto-targets all registered coding agents (`agy` and `opencode`) while ignoring non-target agents (Hermes, bare shells).
-5. **Auditing & History CLI (`schengen_history.py`)**:
-   - Every approval and manual delegation is permanently logged to SQLite with timestamps, safety rationales, and exact decision layer attribution.
+5. **Fail-Closed Bias**: Ambiguous commands or analyzer errors are deferred to the human operator, never auto-approved.
 
 ---
 
@@ -107,26 +92,34 @@ flowchart TD
 npx skills add ssh://git@salada-git:2222/InhouseOriented/herdr-schengen.git -g -y
 ```
 
-### Quick Commands & History CLI
+### Launching the Gatekeeper
+
+> The **TUI is the single owner of the daemon lifecycle** — start, stop, and reload the
+> daemon only through it (`Ctrl+T` / `/toggle`).
+
 ```bash
-# 1. Launch the interactive Gatekeeper (the TUI is the single daemon lifecycle owner)
-~/.local/share/herdr-schengen-tui-venv/bin/python3 scripts/cmd/schengen_tui.py
+# Any checkout: plain python3 with deps installed (textual, rich, httpx)
+python3 scripts/cmd/schengen_tui.py
 
-# 2. Check live status (read-only diagnostics)
+# Or with the dedicated portable virtualenv (see docs/guides/setup-from-scratch.md):
+"$SCHENGEN_HOME/.venv/bin/python3" scripts/cmd/schengen_tui.py
+
+# Check live daemon status (read-only diagnostics)
 python3 scripts/cmd/schengen_watcher.py --status
-
-# 3. View recent audit history with layer attribution
-python3 scripts/cmd/schengen_history.py --recent 10
-
-# 4. Search audit logs across commands and layers
-python3 scripts/cmd/schengen_history.py --search "git push"
-
-# 5. Discover decision layers and decision types
-python3 scripts/cmd/schengen_history.py --list-layers
-python3 scripts/cmd/schengen_history.py --list-decisions
-
-# Start, stop, and reload the daemon only through the TUI (Ctrl+T / /toggle).
 ```
+
+---
+
+## 🧰 Companion Tools
+
+Standalone CLI utilities that ship with the repo (independent of the daemon lifecycle):
+
+| Tool | Purpose |
+| :--- | :--- |
+| `scripts/cmd/schengen_history.py` | Audit history & diagnostics: `--recent 10`, `--search "git push"`, `--list-layers`, `--list-decisions`, `--pending` |
+| `scripts/cmd/schengen_feature.py` | Feature-request / self-improvement backlog queue (`--add`, `--list`, ...) |
+| `scripts/cmd/schengen_mcp.py` | Lightweight stdio MCP server bound to the live guard daemon |
+| `scripts/cmd/smartgate.py`, `trusted_clearance.py`, `guard_watcher.py` | Backward-compatible aliases of `schengen_watcher.py` |
 
 ---
 
@@ -152,17 +145,26 @@ python3 -m unittest tests/test_llm_evaluator_integration.py
 
 ---
 
-## 🤝 Contributing & Extensibility
+## 📄 License & Development Model
 
-Herdr Schengen is designed to be open-source ready and modular:
-- **New AST Rules**: Extend [`scripts/core/security_evaluator.py`](scripts/core/security_evaluator.py) to add language-specific parsers.
-- **Custom LLM Providers**: Compatible with any OpenAI-compliant endpoint (vLLM, Ollama, DeepSeek, LocalAI).
-- **Architecture Decision Records**: Consult [`docs/adr-001`](docs/adr-001-runtime-architecture-python-vs-go.md) and [`docs/adr-002`](docs/adr-002-dynamic-substitution-tool-calling-inspector.md) for technical trade-off details.
+- **License**: MIT — free to use, fork, and modify ([LICENSE](LICENSE)).
+- **Development**: happens **only** on the private Forgejo instance
+  ([InhouseOriented/herdr-schengen](http://192.168.10.102:3000/InhouseOriented/herdr-schengen)),
+  with issue-first governance and weekly CI on Forgejo Actions.
+- **GitHub**: [`README.github.md`](README.github.md) is a **one-way distribution mirror** —
+  a synchronized snapshot; it does not accept issues, PRs, or support requests.
+- **Contributions**: external contributions are **not** accepted. Fork the repository and
+  maintain your own copy under the MIT License instead.
 
-Pull requests, issues, and security rule proposals are warmly welcomed!
-## Watcher configuration
+---
 
-`config/schengen_watcher.json` is the default home for watcher tunables. It is
-read at startup; absent or invalid values safely fall back to built-in defaults.
-Command-line flags override file defaults. Add future watcher-wide tunables to
-this file and `WATCHER_DEFAULTS` in `scripts/cmd/schengen_watcher.py`.
+## 📚 Documentation
+
+| Doc | Purpose |
+| :--- | :--- |
+| **[`docs/index.md`](docs/index.md)** | Master index: all ADRs, guides, TODOs, issues & archive with source-code mapping |
+| **[`AGENTS.md`](AGENTS.md)** | Autonomous-engineering invariants (single-writer, fail-closed bias, mandatory tests, worktree isolation) |
+| **[`docs/guides/setup.md`](docs/guides/setup.md)** | Full setup, dependencies & OpenCode integration |
+| **[`docs/guides/configuration.md`](docs/guides/configuration.md)** | Environment variables, `config/schengen_watcher.json`, and runtime state layout |
+| **[`docs/guides/setup-from-scratch.md`](docs/guides/setup-from-scratch.md)** | Clean-machine bootstrap (portable `$SCHENGEN_HOME/.venv`) |
+| **[`docs/adr/`](docs/adr/)** | 13 Architecture Decision Records, each with `Status: Active` / `Evolved` |

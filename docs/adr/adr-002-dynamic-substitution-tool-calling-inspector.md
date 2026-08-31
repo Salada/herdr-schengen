@@ -1,6 +1,6 @@
 # ADR-002: Dynamic Substitution & Gray-Zone Escalation via AGY Session Stream & Antigravity Native Subagents
 
-- **Status**: Accepted (Updated)
+- **Status**: Evolved (extended by ADR-009 dual-model phase routing; core inspector retained as Layer 6)
 - **Date**: 2026-08-18 (Updated 2026-08-19)
 - **Context**: Herdr SmartGate / Schengen Security Architecture
 - **Authors**: `bot-agy-macmini <bot-agy-macmini@noreply.localhost>`
