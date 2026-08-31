@@ -11,9 +11,9 @@
 ### 🎯 확정된 4-Sprint 진행 로드맵
 
 1. 🚨 **[Sprint 1 — P0 긴급 버그 일괄]** Liveness/Auto-Eviction 정밀화 & OpenCode 다이얼로그 주입 회복 (보안 회귀 #7771/#7938 + 블로커 #2800, #3689/#3615/#3623)
-   - 1a) `#7771` (AGY) & `#7938` (Codex ppt space) (보안 회귀 최우선): 어댑터별 `dialog_is_live()` 앵커/가변 윈도우 보강 + TUI pre-render 즉시 승인 방지(Debounce/프로세스 상태전이 가드) ➔ 가짜 `pane-direct` 승인 박멸 (`INV-PD-4`).
-   - 1b) `#2800` (블로킹 해소): TUI pre-render `is_question` 예외 제거 + Watcher QUESTION 소멸 시 auto-evict (`resolution="ANSWERED"`).
-   - 1c) `#3689, #3615, #3623, #3636~#3638` (OpenCode 블로커): Gatekeeper/TUI `APPROVE` 판정에도 실제 모달에 키 입력 유실되는 Dialog Trampoline / TOCTOU 불일치 및 연쇄 실행 멈춤 결함 전면 해소.
+   - [x] 1a) `#7771` (AGY) & `#7938` (Codex ppt space) (보안 회귀 최우선, 완료): 어댑터별 `dialog_is_live()` 앵커/가변 윈도우 보강 + TUI pre-render 즉시 승인 방지(Debounce/프로세스 상태전이 가드) ➔ 가짜 `pane-direct` 승인 박멸 (`INV-PD-4/5`, 단위테스트 검증 완료).
+   - [x] 1b) `#2800` (블로킹 해소, 완료): TUI pre-render `is_question` 예외 제거 + Watcher QUESTION 소멸 시 auto-evict (`resolution="ANSWERED"`, `sweep_answered_questions` / `test_question_eviction` 10종 검증 완료).
+   - 1c) `#3689, #3615, #3623, #3636~#3638` (OpenCode 블로커 — **다음 최우선 작업**): Gatekeeper/TUI `APPROVE` 판정에도 실제 모달에 키 입력 유실되는 Dialog Trampoline / TOCTOU 불일치 및 연쇄 실행 멈춤 결함 전면 해소.
 
 2. 🎨 **[Sprint 2 — 관측성 & 인터랙션 극대화]** Action Required 3단 패널 + Queue Taxonomy + Universal Deep-Link
 
@@ -56,7 +56,7 @@
 
 
 
-[] [Bug/Question] Pane 질문(decision_layer='QUESTION') 답변 완료 후에도 TUI 상단 배너 및 Pending 큐에 영구 잔류하는 현상 수정 (사례: #2800):
+[x] [Bug/Question] Pane 질문(decision_layer='QUESTION') 답변 완료 후에도 TUI 상단 배너 및 Pending 큐에 영구 잔류하는 현상 수정 (사례: #2800, PR #146 등 구현·테스트 완료):
 
   - 대원칙: **Question에는 명령과 같은 '승인/거절(resolve)' 상태가 없음** (단순히 인간이 Pane에서 직접 타이핑/엔터하여 다이얼로그가 사라지면 큐에서 자동 제거/소멸되어야 하는 대상).
   - 현상 및 원인 (사례: Escalation #2800 Codex 질문 등):
@@ -65,11 +65,12 @@
       1) `schengen_tui.py`: `pre-render slot validation`에서 `if not is_question`으로 `QUESTION` 레이어를 의도적으로 제외하여, TUI 렌더링 시 다이얼로그 소멸 검사 및 Auto-Eviction이 전혀 발동하지 않음.
       2) `schengen_watcher.py`: `pane_direct_maybe_evict`가 `not is_safe`인 UNSAFE 에스컬레이션만 검사(`is_safe=True`인 QUESTION은 제외)하여 데몬 루프에서도 소멸 감지 누락.
       3) Cross-Workspace/Idle 감시 갭: 감시 대상이 아닌 워크스페이스/Pane이거나 답변 후 에이전트가 즉시 다음 작업/idle로 전이될 때 `not req_cmd` 트리거가 유실됨.
-  - 임시 Workaround 조치 (2026-08-31 완료):
-    • 블로킹 긴급 해소를 위해 Escalation #2800 레코드를 SQLite에서 `status='RESOLVED', resolution='ANSWERED', approver='human-pane'`로 수동 업데이트하여 TUI 배너 클리어 완료. (코드 수준 근본 해결 필요)
+  - 조치 및 검증 상태:
+    • `sweep_answered_questions`, `resolve_cleared_dialog`, 어댑터별 `question_is_live` 구현 및 `tests/test_question_eviction.py` (INV-Q-1..5) 10종 단위테스트 검증 완료.
   - 해결 방향 (최저 난이도 / 최소 변경):
       1) `schengen_watcher.py`: `decision_layer == "QUESTION"` 에스컬레이션에 대해 어댑터의 질문 다이얼로그(header/footer)가 소멸되었거나 에이전트가 `blocked`를 벗어난 경우 즉시 큐에서 해소/제거(`resolve_escalation` 또는 `status=RESOLVED, approver="pane-direct"` / `resolution="ANSWERED"`).
       2) `schengen_tui.py`: `pre-render slot validation`에서 `is_question` 예외를 제거하고, `adapter.dialog_is_live(pane_text) == False`일 때 즉시 큐에서 자동 퇴출(Silent Eviction)하여 상단 배너 고착 해소.
+
 
 
 [] [Bug/OpenCode] OpenCode 승인 시 `_norm_req_cmd` 불일치(뷰포트 절단 및 access_directory 경로 차이)로 인한 키 주입 실패 & DB 상태 불일치 (사례: #3143, #3219):
