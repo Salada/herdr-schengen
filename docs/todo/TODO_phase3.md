@@ -10,10 +10,10 @@
 
 ### 🎯 확정된 4-Sprint 진행 로드맵
 
-1. 🚨 **[Sprint 1 — P0 긴급 버그 일괄]** Liveness/Auto-Eviction 정밀화 & OpenCode 다이얼로그 주입 회복 (보안 회귀 #7771/#7938 + 블로커 #2800, #3689/#3615/#3623)
+1. 🎉 **[Sprint 1 — P0 긴급 버그 일괄]** Liveness/Auto-Eviction 정밀화 & OpenCode 다이얼로그 주입 회복 (PR #172 완료 — 628 tests OK / 3 skipped)
    - [x] 1a) `#7771` (AGY) & `#7938` (Codex ppt space) (보안 회귀 최우선, 완료): 어댑터별 `dialog_is_live()` 앵커/가변 윈도우 보강 + TUI pre-render 즉시 승인 방지(Debounce/프로세스 상태전이 가드) ➔ 가짜 `pane-direct` 승인 박멸 (`INV-PD-4/5`, 단위테스트 검증 완료).
    - [x] 1b) `#2800` (블로킹 해소, 완료): TUI pre-render `is_question` 예외 제거 + Watcher QUESTION 소멸 시 auto-evict (`resolution="ANSWERED"`, `sweep_answered_questions` / `test_question_eviction` 10종 검증 완료).
-   - 1c) `#3689, #3615, #3623, #3636~#3638` (OpenCode 블로커 — **다음 최우선 작업**): Gatekeeper/TUI `APPROVE` 판정에도 실제 모달에 키 입력 유실되는 Dialog Trampoline / TOCTOU 불일치 및 연쇄 실행 멈춤 결함 전면 해소.
+   - [x] 1c) `#3689, #3615, #3623, #3636~#3638` (OpenCode 블로커, PR #172 완료): Dialog Trampoline / TOCTOU 불일치 해소를 위한 Auto-Advance 엔진(`scripts/adapters/auto_advance.py`, `INV-AA-1..9`) 구현 완료 (비동기 지침 큐/디바운스/배치 디퍼 안내 등 보조 UX는 Deferred 백로그로 분리).
 
 2. 🎨 **[Sprint 2 — 관측성 & 인터랙션 극대화]** Action Required 3단 패널 + Queue Taxonomy + Universal Deep-Link
 
@@ -73,7 +73,7 @@
 
 
 
-[] [Bug/OpenCode] OpenCode 승인 시 `_norm_req_cmd` 불일치(뷰포트 절단 및 access_directory 경로 차이)로 인한 키 주입 실패 & DB 상태 불일치 (사례: #3143, #3219):
+[] [Bug/OpenCode] OpenCode 승인 시 `_norm_req_cmd` 불일치(뷰포트 절단 및 access_directory 경로 차이)로 인한 키 주입 실패 & DB 상태 불일치 (사례: #3143, #3219 — OPEN 유지):
   - 현상 및 원인 (사례: Escalation #3143 Git 커밋 & Escalation #3219 `access_directory`):
     • Gatekeeper LLM이 승인(`APPROVE`)하여 DB 상에는 `status='RESOLVED', resolution='APPROVED', approver='gatekeeper'`로 기록되었으나, 실제 OpenCode 터미널은 `Permission required` 모달 상태로 계속 멈춰 있어 승인이 해소되지 않는 현상 반복 발생.
     • 근본 원인 (2가지 불일치 유형):
@@ -84,24 +84,19 @@
     1) Prefix 및 상위/하위 경로 포괄 매칭: `live_req`가 `req_cmd`의 Prefix이거나, `access_directory`의 경우 파일 경로의 상위 디렉터리와 매칭 시 동일 요청으로 인정.
     2) `ctrl+f` 풀스크린 전개 연동 (PR #152 `expand_dialog` 활용): 절단 의심 시 `ctrl+f`로 전개 후 재비교.
 
-[] [P0 Blocker/OpenCode] OpenCode 승인 지침(Instruction Delivery) 전달 유실 및 연쇄 명령 다이얼로그 전이 불일치 (사례: #3615, #3623, #3636~#3638, #3689):
-  - 현상 및 원인 (사례: #3615 `herdr agent read` 연쇄 실행, #3623 `access_directory` vs `ls -d` 경합, #3636~#3638 `access_directory` 연속 호출 후 3639 전환, #3689 `herdr agent read` 후속 `herdr pane list` 모달 전환):
-    • Gatekeeper/TUI에서 승인 판정(`APPROVE`)을 내렸음에도 OpenCode 터미널 화면에는 키 입력이 전달되지 않거나 모달에 계속 멈춰 있어 에이전트 오케스트레이션 루프(Prompt → Wait → Read Result)가 중단되는 현상 반복 발생.
-    • 사례 #3689: `herdr agent read ... | tail` 명령에 대해 Gatekeeper가 `APPROVE` 판정을 내렸으나, OpenCode 화면이 즉시 다음 후속 명령(`herdr pane list ...; git log`) 모달로 전이되면서 키 주입이 유실/불일치되어 에이전트가 멈춤.
-    • 사용자가 `/approve-batch`를 수행할 때 화면과 일치하는 최신 다이얼로그(#3639)만 즉시 resolved되고, 이미 화면을 지나친 이전 다이얼로그(#3636~#3638)는 `deferred`로 반환되나 사용자 안내 문구가 없어 승인 실패/미해소로 오인되는 혼선 발생 (이후 백그라운드 `pane-direct`로 지연 해소됨).
-    • 근본 원인 (3가지 요인):
-      1) **Bubble Tea 모달 상태에서 `send-text` 무효화**: `herdr pane send-text`로 주입되는 지침 메시지는 쉘 프롬프트/채팅 입력창이 열려 있을 때만 유효하며, OpenCode의 `Permission required` 모달 뷰포트가 활성화된 상태에서는 키 입력이 포커스를 받지 못하고 유실됨.
-      2) **연쇄 명령 실행 시 Dialog Trampoline/TOCTOU 불일치 (사례 #3623, #3636~#3638, #3689)**: 에이전트가 파일 읽기(`Read AGENTS.md` -> `access_directory`)와 쉘 명령(`ls -d ...`), 서브에이전트 점검(`herdr agent read` -> `herdr pane list`)을 연속 트리거할 때, Watcher가 큐잉한 명령과 실시간 터미널 화면의 모달이 서로 어긋나 `INJECT_SKIP_CHANGED`가 발동되어 승인 키 및 지침이 누락됨.
-      3) **Instruction Delivery 정책 기본값**: `send_approve_instruction` 기본값이 `False`(Reject-only)로 설정되어 있어 승인 시에는 메시지가 전송되지 않는 기본 설정 영향.
-  - 해결 방안:
-    1) **[최우선] 실시간 다이얼로그 재동기화 및 연속 다이얼로그 연쇄 승인(Auto-Advance)**: `INJECT_SKIP_CHANGED` 발생 시 단순히 실패로 끝내지 않고, live pane 모달을 즉시 재파싱하여 변경된 다이얼로그가 안전한 경우 즉시 승인 키(`Enter`)를 주입하도록 승인 루프 연속성 보장.
-       - *(구현 시점 불변식 주석 / Non-blocking Caveat)*: Auto-Advance는 **prior-approval 상속 금지**. `INJECT_SKIP_CHANGED`로 변경된 다이얼로그는 직전 승인을 상속하지 않고, 반드시 동일 evaluator(AST/denylist/gray-zone/SAST)를 **전체 재통과**해야만 Enter를 주입한다. "직전 다이얼로그가 승인됐으니 다음 것도 자동 승인"은 다른 명령을 오승인하는 fail-open이며, INV-PD/INV-EX가 방어하는 것과 동일한 fail-open 클래스다.
-    2) 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
-    3) OpenCode 플러그인 레벨에서의 지침 전달 채널 확장 (`opencode_permissions` IPC 연계).
-    4) 연쇄 명령 다이얼로그 연속 발생 시 디바운스 및 실시간 뷰포트 재동기화 강화.
-    5) **[UX/TUI Feedback 개선] Batch Approval Defer 가이드 및 Sweeper 전이 로그 보강**:
-       - `/approve-batch` 실행 시 화면 전이로 인해 `deferred`된 ID가 있을 경우 단순 JSON 반환을 넘어 `"[dim]ℹ️ #ID deferred: dialog already transitioned on screen. Use /approve <id> to force or verify target pane.[/]"` 친절 가이드 출력.
-       - 백그라운드 Sweeper(`pane-direct`)에 의해 다이얼로그 부재로 자동 해소 시 Radar/Audit에 명확한 전이 상태 기록.
+[x] [P0 Blocker/OpenCode] OpenCode 연쇄 명령 다이얼로그 전이(Dialog Trampoline) 및 Auto-Advance 회복 (사례: #3615, #3623, #3636~#3638, #3689, PR #172 완료):
+  - 현상 및 원인 (사례: #3615, #3623, #3636~#3638, #3689):
+    • Gatekeeper/TUI에서 승인 판정(`APPROVE`)을 내렸음에도 OpenCode 터미널 화면이 후속 명령 다이얼로그로 즉시 전이되면서 키 입력이 유실/불일치(`INJECT_SKIP_CHANGED`)되어 에이전트 오케스트레이션 루프가 멈추는 현상 발생.
+  - 해결 및 검증 (PR #172):
+    • `scripts/adapters/auto_advance.py` 신규 모듈 및 `INV-AA-1..9` 불변식 체계 구축 완료.
+    • 전체 evaluator(AST/denylist/gray-zone/SAST) 재평가, prior-approval 상속 금지, max hop/deadline 바운드, provenance=`machine/auto-advance`, watcher 감사트루스(`INV-AA-8`: verified inject 후에만 `AUTO_APPROVED`, deferral은 `AUTO_DEFERRED`). (628 tests OK / 3 skipped)
+
+[] [Deferred/OpenCode] OpenCode 보조 지침 전달 큐, 다이얼로그 디바운스 및 배치 Defer UX 개선 (#3615/#3623/#3636 후속):
+  - 1) **지침 전달 큐 (Instruction Queue)**: Bubble Tea 모달 상태에서 `send-text` 무효화 대응을 위해 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
+  - 2) **플러그인 IPC 확장**: OpenCode 플러그인 레벨에서의 지침 전달 채널 확장 (`opencode_permissions` IPC 연계).
+  - 3) **다이얼로그 디바운스**: 연쇄 명령 다이얼로그 연속 발생 시 뷰포트 안정화 디바운스.
+  - 4) **Batch Approval Defer 가이드 & Sweeper 로그**: `/approve-batch` 실행 시 화면 전이로 인해 `deferred`된 ID에 대한 친절 안내 문구 및 백그라운드 Sweeper(`pane-direct`) 전이 로그 가시화.
+
 
 
 
