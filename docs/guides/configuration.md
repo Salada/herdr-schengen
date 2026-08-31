@@ -13,7 +13,7 @@ the documented defaults.
 | `SCHENGEN_HOME` | repo root | Portable repo-root convention used by the bootstrap and companion CLIs (venv, history CLI paths). See `docs/guides/setup-from-scratch.md`. |
 | `SCHENGEN_HISTORY_PATH` | `~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py` | Path to the history CLI used by the opencode plugin (`schengen_pending`). |
 | `SCHENGEN_LOG_DIR` | `/var/log/herdr-schengen` | Log directory honored by the persistence layer (falls back gracefully). |
-| `SCHENGEN_DEBUG` | unset | Documented debug toggle (verbose diagnostics). Mouse-specific tracing uses `SCHENGEN_MOUSE_DEBUG`, which is read by the TUI. |
+| `SCHENGEN_DEBUG` | unset | Reserved debug toggle. **Note**: no code reads this variable today — mouse tracing uses `SCHENGEN_MOUSE_DEBUG` (read by the TUI). |
 | `SCHENGEN_MOUSE_DEBUG` | unset | TUI mouse-event debug output. |
 | `SCHENGEN_SHADOW_MODE` | unset | Kill-switch: run the gate in shadow mode (log-only, no interception). |
 | `SCHENGEN_STRICT_PARENT` | unset | `1` = die-with-parent daemon lifecycle (set by the TUI when spawning; ADR-003/008). |
