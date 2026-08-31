@@ -1276,11 +1276,17 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
         esc = _fake_escalation()
         app = SchengenTUIApp()
         app.is_controller = True
+        # Patch the judge invocation BEFORE run_test: on_mount's first radar
+        # tick runs the first-sight block, which would otherwise schedule the
+        # REAL @work process_user_chat — its judge worker calls the LLM (fails
+        # fast with no key) and its finally clears _judging_escalation_id
+        # before the first assertion. Mocking pre-mount keeps the two-phase
+        # transition deterministic regardless of whether an LLM key is present.
+        app.process_user_chat = MagicMock()
         with ExitStack() as stack:
             for p in self._mount_patches(esc, [esc]):
                 stack.enter_context(p)
             async with app.run_test(size=(120, 40)) as pilot:
-                app.process_user_chat = MagicMock()
                 await pilot.pause(0.7)
                 banner = app.query_one("#active-target-banner", Static)
                 # judge in flight -> checking state, never the red card
@@ -1981,6 +1987,41 @@ class TestTUIPhase2JudgeGatingAsync(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("ACTION REQUIRED", banner.content)
                 chat_plain = "\n".join(app._chat_plain)
                 self.assertIn("Human Authorization Required", chat_plain)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_8_judge_worker_guard_return_clears_flag(self):
+        # Fix 2: a judge worker that hits the _processing_chat guard (early
+        # return BEFORE the LLM try/finally) must still clear
+        # _judging_escalation_id — otherwise the escalation stays stuck in
+        # "Gatekeeper Checking" with the red card suppressed forever. The
+        # wrapper finally must NOT clobber the OTHER chat's in-flight flag.
+        from cmd.schengen_tui import SchengenTUIApp
+        from contextlib import ExitStack
+        from unittest.mock import AsyncMock
+
+        app = SchengenTUIApp()
+        app.is_controller = True
+        app.agent.send_message = AsyncMock(return_value="ok")
+        with ExitStack() as stack:
+            for p in self._patches(None, []):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                # simulate the sub-tick race: another chat owns _processing_chat
+                # when the inspector's judge worker starts
+                app._processing_chat = True
+                app._judging_escalation_id = 7494
+                w = app.process_user_chat(
+                    "New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.",
+                    author="inspector",
+                )
+                await w.wait()
+                await pilot.pause()
+                # guard returned early, but the wrapper finally cleared the flag
+                self.assertIsNone(app._judging_escalation_id)
+                # _processing_chat belongs to the other in-flight chat — untouched
+                self.assertTrue(app._processing_chat)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
 

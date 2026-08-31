@@ -1664,7 +1664,9 @@ class SchengenTUIApp(App):
         # finished AND the escalation is still PENDING).
         self._judging_escalation_id: Optional[int] = None
         # Escalation ids that already rendered the Phase-2b decision card
-        # (written exactly once, when judging completes).
+        # (written exactly once, when judging completes). Grows unboundedly —
+        # sqlite ids never recycle, so this is harmless (a few entries per
+        # FIFO head over the TUI's lifetime).
         self._decision_card_written: Set[int] = set()
         # Pane-direct pre-render eviction (INV-PD-4/5): escalation_id ->
         # CONSECUTIVE not-live renders. Eviction requires confirm_polls
@@ -2490,6 +2492,21 @@ class SchengenTUIApp(App):
 
     @work(exclusive=False)
     async def process_user_chat(self, user_msg: str, author: str = "user") -> None:
+        # INV-HR-1 exit guarantee: the judge round-trip (author="inspector")
+        # MUST clear _judging_escalation_id on EVERY exit path — including the
+        # early returns inside _process_user_chat_impl (feature-request,
+        # /interrupt, /config, the _processing_chat guard, the observer guard).
+        # In a sub-tick race a judge worker can hit the _processing_chat guard
+        # and return before the LLM try/finally; without this unconditional
+        # clear the escalation would stay stuck in "Gatekeeper Checking" with
+        # the red card suppressed forever.
+        try:
+            await self._process_user_chat_impl(user_msg, author)
+        finally:
+            if author == "inspector":
+                self._judging_escalation_id = None
+
+    async def _process_user_chat_impl(self, user_msg: str, author: str) -> None:
         trimmed = user_msg.strip()
         # INV-HR-3: label the message author — real user input renders
         # "👤 You:", while the inspector's judge invocation renders a system
