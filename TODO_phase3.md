@@ -47,7 +47,9 @@
        - 핵심 환경변수(`HERDR_ENV`, `HERDR_PANE_ID`, `SCHENGEN_HOME`, `SCHENGEN_HISTORY_PATH`), LLM 설정(`OPENAI_API_KEY`, `GUARD_LLM_MODEL`), 어댑터 튜닝 변수, `config/schengen_watcher.json` 기본값 및 SQLite 런타임 상태 디렉터리(`~/.local/state/herdr-schengen/`) 구조 명확화.
     4) ADR 전수조사: 13개 ADR 상단에 상태 메타데이터(`Active` vs `Superseded / Evolved`: ADR-006, ADR-011) 명시 및 상대 경로 일괄 보정.
     5) `docs/index.md` 마스터 색인 작성: 4대 카테고리 매트릭스, 1줄 핵심 요약, 관련 소스코드 경로 색인으로 LLM 탐색 토큰 소모 최소화.
-    6) 테스트: `HERDR_ENV=1 python3 -m unittest discover -s tests` 통과 확인 후 PR 발행.
+    6) 테스트 및 Forgejo PR 발행: `HERDR_ENV=1 python3 -m unittest discover -s tests` 통과 확인 후 `feat/166-docs-index-and-restructure` PR 발행.
+    7) 🌟 [최종 완료 단계] GitHub Mirror 동기화 푸시: Forgejo `main` 머지 후 `https://github.com/Salada/herdr-schengen`으로 최종 미러 푸시 수행.
+
 
 
 
