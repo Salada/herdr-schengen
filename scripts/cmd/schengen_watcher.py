@@ -46,8 +46,11 @@ import core.guard_db as guard_db
 import core.security_evaluator as security_evaluator
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
 from core.cloud_judge import DEFAULT_REASONING_EFFORT
+from core.redaction import redact_for_cloud
 from core.guard_db import (
     DB_DIR,
+    IN_FLIGHT_STATE_PATH,
+    IN_FLIGHT_TTL,
     LOG_DIR,
     check_persisted_allowlist,
     enqueue_pending_escalation,
@@ -139,14 +142,21 @@ class InspectorCoordinator:
         if pane_id in self.owned:  # INV-CONC-1: ownership survives completion
             return False
         self.owned[pane_id] = (request, "in_flight")
-        self.in_flight[pane_id] = (request, self.executor.submit(self._evaluate, evaluate))
+        # Phase-1 IPC (INV-PH1-6): phase_box starts at "inspector"; the worker
+        # thread's phase hook flips it to "gatekeeper" only around LLM calls.
+        phase_box = {"phase": "inspector", "ts": time.time()}
+        self.in_flight[pane_id] = (request, phase_box, self.executor.submit(self._evaluate, evaluate, phase_box))
         return True
 
-    def _evaluate(self, evaluate):
-        return evaluate()
+    def _evaluate(self, evaluate, phase_box):
+        security_evaluator.set_phase_hook(lambda p: phase_box.update(phase=p))
+        try:
+            return evaluate()
+        finally:
+            security_evaluator.set_phase_hook(None)
 
     def completed(self):
-        for pane_id, (request, future) in list(self.in_flight.items()):
+        for pane_id, (request, _phase_box, future) in list(self.in_flight.items()):
             if not future.done():
                 continue
             del self.in_flight[pane_id]
@@ -183,6 +193,49 @@ class InspectorCoordinator:
 
     def close(self):
         self.executor.shutdown(wait=False, cancel_futures=True)
+
+
+def sync_in_flight_state(inspector) -> None:
+    """Publish the inspector's in-flight state to the shared JSON IPC file.
+
+    Single-writer (the watcher), atomic tmp+os.replace (INV-PH1-3/5). Each
+    entry carries the pane, agent kind, a short command fingerprint + preview,
+    the started_at timestamp, and the live phase ("inspector" | "gatekeeper").
+    Entries older than IN_FLIGHT_TTL are dropped so a stale snapshot can never
+    pin a perpetual "Checking" banner (INV-PH1-2). Called AT MOST once per poll
+    cycle — never per command.
+    """
+    now = time.time()
+    entries = []
+    for pane_id, (request, phase_box, _future) in list(inspector.in_flight.items()):
+        try:
+            command = request[0] if isinstance(request, (tuple, list)) and request else None
+            if not isinstance(command, str) or not command.strip():
+                continue  # skip entries whose command can't be derived safely
+            pane_info = request[3] if len(request) >= 4 and isinstance(request[3], dict) else {}
+            started_at = float(phase_box.get("ts", now))
+        except Exception:
+            continue  # skip entries that cannot be derived safely
+        if now - started_at > IN_FLIGHT_TTL:
+            continue
+        entries.append({
+            "pane_id": str(pane_id),
+            "agent_kind": str(pane_info.get("agent", "unknown")),
+            "command_fp": hashlib.sha256(command.encode("utf-8")).hexdigest()[:12],
+            "command_preview": redact_for_cloud(command[:80]),
+            "started_at": started_at,
+            "phase": phase_box.get("phase", "inspector"),
+        })
+    try:
+        IN_FLIGHT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = IN_FLIGHT_STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"ts": now, "entries": entries}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, IN_FLIGHT_STATE_PATH)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def cancel_stale_human_escalation(pane_id, command):
@@ -1448,9 +1501,22 @@ def main():
                 inspector.submit(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), evaluate)
                 continue
 
+            # Phase-1 IPC (INV-PH1-3): publish the in-flight snapshot once per
+            # poll cycle, AFTER the pane loop + any submits, BEFORE the sleep.
+            sync_in_flight_state(inspector)
+
             time.sleep(args.interval)
     finally:
         inspector.close()
+        try:
+            # Dead-watcher cleanup (INV-PH1-2/5): leave NO stale "Checking" —
+            # publish an empty snapshot so the TUI reader clears immediately.
+            IN_FLIGHT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            IN_FLIGHT_STATE_PATH.write_text(
+                json.dumps({"ts": time.time(), "entries": []}, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             lock_fd.close()

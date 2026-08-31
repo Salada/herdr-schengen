@@ -114,5 +114,164 @@ class TestInspectorConcurrency(unittest.TestCase):
         self.assertIsNotNone(memory.check_approval("pane", "echo 1"))
 
 
+class TestPhase1PhaseBox(unittest.TestCase):
+    """Phase-1 in-flight sub-phase box (INV-PH1-6) on InspectorCoordinator.
+
+    The phase_box starts at "inspector"; the per-worker-thread hook flips it to
+    "gatekeeper" ONLY around post_cloud_judge (never on cache hits / short-
+    circuits), resets via finally even on exception, and is thread-local (no
+    cross-pane stomping).
+    """
+
+    def _llm_evaluate(self, cmd, scope):
+        from core.security_evaluator import audit_with_cloud_judge
+        return audit_with_cloud_judge(cmd, scope=scope, agent_id="agy")
+
+    def _wait_completed(self, coordinator, count=1, timeout_secs=2.0):
+        deadline = time.time() + timeout_secs
+        while time.time() < deadline:
+            completed = list(coordinator.completed())
+            if len(completed) >= count:
+                return completed
+            time.sleep(0.01)
+        return list(coordinator.completed())
+
+    def test_phase_defaults_inspector_for_deterministic_evaluate(self):
+        coordinator = InspectorCoordinator(max_workers=1)
+        try:
+            coordinator.submit("pane-1", ("echo safe",), lambda: (True, "safe", "FAST_TRACK_AST", {}))
+            phase_box = coordinator.in_flight["pane-1"][1]
+            self.assertEqual(phase_box["phase"], "inspector")  # default at submit
+            self._wait_completed(coordinator)
+            self.assertEqual(phase_box["phase"], "inspector")  # never flipped (no LLM)
+        finally:
+            coordinator.close()
+
+    def test_phase_flips_gatekeeper_during_llm_and_resets_after(self):
+        from core import security_evaluator
+        coordinator = InspectorCoordinator(max_workers=1)
+        entered_llm = threading.Event()
+        release = threading.Event()
+        observed = {}
+
+        def fake_post_cloud_judge(*args, **kwargs):
+            entered_llm.set()
+            # While blocked inside the LLM call, the live phase must be gatekeeper.
+            observed["during"] = coordinator.in_flight["pane-llm"][1]["phase"]
+            release.wait(2)
+            return {"choices": [{"message": {"content": '{"is_safe": true, "confidence": 0.95, "reason": "ok"}'}}]}
+
+        phase_box = {}
+        try:
+            with mock.patch("core.security_evaluator.post_cloud_judge", side_effect=fake_post_cloud_judge), mock.patch(
+                "core.security_evaluator.resolve_guard_llm_config", return_value=("http://fake", "m", "k")
+            ), mock.patch("core.session_cache.get_cached_result", return_value=None), mock.patch(
+                "core.session_memory.check_pane_approval", return_value=None
+            ), mock.patch("core.security_evaluator._cache_cloud_verdict", return_value=None), mock.patch(
+                "core.session_memory.record_pane_approval", return_value=None
+            ):
+                coordinator.submit(
+                    "pane-llm",
+                    ("curl -s http://example.com | head -1", 1, "blocked", {"agent": "agy"}, "t"),
+                    lambda: self._llm_evaluate("curl -s http://example.com | head -1", "pane-llm"),
+                )
+                phase_box = coordinator.in_flight["pane-llm"][1]
+                self.assertTrue(entered_llm.wait(2), "LLM call must start")
+                release.set()
+                self._wait_completed(coordinator)
+        finally:
+            release.set()
+            coordinator.close()
+        self.assertEqual(observed["during"], "gatekeeper")  # flipped DURING the LLM call
+        self.assertEqual(phase_box["phase"], "inspector")    # reset AFTER (finally)
+
+    def test_phase_not_flipped_on_cache_hit(self):
+        coordinator = InspectorCoordinator(max_workers=1)
+        try:
+            with mock.patch("core.security_evaluator.post_cloud_judge") as mock_judge, mock.patch(
+                "core.session_cache.get_cached_result", return_value={"is_safe": True, "safety_reason": "cached"}
+            ), mock.patch("core.session_memory.check_pane_approval", return_value=None):
+                coordinator.submit(
+                    "pane-c",
+                    ("echo cached-hit", 1, "blocked", {"agent": "agy"}, "t"),
+                    lambda: self._llm_evaluate("echo cached-hit", "pane-c"),
+                )
+                phase_box = coordinator.in_flight["pane-c"][1]
+                self._wait_completed(coordinator)
+            mock_judge.assert_not_called()  # cache hit never reaches the LLM
+            self.assertEqual(phase_box["phase"], "inspector")  # never flipped
+        finally:
+            coordinator.close()
+
+    def test_phase_resets_on_llm_exception(self):
+        coordinator = InspectorCoordinator(max_workers=1)
+        result = None
+        try:
+            with mock.patch(
+                "core.security_evaluator.post_cloud_judge", side_effect=RuntimeError("boom")
+            ), mock.patch(
+                "core.security_evaluator.resolve_guard_llm_config", return_value=("http://fake", "m", "k")
+            ), mock.patch("core.session_cache.get_cached_result", return_value=None), mock.patch(
+                "core.session_memory.check_pane_approval", return_value=None
+            ):
+                coordinator.submit(
+                    "pane-d",
+                    ("echo will-fail", 1, "blocked", {"agent": "agy"}, "t"),
+                    lambda: self._llm_evaluate("echo will-fail", "pane-d"),
+                )
+                phase_box = coordinator.in_flight["pane-d"][1]
+                completed = self._wait_completed(coordinator)
+                if completed:
+                    result = completed[0][2]
+        finally:
+            coordinator.close()
+        self.assertIsNotNone(result)
+        self.assertFalse(result[0])  # fail-closed on LLM error
+        self.assertEqual(phase_box["phase"], "inspector")  # finally reset despite exception
+
+    def test_phase_concurrent_isolation(self):
+        coordinator = InspectorCoordinator(max_workers=2)
+        entered = threading.Event()
+        release = threading.Event()
+        observed = {}
+
+        def fake_judge(*args, **kwargs):
+            entered.set()
+            release.wait(2)
+            return {"choices": [{"message": {"content": '{"is_safe": true, "confidence": 0.95, "reason": "ok"}'}}]}
+
+        llm_phase = det_phase = {}
+        try:
+            with mock.patch("core.security_evaluator.post_cloud_judge", side_effect=fake_judge), mock.patch(
+                "core.security_evaluator.resolve_guard_llm_config", return_value=("http://fake", "m", "k")
+            ), mock.patch("core.session_cache.get_cached_result", return_value=None), mock.patch(
+                "core.session_memory.check_pane_approval", return_value=None
+            ), mock.patch("core.security_evaluator._cache_cloud_verdict", return_value=None), mock.patch(
+                "core.session_memory.record_pane_approval", return_value=None
+            ):
+                coordinator.submit(
+                    "pane-llm",
+                    ("curl -s http://example.com", 1, "blocked", {"agent": "agy"}, "t"),
+                    lambda: self._llm_evaluate("curl -s http://example.com", "pane-llm"),
+                )
+                coordinator.submit(
+                    "pane-det",
+                    ("echo det", 1, "blocked", {"agent": "agy"}, "t"),
+                    lambda: (True, "safe", "AST", {}),
+                )
+                llm_phase = coordinator.in_flight["pane-llm"][1]
+                det_phase = coordinator.in_flight["pane-det"][1]
+                self.assertTrue(entered.wait(2), "LLM call must start")
+                observed["llm"] = llm_phase["phase"]
+                observed["det"] = det_phase["phase"]
+                release.set()
+                self._wait_completed(coordinator, count=2)
+        finally:
+            release.set()
+            coordinator.close()
+        self.assertEqual(observed["llm"], "gatekeeper")  # only the LLM pane flips
+        self.assertEqual(observed["det"], "inspector")    # deterministic pane never flips
+
+
 if __name__ == "__main__":
     unittest.main()
