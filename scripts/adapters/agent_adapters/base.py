@@ -18,6 +18,13 @@ from adapters.herdr_client import get_pane_text
 # escalation that deadlocks the strict FIFO escalation queue.
 INJECT_SKIP_CHANGED = "SKIP_DIALOG_CHANGED"
 
+# Sentinel `reason` returned by the DEFAULT `inject_reject` when an adapter has
+# no agent-kind-specific reject protocol. The caller MUST fall back to the
+# generic bare-escape dismiss (reject_escalation parity) instead of treating
+# the missing implementation as a reject failure (which would defer an
+# otherwise-rejectable escalation).
+INJECT_REJECT_NOT_IMPLEMENTED = "not implemented"
+
 
 def footer_is_live(text: str, marker: str, tail_lines: int = 8) -> bool:
     """True if `marker` appears within the last `tail_lines` lines of `text`.
@@ -101,6 +108,18 @@ class AgentAdapter:
         MUST escalate (MANUAL_DELEGATED) instead of resolving.
         """
         return False, "not implemented"
+
+    def inject_reject(self, pane_id: str, req_cmd: str):
+        """Inject the agent-kind-specific reject protocol (channel/keystroke).
+
+        Returns (rejected: bool, reason: str). rejected=True means the caller
+        may record the CANCELLED resolution + REJECT adjudication. rejected=False
+        with reason == INJECT_REJECT_NOT_IMPLEMENTED tells the caller to fall
+        back to the generic bare-escape dismiss (reject_escalation parity); any
+        OTHER false reason is a real reject failure and the caller must defer
+        (keep PENDING, fail-closed).
+        """
+        return False, INJECT_REJECT_NOT_IMPLEMENTED
 
 
 _REGISTRY = {}

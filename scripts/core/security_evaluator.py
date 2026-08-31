@@ -732,8 +732,16 @@ def audit_with_cloud_judge(
         try:
             from core.session_cache import compute_cache_key, get_cached_result
 
+            # M6: the effective confidence_threshold is part of the verdict
+            # semantics — omitting it would serve a stale cached auto-approve for
+            # the TTL window after a runtime threshold change. Include it so a
+            # threshold change re-audits.
             cache_key = compute_cache_key(
-                f"cj:{cmd_str}||{context}", cwd=cwd, scope=scope, agent_id=agent_id, origin=origin
+                f"cj:{cmd_str}||{context}||conf:{confidence_threshold}",
+                cwd=cwd,
+                scope=scope,
+                agent_id=agent_id,
+                origin=origin,
             )
             cached = get_cached_result(cache_key)
             if cached:
@@ -804,6 +812,16 @@ def audit_dynamic_substitution_with_llm(
     Routes to the configured OpenAI-compatible cloud judge (OpenAI default; DeepSeek
     available via OPENAI_BASE_URL). If no endpoint is configured, or the judge is
     unreachable / uncertain, fails closed to human review.
+
+    M6 (deliberate, comment-only scope): this inspector path applies NO confidence
+    threshold. It is a fail-closed semantic DETECTION gate, not an auto-approve
+    lever — unlike `audit_with_cloud_judge`, a positive verdict here is NOT
+    sufficient for key injection: the caller must still pass a downstream
+    auto-approve gate (e.g. the cloud-judge confidence gate or a session-memory /
+    human approval). An unsafe / uncertain / unreachable verdict always defers to
+    human review. Gating this path by confidence would be redundant with
+    `audit_with_cloud_judge` AND would weaken detection: a low-confidence-but-real
+    substitution must never be silently dropped from the audit trail.
     """
     # 0. Check Pane-scoped Session Memory BEFORE expensive LLM call (ADR-010)
     try:
@@ -1191,7 +1209,12 @@ def _is_readonly_sed(seg: str) -> bool:
 
 # M3 COMPLEXITY_TAX (INV-16): structural complexity metric + deferral helper.
 _COMPLEXITY_CONTROL_RE = re.compile(r"[|&;\n\r]+")
-_COMPLEXITY_REDIR_RE = re.compile(r"(?<![<>])[<>]{1,2}(?![<>])")
+# (#139-2) `<<<` (herestring) is a single redirection: the generic lookaround
+# pattern `(?<![<>])[<>]{1,2}(?![<>])` matches NOTHING on `<<<` (greedy backtrack
+# and lookahead both fail), under-scoring `cat <<< x`. The explicit `<<<`
+# alternative must come FIRST so it is counted once, not as `<<` + `<`. `<<`
+# (heredoc) still counts as one redirection.
+_COMPLEXITY_REDIR_RE = re.compile(r"<<<|(?<![<>])[<>]{1,2}(?![<>])")
 
 
 def compute_complexity(cmd_str: str) -> int:
@@ -1209,7 +1232,11 @@ def compute_complexity(cmd_str: str) -> int:
     # misread as a segment split. The '>' is still counted as a redirection.
     s = re.sub(r">&|&>", ">", s)
     n_segments = len([seg for seg in _COMPLEXITY_CONTROL_RE.split(s) if seg.strip()])
-    n_subst = s.count("$(") + s.count("`")
+    # (#139-3) arithmetic expansion `$((...))` is NOT command substitution —
+    # `$(` inside `$((` must not score a substitution. `count("$(") - count("$((")`
+    # scores only genuine `$(...)` substitutions; a nested `$(( $(cmd) ))` still
+    # counts the inner `$(cmd)` exactly once.
+    n_subst = s.count("$(") - s.count("$((") + s.count("`")
     n_redir = len(_COMPLEXITY_REDIR_RE.findall(s))
     return n_segments + n_subst + n_redir
 
@@ -1284,11 +1311,24 @@ def _is_fast_track_test_runner(cmd_str: str) -> bool:
     if re.search(r"(^|\s)(sudo|su)(\s|$)", cmd_str):
         return False
     rest = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+", "", cmd_str).strip()
-    # (issue #2555) strip a trailing stderr-redirect '2>&1' (fd redirect, no file write)
-    rest = re.sub(r"\s+2>&1\b", " ", rest).strip()
+    # (issue #2555) fd-redirect strip symmetry: pure fd-to-fd redirects never
+    # write a file, so strip '2>&1' / '1>&2' (and the spaced '2 >&1' variant)
+    # before the token/shape checks. '&>' is a combined redirect that ALSO names
+    # a file target: only the side-effect-free '/dev/null' discard is stripped —
+    # any other '&> file' target keeps its '>' and stays fail-closed below.
+    rest = re.sub(r"\s+[12]\s*>&[12]\b", " ", rest).strip()
+    if re.search(r"&>\s*/dev/null\b", rest):
+        rest = re.sub(r"\s*&>\s*/dev/null\b", " ", rest).strip()
     # (round 2) reject any remaining file redirection / heredoc in the FULL
     # command (head AND filter tail) — '> file' / '>> file' / '< file' / '<<'.
     if re.search(r">>?|<<?", rest):
+        return False
+    # (#2555 hardening, INV-5/6): the fd-redirect strip above can leave a
+    # trailing '&&' / '||' / ';' separator visible — a second segment would
+    # execute beyond the narrow test-runner scope. Reject ANY remaining
+    # command separator or embedded newline here (the pipe branch below already
+    # rejects separators inside a filter tail).
+    if re.search(r"\s*(?:&&|\|\||;)\s*|\n|\r", rest):
         return False
     # allow AT MOST ONE pipe whose tail is a single read-only filter
     if "|" in rest:

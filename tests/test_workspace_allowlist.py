@@ -9,6 +9,10 @@ Covers:
 5. Auto-promotion writes the policy file; subsequent check fast-tracks.
 6. INJECTED origin still hard-escalates (INV-WS-3).
 7. Malformed JSON -> treated as absent (fail-closed, INV-WS-4).
+8. Trust-store defense (#7207 item 2): agent-authored workspace_root ("/" or a
+   foreign workspace) is overridden by the read-time path-derived root.
+9. Absolute-path exec denial (#7207 item 3): pathful exec never promotes and
+   never matches at read time (non-sensitive paths included).
 
 Uses a clean temp DB (patch guard_db.DB_PATH) + a temp workspace.
 """
@@ -292,6 +296,75 @@ class TestWorkspaceAllowlist(unittest.TestCase):
             action="APPROVE", feedback="ok", origin="A", approver="human-tui",
         )
         self.assertFalse(self.policy_path.exists(), "INJECTED-origin escalation must not promote")
+
+    def test_declared_root_slash_not_trusted(self):
+        # #7207 item 2 (trust-store defense): a policy file declaring an
+        # agent-authored workspace_root="/" must NOT grant trust for arbitrary
+        # paths — the read-time path-derived root is authoritative.
+        home = os.path.expanduser("~")
+        self.policy_path.write_text(
+            json.dumps({
+                "version": 1,
+                "workspace_root": "/",  # agent-authored over-broad declaration
+                "rules": [_access_rule(home), _access_rule(self.ws_resolved)],
+            }, indent=2)
+        )
+        # load_policy overrides the declared root with the derived root.
+        policy = load_policy(self.policy_path)
+        self.assertEqual(policy.get("workspace_root"), self.ws_resolved)
+        # a rule for a path OUTSIDE the derived root never matches...
+        self.assertFalse(check_rule(policy, "access_directory", home))
+        safe, reason, layer = audit_shell_command(f"access_directory {home}", cwd=str(self.ws))
+        self.assertNotEqual(layer, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
+        # ...while an in-scope target still fast-tracks under the derived root.
+        self.assertTrue(check_rule(policy, "access_directory", self.ws_resolved))
+        safe2, _, layer2 = audit_shell_command(f"access_directory {self.ws}", cwd=str(self.ws))
+        self.assertEqual(layer2, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
+
+    def test_declared_root_other_workspace_not_trusted(self):
+        # #7207 item 2: a policy declaring workspace_root pointing at ANOTHER
+        # workspace must not let its rules grant trust there.
+        other = Path(tempfile.mkdtemp())
+        try:
+            other_policy = other / ".schengen" / "allowlist.json"
+            other_policy.parent.mkdir()
+            other_policy.write_text(
+                json.dumps({
+                    "version": 1,
+                    "workspace_root": str(self.ws.resolve()),  # cross-workspace grab
+                    "rules": [_access_rule(self.ws_resolved)],
+                }, indent=2)
+            )
+            pol = load_policy(other_policy)
+            # the derived root for OTHER's policy is `other`, not self.ws
+            self.assertEqual(pol.get("workspace_root"), str(other.resolve()))
+            self.assertFalse(check_rule(pol, "access_directory", self.ws_resolved))
+            safe, _, layer = audit_shell_command(f"access_directory {self.ws}", cwd=str(other))
+            self.assertNotEqual(layer, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
+        finally:
+            shutil.rmtree(str(other), ignore_errors=True)
+
+    def test_exec_absolute_path_target_denied(self):
+        # #7207 item 3: an exec rule with an absolute-path target is denied —
+        # promotion refuses it AND a hand-written pathful exec rule never
+        # matches at read time (fail-closed for ANY path, not just sensitive).
+        # promote_rule refuses a NON-sensitive absolute-path exec:
+        refused = promote_rule(
+            self.policy_path,
+            {"action_type": "exec", "match_type": "exact",
+             "pattern": "python3 /tmp/build.py", "agent_scope": ["*"]},
+        )
+        self.assertFalse(refused, "pathful exec command must not promote")
+        self.assertFalse(self.policy_path.exists(), "pathful exec must not create a policy")
+        # read-time: a pathful exec rule written straight into the JSON never
+        # matches (absolute-path tokens refused in _denylist_blocks).
+        self.write_policy([
+            {"id": "r1", "action_type": "exec", "match_type": "exact",
+             "pattern": "python3 /tmp/x.py", "agent_scope": ["*"],
+             "created_by": "t", "created_at": "", "reason": "t"},
+        ])
+        safe, reason, layer = audit_shell_command("python3 /tmp/x.py", cwd=str(self.ws))
+        self.assertNotEqual(layer, DecisionLayer.FAST_TRACK_WORKSPACE_ALLOWLIST)
 
     def test_multifile_approve_promotes_one_rule_per_path(self):
         # #7759/INV-EF-4: a multi-file edit_file approval promotes ONE exact

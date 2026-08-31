@@ -1,6 +1,7 @@
 """AGY (Antigravity) adapter — permission prompt parsing and key injection."""
 
 import re
+import subprocess
 from typing import Optional
 
 from adapters.herdr_client import get_pane_text, run_cmd
@@ -60,6 +61,13 @@ class AgyAdapter(AgentAdapter):
         """
         tail = visible_text[-400:]
         tail_block = "\n".join(visible_text.splitlines()[-8:])
+        # ⚠️ LIVENESS-ONLY (#146 peer-review contract): the two digit anchors
+        # below (`>\s*\d+\.` focus marker, `\d+\.\s+Yes` option row) prove a
+        # live dialog exists. They are NEVER an approve/reject option mapping:
+        # AGY selection is marked by the '>' focus glyph (which can rest on any
+        # option, e.g. '> 2. No'), and the presence of a '1. Yes' row does NOT
+        # mean the dialog was approved. Do NOT repurpose these anchors to derive
+        # '1=Yes' approval or to auto-approve/reject (INV-Q-3 / fail-closed).
         return (
             footer_is_live(visible_text, "esc Skip")
             or footer_is_live(visible_text, "Press enter to continue")
@@ -192,3 +200,13 @@ class AgyAdapter(AgentAdapter):
             print(f"🚀 Auto-approving pre-execution script for {pane_id} (sending Enter via SmartGate)...", flush=True)
             run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
         return True, "approved"
+
+    def inject_reject(self, pane_id, req_cmd):
+        """Reject via 'esc' — AGY permission/question dialogs dismiss on escape
+        ('esc Skip' question footer), mirroring the legacy reject_escalation
+        escape-dismiss semantics (M7 item 4). Fire-and-forget subprocess.run
+        (NO check=True): a nonzero herdr CLI exit does not raise and the caller
+        records CANCELLED best-effort; only a raised exception defers."""
+        print(f"🛑 Rejecting agy request for {pane_id} (sending 'escape')...", flush=True)
+        subprocess.run(["herdr", "agent", "send-keys", pane_id, "escape"], capture_output=True, timeout=5.0)
+        return True, "rejected (escape dismiss)"

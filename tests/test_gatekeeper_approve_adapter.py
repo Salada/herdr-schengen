@@ -19,19 +19,25 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import core.guard_db as guard_db
 from core.guard_db import enqueue_pending_escalation
-from tools.schengen_agent_llm import execute_tool_call
+from tools.schengen_agent_llm import execute_tool_call, reject_batch_escalations
+from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
+from adapters.agent_adapters import INJECT_SKIP_CHANGED
 
 
 class _FakeAdapter:
     """Minimal AgentAdapter double with configurable channel/inject outcomes."""
 
-    def __init__(self, ch_ok=False, ch_reason="no channel permission", inj_ok=True, inj_reason="ok"):
+    def __init__(self, ch_ok=False, ch_reason="no channel permission", inj_ok=True, inj_reason="ok",
+                 rej_ok=True, rej_reason="rejected"):
         self.ch_ok = ch_ok
         self.ch_reason = ch_reason
         self.inj_ok = inj_ok
         self.inj_reason = inj_reason
+        self.rej_ok = rej_ok
+        self.rej_reason = rej_reason
         self.channel_calls = []
         self.inject_calls = []
+        self.reject_calls = []
 
     def channel_approve(self, pane_id, req_cmd):
         self.channel_calls.append((pane_id, req_cmd))
@@ -40,6 +46,10 @@ class _FakeAdapter:
     def inject_approval(self, pane_id, req_cmd):
         self.inject_calls.append((pane_id, req_cmd))
         return self.inj_ok, self.inj_reason
+
+    def inject_reject(self, pane_id, req_cmd):
+        self.reject_calls.append((pane_id, req_cmd))
+        return self.rej_ok, self.rej_reason
 
 
 class TestGatekeeperApproveAdapter(unittest.TestCase):
@@ -155,6 +165,77 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
         self.assertEqual(out["status"], "success")
         called = [c.args[0] for c in mock_run.call_args_list]
         self.assertTrue(any("enter" in c for c in called), f"expected legacy bare enter, got {called}")
+
+    def test_reject_batch_delegates_to_adapter_inject_reject(self):
+        """M7 item 4: reject_batch uses the agent-aware adapter inject_reject
+        (opencode permission.reply 'reject' channel / codex esc / agy esc) —
+        NO bare escape keystroke is sent to the pane."""
+        esc_id = self._seed_escalation()
+        fake = _FakeAdapter(rej_ok=True, rej_reason="permission.reply reject decision written")
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=fake), patch(
+            "tools.schengen_agent_llm.resolve_escalation"
+        ) as mock_resolve, patch("tools.schengen_agent_llm.record_adjudication") as mock_rec, patch(
+            "tools.schengen_agent_llm.subprocess.run"
+        ) as mock_run:
+            result = reject_batch_escalations("batch no")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resolved"], [esc_id])
+        self.assertEqual(fake.reject_calls, [("w1D:p1", "curl example.com")])
+        mock_run.assert_not_called()  # adapter handled the reject — no bare escape
+        mock_resolve.assert_called_once()
+        mock_rec.assert_called_once()
+
+    def test_reject_batch_falls_back_to_bare_escape_when_adapter_not_implemented(self):
+        """M7 item 4: an adapter without inject_reject (not-implemented) keeps
+        the legacy bare-escape dismiss — reject_escalation parity."""
+        esc_id = self._seed_escalation()
+        fake = _FakeAdapter(rej_ok=False, rej_reason=INJECT_REJECT_NOT_IMPLEMENTED)
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=fake), patch(
+            "tools.schengen_agent_llm.resolve_escalation"
+        ), patch("tools.schengen_agent_llm.record_adjudication"), patch(
+            "tools.schengen_agent_llm.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = None
+            result = reject_batch_escalations("batch no")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resolved"], [esc_id])
+        called = [c.args[0] for c in mock_run.call_args_list]
+        self.assertTrue(any("escape" in c for c in called), f"expected bare escape, got {called}")
+
+    def test_reject_batch_no_adapter_uses_legacy_bare_escape(self):
+        """M7 item 4: with no registered adapter (adapter is None) reject_batch
+        falls back to the legacy bare-escape dismiss."""
+        esc_id = self._seed_escalation()
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=None), patch(
+            "tools.schengen_agent_llm.resolve_escalation"
+        ), patch("tools.schengen_agent_llm.record_adjudication"), patch(
+            "tools.schengen_agent_llm.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = None
+            result = reject_batch_escalations("batch no")
+        self.assertEqual(result["resolved"], [esc_id])
+        called = [c.args[0] for c in mock_run.call_args_list]
+        self.assertTrue(any("escape" in c for c in called), f"expected bare escape, got {called}")
+
+    def test_reject_batch_real_failure_defers_fail_closed(self):
+        """M7 item 4: a REAL inject_reject failure (dialog changed / CLI error,
+        NOT 'not implemented') defers the item — no bare escape, no CANCELLED,
+        the escalation stays PENDING (fail-closed)."""
+        esc_id = self._seed_escalation()
+        fake = _FakeAdapter(rej_ok=False, rej_reason=INJECT_SKIP_CHANGED)
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=fake), patch(
+            "tools.schengen_agent_llm.resolve_escalation"
+        ) as mock_resolve, patch("tools.schengen_agent_llm.record_adjudication") as mock_rec, patch(
+            "tools.schengen_agent_llm.subprocess.run"
+        ) as mock_run:
+            result = reject_batch_escalations("batch no")
+        self.assertEqual(result["resolved"], [])
+        self.assertEqual(result["deferred"], [esc_id])
+        mock_run.assert_not_called()
+        mock_resolve.assert_not_called()
+        mock_rec.assert_not_called()
+        pending = guard_db.get_pending_escalations(include_delivered=False)
+        self.assertTrue(any(e["id"] == esc_id for e in pending), "escalation must stay PENDING on real reject failure")
 
 
 if __name__ == "__main__":

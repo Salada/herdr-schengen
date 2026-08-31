@@ -832,6 +832,16 @@ def record_human_approval_pattern(canonical_pattern: str, scope: str = "default"
     human_approval_ttl_seconds (default 3600s, clamp [60, 86400]). INV-4 is
     satisfied by construction: the `human_approved:` prefix has no legacy rows,
     so the learned-safe set starts EMPTY.
+
+    M7 item 3 — trust-concession tradeoff of the cwd-dimension removal: scope is
+    now pane-only (herdr pane/session), i.e. the match widens from
+    (pane, cwd, pattern) to (pane, pattern). A pattern a human approved in one
+    working directory is trusted pane-wide, including after an in-pane cwd switch
+    (e.g. a repo checkout swap in the same pane). This is an INTENTIONAL
+    concession: pane identity remains the hard isolation boundary (cross-pane
+    leakage is impossible), and the TTL (default 1h) bounds the blast radius of a
+    stale pane-scoped approval. The cost is that a command approved while cwd=A
+    will also auto-approve while the same pane is at cwd=B within the TTL window.
     """
     init_db()
     norm_scope = str(scope).strip() or "default"
@@ -1046,9 +1056,17 @@ _COMPLEXITY_TAX_DEFAULTS = {
     "complexity_mode": "escalate",  # "escalate" | "judge" (judge reserved for M6)
 }
 
+# (#139-4) read-once validated cache for the complexity-tax knobs, keyed by the
+# active DB path: (db_path, validated_cfg). `get_complexity_tax_config()` runs on
+# EVERY non-allowlist command evaluation (twice per command: gray-zone PROMPT +
+# pre-novelty gate) — a raw init_db() + SELECT per call is wasteful. The DB-path
+# key self-invalidates when DB_PATH changes (tests / runtime state-dir switch),
+# and `set_complexity_tax_config()` (the only write path) clears it explicitly.
+_complexity_tax_config_cache: Optional[tuple[str, dict[str, Any]]] = None
 
-def get_complexity_tax_config() -> dict[str, Any]:
-    """Complexity-tax knobs, backed by guard_config. Missing keys -> defaults.
+
+def _load_complexity_tax_config() -> dict[str, Any]:
+    """Read complexity-tax knobs from guard_config. Missing keys -> defaults.
     threshold stored as string; coerce to int, clamp to [1, 10000]."""
     init_db()
     cfg = dict(_COMPLEXITY_TAX_DEFAULTS)
@@ -1068,9 +1086,29 @@ def get_complexity_tax_config() -> dict[str, Any]:
     return cfg
 
 
+def get_complexity_tax_config() -> dict[str, Any]:
+    """Complexity-tax knobs, backed by guard_config. Missing keys -> defaults.
+    threshold stored as string; coerce to int, clamp to [1, 10000].
+
+    (#139-4) in-memory read-once cache: repeated non-allowlist command evaluation
+    serves the validated copy instead of re-running init_db() + SELECT per call.
+    Return semantics are unchanged — always a fresh dict of the current defaults
+    merged with persisted overrides. Invalidation: set_complexity_tax_config()
+    (write path) clears the cache; the DB-path key also self-invalidates when the
+    active DB_PATH changes."""
+    global _complexity_tax_config_cache
+    db_key = str(DB_PATH)
+    if _complexity_tax_config_cache is not None and _complexity_tax_config_cache[0] == db_key:
+        return dict(_complexity_tax_config_cache[1])
+    cfg = _load_complexity_tax_config()
+    _complexity_tax_config_cache = (db_key, cfg)
+    return dict(cfg)
+
+
 def set_complexity_tax_config(enabled=None, threshold=None, mode=None) -> dict[str, Any]:
     """Human-only write path (TUI settings modal); returns the new config.
     Mirror the set_answer_language / set_channel_approve_config upsert pattern."""
+    global _complexity_tax_config_cache
     init_db()
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_db_connection() as conn:
@@ -1105,6 +1143,7 @@ def set_complexity_tax_config(enabled=None, threshold=None, mode=None) -> dict[s
                     ("complexity_mode", m, now_iso),
                 )
         conn.commit()
+    _complexity_tax_config_cache = None  # (#139-4) invalidate read-once cache
     return get_complexity_tax_config()
 
 
@@ -1144,25 +1183,28 @@ _CLOUD_JUDGE_DEFAULTS = {"cloud_judge_min_confidence": 0.9}
 
 def get_cloud_judge_config() -> dict[str, float]:
     """M6 cloud-judge confidence knob, backed by guard_config. Missing keys ->
-    defaults. Stored as string; coerce to float and clamp to [0.5, 1.0]."""
+    defaults. Stored as string; coerce to float and clamp to [0.7, 1.0]
+    (M6: lower bound raised from 0.5 — a 0.5-0.7 gate was too weak to be a
+    meaningful auto-approve confidence)."""
     init_db()
     cfg = dict(_CLOUD_JUDGE_DEFAULTS)
     with get_db_connection() as conn:
         for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
             if row["key"] == "cloud_judge_min_confidence":
                 try:
-                    cfg["cloud_judge_min_confidence"] = max(0.5, min(1.0, float(row["value"])))
+                    cfg["cloud_judge_min_confidence"] = max(0.7, min(1.0, float(row["value"])))
                 except (TypeError, ValueError):
                     pass
     return cfg
 
 
 def set_cloud_judge_config(min_confidence: Optional[float] = None) -> dict[str, float]:
-    """Human-only write; clamp [0.5, 1.0]; upsert guard_config (mirror set_channel_approve_config)."""
+    """Human-only write; clamp [0.7, 1.0] (M6: lower bound raised from 0.5);
+    upsert guard_config (mirror set_channel_approve_config)."""
     init_db()
     if min_confidence is not None:
         now_iso = datetime.now(timezone.utc).isoformat()
-        clamped = max(0.5, min(1.0, float(min_confidence)))
+        clamped = max(0.7, min(1.0, float(min_confidence)))
         with get_db_connection() as conn:
             conn.execute(
                 "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
@@ -1680,6 +1722,10 @@ def resolve_escalation(
         # adjudication (approver="human-tui") may seed pane session memory — the
         # gatekeeper LLM's approve (approver=None) records the disposition but
         # grants NO fast-path trust.
+        # (M7 item 3) the novelty cwd dimension was removed: session-memory seeds
+        # are pane-scoped WITHOUT a cwd, so a pattern approved here is trusted
+        # across cwd switches within the same pane/session (trust concession),
+        # while remaining hard-isolated from other panes. TTL-bounded (1h default).
         if resolution_status == "RESOLVED" and is_approval and approver == "human-tui":
             # Fetch raw commands to record in pane session memory only on explicit
             # human approval

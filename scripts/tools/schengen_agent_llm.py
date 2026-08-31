@@ -63,6 +63,7 @@ from core.guard_db import (
 )
 from adapters.herdr_client import get_pane_text
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter
+from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
 from core.redaction import redact_for_cloud
 
 # ── Shared fallback config ──────────────────────────────────────────
@@ -411,8 +412,13 @@ def approve_batch_escalations(feedback: str = "Approved in batch via TUI") -> Di
 def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dict[str, Any]:
     """One-key reject (M7): cancel the FIFO head batch deterministically.
 
-    Mirrors reject_escalation per item: fire escape to the pane, resolve the
-    row as CANCELLED, and record a REJECT adjudication — no gatekeeper LLM call.
+    Mirrors reject_escalation per item: fire the agent-kind-specific reject
+    protocol (M7 item 4 — opencode permission.reply 'reject' channel, codex/agy
+    escape dismiss), resolve the row as CANCELLED, and record a REJECT
+    adjudication — no gatekeeper LLM call. When the adapter is missing or has
+    no inject_reject implementation, fall back to the legacy bare-escape
+    dismiss (reject_escalation parity). A real reject failure defers the item
+    (stays PENDING, fail-closed).
     Returns {"status": "empty"|"ok", "resolved": [...], "deferred": [...]}.
     """
     # Question 분리 (INV-QN-1/2/4): the batch head EXCLUDES questions — they are
@@ -430,12 +436,27 @@ def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dic
         esc_id = item["id"]
         pane = item["pane_id"]
         kind = item["agent_kind"]
+        req = item.get("raw_command", "")
         try:
             if pane:
-                subprocess.run(["herdr", "agent", "send-keys", pane, "escape"], capture_output=True, timeout=5.0)
-                if send_instruction and safe_feedback:
-                    subprocess.run(["herdr", "pane", "send-text", pane, f"# [SECURITY GATEKEEPER]: {safe_feedback}"], capture_output=True, timeout=5.0)
-                    subprocess.run(["herdr", "pane", "send-keys", pane, "enter"], capture_output=True, timeout=5.0)
+                # M7 item 4: agent-aware reject protocol instead of a bare
+                # escape. Fall back to the legacy bare-escape dismiss ONLY when
+                # the adapter is missing or reports not-implemented; any other
+                # false return is a real reject failure -> defer (fail-closed).
+                handled = False
+                adapter = get_adapter(kind)
+                if adapter is not None:
+                    rejected, reject_reason = adapter.inject_reject(pane, req)
+                    if rejected:
+                        handled = True
+                    elif reject_reason != INJECT_REJECT_NOT_IMPLEMENTED:
+                        deferred.append(esc_id)
+                        continue
+                if not handled:
+                    subprocess.run(["herdr", "agent", "send-keys", pane, "escape"], capture_output=True, timeout=5.0)
+                    if send_instruction and safe_feedback:
+                        subprocess.run(["herdr", "pane", "send-text", pane, f"# [SECURITY GATEKEEPER]: {safe_feedback}"], capture_output=True, timeout=5.0)
+                        subprocess.run(["herdr", "pane", "send-keys", pane, "enter"], capture_output=True, timeout=5.0)
             resolve_escalation(
                 pane_id=pane, escalation_id=esc_id, resolution_status="CANCELLED", approver="human-tui"
             )

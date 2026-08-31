@@ -103,5 +103,31 @@ class TestPipelineFailClosed(unittest.TestCase):
         self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
 
 
+class TestTestRunnerFdRedirectSymmetry(unittest.TestCase):
+    """#2555: test-runner fast-track fd-redirect regex symmetry."""
+
+    def test_pure_fd_redirects_fast_track(self):
+        # '2>&1' / '1>&2' / spaced '2 >&1' are fd-to-fd redirects (no file write)
+        # and must not over-block the narrow test-runner fast-track.
+        for cmd in (
+            "python3 -m unittest discover -s tests 2>&1",
+            "python3 -m unittest discover -s tests 1>&2",
+            "python3 -m unittest discover -s tests 2 >&1",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, FAST_TRACK)
+
+    def test_redirect_to_file_stays_fail_closed(self):
+        # A combined '&> file' redirect IS a file write — must stay fail-closed
+        # (same as '> file').
+        for cmd in (
+            "python3 -m unittest discover -s tests &> /tmp/out.log",
+            "python3 -m unittest discover -s tests > /tmp/out",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
+
 if __name__ == "__main__":
     unittest.main()

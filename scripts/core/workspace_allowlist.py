@@ -4,11 +4,17 @@ A repo-local `.schengen/allowlist.json` policy file lets a workspace declare
 persistent allowlist rules (dialog target paths or exec commands) that
 fast-track without re-escalation — while:
 
-- INV-WS-1: path rules only apply to targets under the policy's workspace_root.
+- INV-WS-1: path rules only apply to targets under the policy's workspace_root,
+  which is DERIVED at read time from the policy path (`_policy_root`) — never
+  trusted from an agent-authored declaration (trust-store defense, #7207 item 2).
 - INV-WS-2: the global denylist ALWAYS wins (sensitive paths, sandbox, broad
-  wildcards, T4-critical, root '/'), even when a rule lists the target.
+  wildcards, T4-critical, root '/'), even when a rule lists the target. For
+  `exec`, ANY absolute-path token (`/...`, `~/...`) refuses the rule fail-closed
+  (#7207 item 3).
 - INV-WS-3: INJECTED/EMERGENT origins still hard-escalate (enforced by the
-  ORIGIN_GUARD at the top of audit_shell_command, not here).
+  ORIGIN_GUARD at the top of audit_shell_command and by the promotion gate in
+  guard_db._maybe_promote_workspace_rule — not here; promote_rule is an
+  origin-agnostic persistence primitive, see its docstring).
 - INV-WS-4: malformed/oversized policy JSON is treated as absent (fail-closed).
 - INV-WS-5: discovery never looks above the git toplevel (or $HOME) bound.
 
@@ -119,6 +125,18 @@ def load_policy(path) -> Optional[dict]:
             parsed = None
         if not isinstance(parsed, dict):
             parsed = None
+        if isinstance(parsed, dict):
+            # #7207 item 2 (trust-store defense): the read-time path-derived
+            # root is AUTHORITATIVE. The policy file lives inside the workspace
+            # (<ws>/.schengen/allowlist.json), so an agent that can author it
+            # could otherwise declare an arbitrary/over-broad workspace_root
+            # (e.g. "/" or another workspace) and be trusted for it. Override
+            # any declared value with _policy_root() so a policy can only ever
+            # grant trust under its own <ws>/.schengen directory.
+            try:
+                parsed["workspace_root"] = _policy_root(p)
+            except Exception:
+                parsed["workspace_root"] = ""
         _policy_cache[cache_key] = (st.st_mtime, parsed)
         return parsed
     except Exception:
@@ -151,9 +169,11 @@ def _denylist_blocks(action_type: str, canon: str) -> bool:
     if _BROAD_WILDCARD_RE.search(canon):
         return True
     if action_type == "exec":
-        # Fix 1: exec rules must be pathless — any absolute path token is
-        # refused (fail-closed), so a sensitive-path command can never
-        # promote or match.
+        # Fix 1 / #7207 item 3: exec rules must be pathless — ANY absolute-path
+        # token (`/...`, `~/...`) refuses the rule fail-closed, NOT just
+        # sensitive paths. A pathful exec command (e.g. `python3 /tmp/x.py`)
+        # can never promote or match, so an absolute-path exec target cannot
+        # smuggle past the workspace confinement or reach outside <ws>.
         for tok in str(canon).split():
             if tok.startswith("/") or tok.startswith("~/"):
                 return True
@@ -191,11 +211,13 @@ def check_rule(policy, action_type: str, target: str) -> bool:
     INV-WS-2 denylist re-assertion runs FIRST — sensitive paths, broad
     wildcards, T4-critical targets and root '/' always deny, even when a rule
     lists them (for `exec` on the RAW command text, with absolute-path tokens
-    refused). INV-WS-1: the policy must declare a valid, non-overbroad
-    workspace_root and path targets must live under it — applied uniformly to
-    ALL action_types (exec rules are confined by discovery: the policy only
-    surfaces for a cwd inside that workspace). Over-broad patterns (Fix 3)
-    never match at read time.
+    refused). INV-WS-1: the effective workspace_root is the READ-TIME DERIVED
+    root — `load_policy` overrides any declared value with
+    `_policy_root(policy_path)` (trust-store defense, #7207 item 2), so this
+    function must be handed a `load_policy`-sanitized policy dict. Path targets
+    must live under that derived root; exec rules are additionally confined by
+    discovery (the policy only surfaces for a cwd inside that workspace).
+    Over-broad patterns (Fix 3) never match at read time.
     """
     rules = (policy or {}).get("rules") or []
     if not rules:
@@ -214,9 +236,12 @@ def check_rule(policy, action_type: str, target: str) -> bool:
     if _denylist_blocks(action_type, canon):
         return False
 
-    # INV-WS-1 (uniform): the policy must declare a valid, non-overbroad
-    # workspace_root. Path targets must also live under it; exec rules are
-    # confined by discovery (the policy only surfaces for cwd under its root).
+    # INV-WS-1 (uniform): the effective workspace_root is READ-TIME DERIVED —
+    # load_policy overrides any declared value with _policy_root(policy_path),
+    # so an agent-authored declaration (e.g. "/" or another workspace) is never
+    # trusted (trust-store defense, #7207 item 2). Path targets must live under
+    # the derived root; exec rules are additionally confined by discovery (the
+    # policy only surfaces for cwd under its root).
     ws_root = str((policy or {}).get("workspace_root") or "").rstrip("/")
     if not ws_root or _is_overbroad_pattern(ws_root):
         return False
@@ -306,6 +331,13 @@ def promote_rule(policy_path, rule: dict) -> bool:
     Dedupes by (action_type, match_type, pattern, agent_scope); re-asserts the
     INV-WS-2 denylist and rejects over-broad catch-all patterns before writing.
     Returns True on success.
+
+    Origin contract (INV-WS-3): this is an origin-AGNOSTIC persistence
+    primitive and deliberately has NO origin parameter — the INJECTED/EMERGENT
+    never-promote gate lives upstream in
+    guard_db._maybe_promote_workspace_rule, which only invokes this helper for
+    origin in (A, H). Do not duplicate that gate here; callers MUST enforce it
+    before calling this function.
     """
     try:
         policy_path = Path(policy_path)
@@ -339,7 +371,9 @@ def promote_rule(policy_path, rule: dict) -> bool:
         rules.append(new_rule)
         new_policy = {
             "version": 1,
-            "workspace_root": existing.get("workspace_root") or _policy_root(policy_path),
+            # Trust-store defense (#7207 item 2): ALWAYS persist the
+            # path-derived root — never preserve an agent-authored declaration.
+            "workspace_root": _policy_root(policy_path),
             "rules": rules,
         }
         _atomic_write(policy_path, new_policy)
@@ -375,7 +409,9 @@ def revoke_rule(policy_path, rule: dict) -> bool:
             return False  # nothing to revoke
         new_policy = {
             "version": 1,
-            "workspace_root": existing.get("workspace_root") or _policy_root(policy_path),
+            # Trust-store defense (#7207 item 2): always persist the
+            # path-derived root (same rule as promote_rule).
+            "workspace_root": _policy_root(policy_path),
             "rules": kept,
         }
         _atomic_write(policy_path, new_policy)

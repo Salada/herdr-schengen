@@ -102,7 +102,16 @@ _question_not_live_streak: dict[str, int] = {}
 # launched from a bare shell) but are required for SAST tools (shellcheck /
 # semgrep) to be discoverable. Issue #45: without them shutil.which() returns
 # None -> SAST degraded -> fail-closed escalates every non-allowlist command.
-_RUNTIME_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"))
+#
+# Declared in HIGHEST-PRIORITY-FIRST order: _inject_runtime_path() iterates in
+# reverse so the FIRST tuple entry ends up FIRST in the resulting PATH.
+if sys.platform.startswith("linux"):
+    # Linuxbrew (Homebrew on Linux) installs to /home/linuxbrew/.linuxbrew/bin.
+    _RUNTIME_BIN_DIRS = ("/home/linuxbrew/.linuxbrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"))
+else:
+    # macOS: Apple Silicon Homebrew (/opt/homebrew/bin) > Intel (/usr/local/bin)
+    # > user-local binaries. (Issue #45: identical to the pre-guard macOS set.)
+    _RUNTIME_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.local/bin"))
 
 
 def load_watcher_config(path=WATCHER_CONFIG_PATH):
@@ -666,16 +675,39 @@ def _inject_runtime_path() -> None:
     """Prepend common host binary dirs to PATH so shellcheck/semgrep are discoverable.
 
     Idempotent: only prepends a dir that EXISTS on disk and is not already in PATH.
+
+    Priority note (issue #45): `_RUNTIME_BIN_DIRS` is declared in
+    highest-priority-first order. Because each existing dir is `insert(0, ...)`-ed,
+    we iterate in REVERSE so the FIRST tuple entry (/opt/homebrew/bin on macOS)
+    ends up FIRST (highest precedence) in the resulting PATH — the previous
+    forward iteration left the LAST entry (~/.local/bin) shadowing Homebrew.
     """
     path = os.environ.get("PATH", "")
+    # Empty path entries (consecutive colons / leading/trailing colon) are
+    # dropped. A literal "." entry is deliberately KEPT: it is not an empty
+    # entry but an explicit relative current-directory marker with real PATH
+    # semantics (POSIX shell searches the CWD), so removing it would silently
+    # change command resolution. (Issue #45: documented, no behavior change.)
     parts = [p for p in path.split(os.pathsep) if p]
-    for d in _RUNTIME_BIN_DIRS:
+    for d in reversed(_RUNTIME_BIN_DIRS):
         if os.path.isdir(d) and d not in parts:
             parts.insert(0, d)
     os.environ["PATH"] = os.pathsep.join(parts)
 
 
 NON_BLOCKED_STATUSES = ("working", "idle", "done")
+
+
+def _norm_agent_status(status) -> str:
+    """Normalize a Herdr agent status for token comparison (issue #33).
+
+    Herdr pane statuses may differ in casing across versions/adapters (e.g.
+    "Working" vs "working", "Blocked" vs "blocked"). Normalizing to lowercase
+    (stripped) before comparison ensures a casing difference can never cause a
+    stale-escalation eviction miss — or, conversely, an unexpected-casing status
+    being treated as non-blocked when it should not be.
+    """
+    return str(status or "").strip().lower()
 
 # Fail-closed reason when a truncated dialog could not be expanded (INV-EX-3).
 TRUNCATED_DIALOG_REASON = "Truncated dialog could not be expanded; requires human review"
@@ -804,13 +836,22 @@ def should_evict_pane_direct(cached, pane_info, visible_text, req_cmd, adapter):
         return False, "no unsafe escalation"
     if adapter is None:
         return False, "no adapter"
+    # INV-PD-CMD (issue #33): this eviction path keys on pane_id alone, but the
+    # dialog/liveness state observed below belongs to the CURRENT req_cmd. If a
+    # DIFFERENT (not-yet-approved) command's dialog is now live, never evict the
+    # cached escalation based on it — fail-closed: keep the cached escalation
+    # pending and let the new command escalate fresh on its own.
+    cached_cmd = cached.get("cmd")
+    if req_cmd and cached_cmd and req_cmd != cached_cmd:
+        return False, "command changed"
     dialog_live = adapter.dialog_is_live(visible_text)
     seq_changed = pane_info.get("state_change_seq", 0) != cached.get("seq", -1)
-    status = pane_info.get("agent_status", "")
-    status_changed = status != cached.get("status", "")
+    status = _norm_agent_status(pane_info.get("agent_status", ""))
+    cached_status = _norm_agent_status(cached.get("status", ""))
+    status_changed = status != cached_status
     if not dialog_live and not req_cmd:
         return True, "dialog gone"           # PD-A
-    if cached.get("status") == "blocked" and status in NON_BLOCKED_STATUSES and not dialog_live:
+    if cached_status == "blocked" and status in NON_BLOCKED_STATUSES and not dialog_live:
         return True, "agent left blocked"    # PD-B
     if seq_changed and not dialog_live:
         return True, "state changed, dialog not live"  # PD-C (debounced by caller)
@@ -848,12 +889,16 @@ def _should_evict_stale_escalation(cached: Optional[dict], agent_status: str) ->
     Old semantics: a cached UNSAFE escalation whose agent was `blocked` at cache
     time is evicted once the agent transitions to a non-blocked state (the user
     answered the dialog directly in the pane). Retained for tests/back-compat.
+
+    Status comparison is case-insensitive (see _norm_agent_status): Herdr
+    statuses may differ in casing ("Working" vs "working"), which must never
+    cause an eviction miss (issue #33).
     """
     if not cached or cached.get("is_safe", True):
         return False
-    if cached.get("status", "") != "blocked":
+    if _norm_agent_status(cached.get("status", "")) != "blocked":
         return False
-    return agent_status in NON_BLOCKED_STATUSES
+    return _norm_agent_status(agent_status) in NON_BLOCKED_STATUSES
 
 
 def verify_host_runtime_environment():
@@ -867,13 +912,6 @@ def verify_host_runtime_environment():
     # evaluator probes them, so the daemon does not run SAST-degraded merely
     # because /opt/homebrew/bin etc. are absent from the inherited PATH.
     _inject_runtime_path()
-
-    # SAST availability telemetry — surfaced at daemon startup for visibility.
-    _missing = [b for b in ("shellcheck", "semgrep") if shutil.which(b) is None]
-    if _missing:
-        print(f"⚠️  [SAST] DEGRADED — missing binaries: {', '.join(_missing)}", flush=True)
-    else:
-        print("✅ [SAST] READY (shellcheck + semgrep)", flush=True)
 
     is_host = (
         os.environ.get("ANTIGRAVITY_AGENT") == "1"
@@ -898,6 +936,15 @@ def verify_host_runtime_environment():
             "   Standalone terminal execution or detached background daemons are forbidden (ADR-003 / ADR-008).\n"
         )
         sys.exit(1)
+
+    # SAST availability telemetry — printed ONLY after the host-runtime gate
+    # passes, so a rejected/non-Herdr invocation does not emit a misleading
+    # "SAST READY" line before the fatal exit (issue #45).
+    _missing = [b for b in ("shellcheck", "semgrep") if shutil.which(b) is None]
+    if _missing:
+        print(f"⚠️  [SAST] DEGRADED — missing binaries: {', '.join(_missing)}", flush=True)
+    else:
+        print("✅ [SAST] READY (shellcheck + semgrep)", flush=True)
 
 
 # Backward-compatible alias (pre-opencode-host naming)
