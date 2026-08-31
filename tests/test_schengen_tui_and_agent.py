@@ -1085,5 +1085,186 @@ class TestTUIBadgesAndDeepLinksAsync(unittest.IsolatedAsyncioTestCase):
                 app.tui_lock_fd.close()
 
 
+def _fake_escalation(**overrides):
+    """Minimal pending escalation dict shaped like guard_db rows."""
+    base = {
+        "id": 7494,
+        "pane_id": "w1D:p1",
+        "agent_kind": "opencode",
+        "raw_command": "git push --force origin main",
+        "command_hash": "h",
+        "safety_reason": "Force-push to shared branch (Fail-Closed)",
+        "decision_layer": "GIT_IRREVERSIBLE",
+        "dialog_snapshot": None,
+        "status": "PENDING",
+        "started_at": "",
+        "delivered_at": None,
+        "last_transitioned_at": "",
+        "cwd": "",
+        "origin": "A",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestTUIActionRequiredPanel(unittest.TestCase):
+    """Sprint 2 action-required panel: decision card + clipboard fidelity."""
+
+    def test_decision_card_structure(self):
+        from cmd.schengen_tui import format_decision_card
+        from rich.cells import cell_len
+
+        esc = _fake_escalation(
+            raw_command="git show --stat HEAD | head -12 && git push --force origin main",
+            decision_layer="FAIL_CLOSED",
+            safety_reason="Not in fast-track allowlist",
+        )
+        card = format_decision_card(esc, width=70)
+        plain = card.plain
+        self.assertIn("ACTION REQUIRED", plain)
+        self.assertIn("[#7494]", plain)  # deep-link token in the frame
+        self.assertIn("Commander Authorization Required", plain)
+        self.assertIn("w1D:p1 (opencode)", plain)
+        self.assertIn("git show --stat HEAD | head -12", plain)
+        self.assertIn("FAIL_CLOSED", plain)
+        self.assertIn("/approve 7494", plain)
+        self.assertIn("/reject 7494 [reason]", plain)
+        self.assertIn("/allow 7494", plain)
+        # every rendered line is exactly `width` terminal cells
+        self.assertEqual(len({cell_len(l) for l in plain.splitlines()}), 1)
+        self.assertEqual(cell_len(plain.splitlines()[0]), 70)
+
+    def test_decision_card_width_alignment(self):
+        from cmd.schengen_tui import format_decision_card
+        from rich.cells import cell_len
+
+        esc = _fake_escalation(raw_command="x" * 300, safety_reason="r" * 300)
+        for w in (52, 60, 70, 78):
+            card = format_decision_card(esc, width=w)
+            widths = {cell_len(l) for l in card.plain.splitlines()}
+            self.assertEqual(widths, {w}, f"misaligned at width {w}")
+            self.assertLessEqual(len(card.plain.splitlines()), 12)
+
+    def test_decision_card_fallback_reason(self):
+        from cmd.schengen_tui import format_decision_card
+
+        esc = _fake_escalation(safety_reason="", decision_layer="SECRET_GUARD")
+        plain = format_decision_card(esc, width=60).plain
+        self.assertIn("SECRET_GUARD — Deferred to human review", plain)
+
+    def test_chat_plain_text_preserves_card_tokens(self):
+        from cmd.schengen_tui import _chat_plain_text
+
+        plain = _chat_plain_text(
+            "[bold red]🚨 ▶ ACTION REQUIRED: Escalation [#7494] Awaiting Commander Decision[/]\n"
+            "[dim]   [✔ Approve] /approve 7494 · [✖ Reject] /reject 7494 [reason] · [🔒 Always Allow] /allow 7494[/]\n"
+            "╭── [ESCALATION #7494] ──╮"
+        )
+        self.assertIn("[#7494]", plain)
+        self.assertIn("[✔ Approve]", plain)
+        self.assertIn("[✖ Reject]", plain)
+        self.assertIn("[🔒 Always Allow]", plain)
+        self.assertIn("[reason]", plain)
+        self.assertIn("[ESCALATION #7494]", plain)
+        self.assertNotIn("[bold red]", plain)
+        self.assertNotIn("[dim]", plain)
+
+
+class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
+    """Async half: live app rendering of banner / radar card / chat card."""
+
+    def _mount_patches(self, active_esc, pending):
+        from unittest.mock import MagicMock, patch
+
+        return [
+            patch("cmd.schengen_tui.get_current_active_escalation", return_value=active_esc),
+            patch("cmd.schengen_tui.get_pending_escalations", return_value=pending),
+            patch("cmd.schengen_tui.list_active_guard_locks", return_value=[]),
+            patch("cmd.schengen_tui.get_recent_audit_logs", return_value=[]),
+            patch("cmd.schengen_tui.get_pane_info", return_value={"agent_status": "blocked"}),
+            patch("cmd.schengen_tui.get_pane_direct_config", return_value={}),
+            patch("cmd.schengen_tui.get_batch_approval_config", return_value={"batch_approval_enabled": False}),
+            patch("cmd.schengen_tui.subprocess.Popen", return_value=MagicMock()),
+        ]
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_alarm_banner_and_radar_card_when_active(self):
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock
+
+        esc = _fake_escalation()
+        app = SchengenTUIApp()
+        app.is_controller = True
+        with ExitStack() as stack:
+            for p in self._mount_patches(esc, [esc]):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.process_user_chat = MagicMock()
+                await pilot.pause(0.7)
+                banner = app.query_one("#active-target-banner", Static)
+                self.assertIn("ACTION REQUIRED", banner.content)
+                self.assertIn("#7494", banner.content)
+                self.assertIn("/approve 7494", banner.content)
+                card = app.query_one("#action-card", Static)
+                self.assertTrue(card.display)
+                self.assertIn("Blocked Pane", card.content)
+                self.assertIn("w1D:p1", card.content)
+                self.assertIn("(opencode)", card.content)
+                self.assertIn("HUMAN INTERVENTION REQUIRED", card.content)
+                # commander prompt placeholder
+                self.assertIn("/approve 7494", app.query_one("#input-box").placeholder)
+                # decision card reached the chat
+                chat_plain = "\n".join(app._chat_plain)
+                self.assertIn("ACTION REQUIRED", chat_plain)
+                self.assertIn("/approve 7494", chat_plain)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_idle_keeps_non_alarm_banner_and_hides_card(self):
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._mount_patches(None, []):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.7)
+                banner = app.query_one("#active-target-banner", Static)
+                self.assertIn("No active escalations", banner.content)
+                self.assertNotIn("ACTION REQUIRED", banner.content)
+                card = app.query_one("#action-card", Static)
+                self.assertFalse(card.display)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_question_keeps_pane_answer_presentation(self):
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+
+        esc = _fake_escalation(decision_layer="QUESTION", raw_command="rm -rf /tmp/scratch?")
+        app = SchengenTUIApp()
+        app.is_controller = True
+        with ExitStack() as stack:
+            for p in self._mount_patches(esc, [esc]):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.7)
+                banner = app.query_one("#active-target-banner", Static)
+                # question flow keeps the in-pane answer presentation
+                self.assertIn("❓", banner.content)
+                self.assertIn("Answer this question", banner.content)
+                self.assertNotIn("ACTION REQUIRED", banner.content)
+                # radar card still flags human intervention (answer in pane)
+                card = app.query_one("#action-card", Static)
+                self.assertTrue(card.display)
+                self.assertIn("HUMAN INTERVENTION REQUIRED", card.content)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+
 if __name__ == "__main__":
     unittest.main()
