@@ -547,19 +547,25 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_answer_language_radio_set(self):
-        from cmd.schengen_tui import SchengenTUIApp
+        # The Answer Language selector was relocated into the SettingsModal
+        # (first-screen declutter); assert the modal's RadioSet instead.
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
         from textual.widgets import RadioSet
         from unittest.mock import patch
         app = SchengenTUIApp()
         with patch("cmd.schengen_tui.get_answer_language", return_value="korean"):
             async with app.run_test() as pilot:
                 await pilot.pause()
-                radio_set = app.query_one("#answer-language-set", RadioSet)
+                app.action_open_settings()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsModal)
+                modal = app.screen
+                radio_set = modal.query_one("#settings-lang-set", RadioSet)
                 radios = list(radio_set.query("RadioButton"))
                 self.assertEqual([r.id for r in radios], ["lang-english", "lang-korean", "lang-japanese"])
                 # Default is korean.
-                self.assertTrue(app.query_one("#lang-korean").value)
-                self.assertFalse(app.query_one("#lang-english").value)
+                self.assertTrue(modal.query_one("#lang-korean").value)
+                self.assertFalse(modal.query_one("#lang-english").value)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
 
@@ -1417,6 +1423,7 @@ class TestTUIStatusCardAndSettings(unittest.TestCase):
     Presentation/organization only: every value comes from EXISTING config
     (guard_config getters, daemon lock state, runtime role). Approval Bias /
     Fast-Track have no backing config keys and are intentionally absent.
+    First screen shows ONLY Guard daemon + Mode (SettingsModal holds the rest).
     """
 
     def test_status_card_text_render(self):
@@ -1426,18 +1433,14 @@ class TestTUIStatusCardAndSettings(unittest.TestCase):
             is_controller=True,
             leader_pid=None,
             guard_pid=4242,
-            lang="korean",
-            send_approve_instruction=False,
-            send_reject_instruction=True,
         )
         self.assertIn("Mode  :", text)
         self.assertIn("Controller (👑)", text)
         self.assertIn("Guard :", text)
         self.assertIn("ACTIVE (🛡️) PID 4242", text)
-        self.assertIn("Lang  :", text)
-        self.assertIn("Korean (KO)", text)
-        self.assertIn("Instr :", text)
-        self.assertIn("Reject-only", text)
+        # first-screen declutter: secondary knobs must NOT appear on the card
+        self.assertNotIn("Lang  :", text)
+        self.assertNotIn("Instr :", text)
         # no invented rows
         self.assertNotIn("Bias", text)
         self.assertNotIn("Fast", text)
@@ -1447,31 +1450,23 @@ class TestTUIStatusCardAndSettings(unittest.TestCase):
 
         obs = format_status_card_text(
             is_controller=False, leader_pid=7, guard_pid=None,
-            lang="english", send_approve_instruction=True, send_reject_instruction=True,
         )
         self.assertIn("Observer (👁) — Leader PID 7", obs)
         self.assertIn("INACTIVE (○)", obs)
-        self.assertIn("English (EN)", obs)
-        self.assertIn("Approve+Reject", obs)
+        self.assertNotIn("English (EN)", obs)
+        self.assertNotIn("Approve+Reject", obs)
 
         off = format_status_card_text(
             is_controller=True, leader_pid=None, guard_pid=None,
-            lang="japanese", send_approve_instruction=False, send_reject_instruction=False,
         )
-        self.assertIn("Japanese (JA)", off)
-        self.assertIn("None", off)
+        self.assertIn("Controller (👑)", off)
+        self.assertIn("INACTIVE (○)", off)
 
-        approve_only = format_status_card_text(
-            is_controller=True, leader_pid=None, guard_pid=None,
-            lang="korean", send_approve_instruction=True, send_reject_instruction=False,
+        with_target = format_status_card_text(
+            is_controller=True, leader_pid=None, guard_pid=9, guard_target="auto",
         )
-        self.assertIn("Approve-only", approve_only)
-
-        unknown = format_status_card_text(
-            is_controller=True, leader_pid=None, guard_pid=None,
-            lang="esperanto", send_approve_instruction=False, send_reject_instruction=True,
-        )
-        self.assertIn("esperanto", unknown)  # unknown lang passes through
+        self.assertIn("ACTIVE (🛡️) PID 9", with_target)
+        self.assertIn("auto", with_target)
 
     def test_settings_bindings_and_open_action(self):
         from cmd.schengen_tui import SchengenTUIApp
@@ -1489,15 +1484,39 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
     def _config_patches(self, state):
         from unittest.mock import patch
 
+        def _set_instr(**kw):
+            state["instr"].update({k: v for k, v in kw.items()})
+
+        def _set_batch(enabled=None, ttl_seconds=None):
+            if enabled is not None:
+                state["batch"]["batch_approval_enabled"] = enabled
+            if ttl_seconds is not None:
+                state["batch"]["human_approval_ttl_seconds"] = ttl_seconds
+
+        def _set_origin(enabled=None):
+            if enabled is not None:
+                state["origin"]["origin_weighting_enabled"] = enabled
+
+        def _set_pd(enabled=None, confirm_polls=None):
+            if enabled is not None:
+                state["pd"]["pane_direct_eviction_enabled"] = enabled
+            if confirm_polls is not None:
+                state["pd"]["pane_direct_confirm_polls"] = confirm_polls
+
         return [
             patch("cmd.schengen_tui.list_active_guard_locks", side_effect=lambda: state["locks"]),
             patch("cmd.schengen_tui.get_instruction_delivery_config", side_effect=lambda: dict(state["instr"])),
-            patch("cmd.schengen_tui.set_instruction_delivery_config",
-                  side_effect=lambda **kw: state["instr"].update({k: v for k, v in kw.items()})),
+            patch("cmd.schengen_tui.set_instruction_delivery_config", side_effect=_set_instr),
             patch("cmd.schengen_tui.get_answer_language", side_effect=lambda: state["lang"]),
             patch("cmd.schengen_tui.set_answer_language", side_effect=lambda lang: state.update(lang=lang)),
             patch("cmd.schengen_tui.get_channel_approve_config", side_effect=lambda: state["chan"]),
             patch("cmd.schengen_tui.set_channel_approve_config", side_effect=lambda v: state.update(chan=v)),
+            patch("cmd.schengen_tui.get_batch_approval_config", side_effect=lambda: dict(state["batch"])),
+            patch("cmd.schengen_tui.set_batch_approval_config", side_effect=_set_batch),
+            patch("cmd.schengen_tui.get_origin_weighting_config", side_effect=lambda: dict(state["origin"])),
+            patch("cmd.schengen_tui.set_origin_weighting_config", side_effect=_set_origin),
+            patch("cmd.schengen_tui.get_pane_direct_config", side_effect=lambda: dict(state["pd"])),
+            patch("cmd.schengen_tui.set_pane_direct_config", side_effect=_set_pd),
             patch("cmd.schengen_tui.get_current_active_escalation", return_value=None),
             patch("cmd.schengen_tui.get_pending_escalations", return_value=[]),
             patch("cmd.schengen_tui.get_recent_audit_logs", return_value=[]),
@@ -1510,12 +1529,16 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
             "instr": {"send_approve_instruction": False, "send_reject_instruction": True},
             "lang": "korean",
             "chan": False,
+            "batch": {"batch_approval_enabled": True},
+            "origin": {"origin_weighting_enabled": True},
+            "pd": {"pane_direct_eviction_enabled": True},
         }
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_status_card_live_updates_from_config(self):
         from cmd.schengen_tui import SchengenTUIApp, Static
         from contextlib import ExitStack
+        from textual.widgets import Button
 
         state = self._fresh_state()
         app = SchengenTUIApp()
@@ -1526,21 +1549,22 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause(0.7)
                 card = app.query_one("#status-card", Static)
                 self.assertIn("INACTIVE", card.content)
-                self.assertIn("Reject-only", card.content)
+                guard_btn = app.query_one("#btn-toggle-guard", Button)
+                self.assertIn("INACTIVE", guard_btn.label.plain)
                 # guard comes up -> next radar tick reflects it
                 state["locks"].append(("auto", "/tmp/l", 1234))
                 await pilot.pause(0.7)
                 self.assertIn("ACTIVE (🛡️) PID 1234", card.content)
-                # instruction change -> card flips
-                state["instr"]["send_approve_instruction"] = True
-                await pilot.pause(0.7)
-                self.assertIn("Approve+Reject", card.content)
+                self.assertIn("ACTIVE", guard_btn.label.plain)
+                # first-screen declutter: Lang/Instr rows never appear
+                self.assertNotIn("Lang  :", card.content)
+                self.assertNotIn("Instr :", card.content)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_settings_modal_opens_via_slash_command_and_toggles(self):
-        from cmd.schengen_tui import SchengenTUIApp, SettingsModal, Static
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
         from contextlib import ExitStack
         from textual.widgets import Button
 
@@ -1563,10 +1587,6 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertTrue(state["instr"]["send_approve_instruction"])
                 self.assertIn("ON", modal.query_one("#set-approve-instr", Button).label.plain)
-                # sidebar toggle synced
-                self.assertIn("ON", app.query_one("#btn-toggle-approve-instr").label.plain)
-                # status card behind the modal synced
-                self.assertIn("Approve+Reject", app.query_one("#status-card", Static).content)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
 
@@ -1590,9 +1610,6 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
                 modal.query_one("#lang-english", RadioButton).value = True
                 await pilot.pause()
                 self.assertEqual(state["lang"], "english")
-                # sidebar language radio synced
-                sidebar_english = app.query_one("#answer-language-set").query_one("#lang-english", RadioButton)
-                self.assertTrue(sidebar_english.value)
                 # close via ESC
                 await pilot.press("escape")
                 await pilot.pause()
@@ -1622,6 +1639,104 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("ctrl+s")
                 await pilot.pause()
                 self.assertIsInstance(app.screen, SettingsModal)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_first_screen_decluttered_guard_and_mode_only(self):
+        """First screen keeps ONLY the Guard toggle + Mode; secondary knobs live
+        in the SettingsModal (docs/todo/TODO_phase3.md "[Task/UX] Settings Modal 분리")."""
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+        from textual.widgets import Button
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.7)
+                # the 2 always-visible controls exist
+                guard_btn = app.query_one("#btn-toggle-guard", Button)
+                self.assertIn("Guard", guard_btn.label.plain)
+                card = app.query_one("#status-card", Static)
+                self.assertIn("Mode  :", card.content)
+                self.assertIn("Guard :", card.content)
+                # settings entry button present
+                app.query_one("#btn-open-settings", Button)
+                # relocated controls are GONE from the first screen
+                for gone_id in (
+                    "#instruction-control",
+                    "#answer-language-set",
+                    "#btn-toggle-approve-instr",
+                    "#btn-toggle-reject-instr",
+                    "#btn-toggle-channel-approve",
+                ):
+                    try:
+                        app.query_one(gone_id)
+                        self.fail(f"first screen must not contain {gone_id}")
+                    except Exception:
+                        pass
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_button_opens_modal(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
+        from contextlib import ExitStack
+        from textual.widgets import Button
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.query_one("#btn-open-settings", Button).press()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsModal)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_automation_toggles(self):
+        """Batch approval / origin weighting / pane-direct toggles use the
+        EXISTING guard_config setters (UI relocation only, no semantics change)."""
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
+        from contextlib import ExitStack
+        from textual.widgets import Button
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.action_open_settings()
+                await pilot.pause()
+                modal = app.screen
+                self.assertIsInstance(modal, SettingsModal)
+                # initial states (all ON by default in the fresh state)
+                batch_btn = modal.query_one("#set-batch-approval", Button)
+                origin_btn = modal.query_one("#set-origin-weighting", Button)
+                pd_btn = modal.query_one("#set-pane-direct", Button)
+                self.assertIn("ON", batch_btn.label.plain)
+                self.assertIn("ON", origin_btn.label.plain)
+                self.assertIn("ON", pd_btn.label.plain)
+                # toggle each -> config flips via the existing setters
+                batch_btn.press()
+                await pilot.pause()
+                self.assertFalse(state["batch"]["batch_approval_enabled"])
+                self.assertIn("OFF", modal.query_one("#set-batch-approval", Button).label.plain)
+                origin_btn.press()
+                await pilot.pause()
+                self.assertFalse(state["origin"]["origin_weighting_enabled"])
+                self.assertIn("OFF", modal.query_one("#set-origin-weighting", Button).label.plain)
+                pd_btn.press()
+                await pilot.pause()
+                self.assertFalse(state["pd"]["pane_direct_eviction_enabled"])
+                self.assertIn("OFF", modal.query_one("#set-pane-direct", Button).label.plain)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
 
