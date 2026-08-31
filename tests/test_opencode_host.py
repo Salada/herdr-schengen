@@ -15,13 +15,27 @@ _AGY_KEYS = ("ANTIGRAVITY_AGENT", "AI_AGENT", "ANTIGRAVITY_CONVERSATION_ID")
 
 
 class TestHostRuntimeEnvironment(unittest.TestCase):
+    # Helper: make the SAST gate environment-independent. semgrep is a declared
+    # required dependency whose absence HARD-FAILS verify_host_runtime_environment()
+    # (INV-2 fail-closed), so tests that assert "accepted markers" must mock
+    # shutil.which to a non-None sentinel — otherwise they fail in any
+    # semgrep-less CI/sandbox (zero external-dependency unit-test principle).
+    _SEMGREP_SENTINEL = "/usr/bin/semgrep"
+
+    def _sast_which(self, cmd, *a, **k):
+        # shellcheck: absent -> DEGRADED warning path (non-fatal).
+        # semgrep: sentinel present -> hard-fail gate not triggered.
+        return None if cmd == "shellcheck" else self._SEMGREP_SENTINEL
+
     def test_agy_markers_accepted(self):
         with mock.patch.dict(os.environ, {"ANTIGRAVITY_AGENT": "1", "HERDR_ENV": "1"}, clear=True):
-            verify_host_runtime_environment()  # must not raise
+            with mock.patch("cmd.schengen_watcher.shutil.which", side_effect=self._sast_which):
+                verify_host_runtime_environment()  # must not raise
 
     def test_opencode_marker_accepted(self):
         with mock.patch.dict(os.environ, {"OPENCODE": "1", "HERDR_ENV": "1"}, clear=True):
-            verify_host_runtime_environment()  # must not raise
+            with mock.patch("cmd.schengen_watcher.shutil.which", side_effect=self._sast_which):
+                verify_host_runtime_environment()  # must not raise
 
     def test_opencode_falsy_value_rejected(self):
         with mock.patch.dict(os.environ, {"OPENCODE": "0", "HERDR_ENV": "1"}, clear=True):
@@ -52,16 +66,11 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
 
     def test_missing_shellcheck_still_warns(self):
-        """shellcheck keeps the pre-existing non-fatal DEGRADED warning path."""
-        import shutil as _shutil
-
-        original_which = _shutil.which
-
-        def _which(cmd, *a, **k):
-            return None if cmd == "shellcheck" else original_which(cmd, *a, **k)
-
+        """shellcheck keeps the pre-existing non-fatal DEGRADED warning path.
+        semgrep is mocked PRESENT (sentinel) so the hard-fail gate does not
+        trigger — environment-independent."""
         with mock.patch.dict(os.environ, {"OPENCODE": "1", "HERDR_ENV": "1"}, clear=True):
-            with mock.patch("cmd.schengen_watcher.shutil.which", side_effect=_which):
+            with mock.patch("cmd.schengen_watcher.shutil.which", side_effect=self._sast_which):
                 verify_host_runtime_environment()  # must not raise
 
 
