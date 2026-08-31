@@ -3,8 +3,9 @@
 > Read-only GitHub mirror of Herdr Schengen.
 
 This repository is a one-way publication mirror. The canonical development
-repository, issue tracker, CI, and release decisions live on
-[Forgejo](http://192.168.10.102:3000/InhouseOriented/herdr-schengen).
+repository, issue tracker, CI, and release decisions live in the
+`InhouseOriented/herdr-schengen` Forgejo repository on the Salada Local Dev
+Network, which is accessible only there.
 
 Files in this mirror are synchronized snapshots. Historical notes and backlogs
 are retained for context; they are not a promise of current support or a public

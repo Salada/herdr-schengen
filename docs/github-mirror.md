@@ -1,8 +1,9 @@
 # GitHub mirror policy
 
 GitHub is a read-only publication surface for this project. The canonical
-repository is [Forgejo](http://192.168.10.102:3000/InhouseOriented/herdr-schengen);
-development, issue tracking, CI, and release decisions remain there.
+repository is `InhouseOriented/herdr-schengen` on the Salada Local Dev Network's
+Forgejo instance, which is accessible only from that network. Development,
+issue tracking, CI, and release decisions remain there.
 
 GitHub issues, pull requests, discussions, wiki, and projects should be
 disabled. The mirror does not accept contributions, support requests, or
