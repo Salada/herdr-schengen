@@ -53,14 +53,15 @@ jobs:
           git --version
           shellcheck --version || true
 
-      - name: Install Python Dependencies
+      - name: Install Python Dependencies (incl. required semgrep SAST CLI)
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install --no-cache-dir --quiet textual rich httpx
+          .venv/bin/pip install --no-cache-dir --quiet textual rich httpx 'semgrep>=1.70.0'
+          .venv/bin/semgrep --version
 
       - name: Run Unit Guardrail Tests
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
+          export PATH="$PWD/.venv/bin:$HOME/.local/bin:$PATH"
           .venv/bin/python3 -m unittest discover -s tests -v
 
       - name: Run Live LLM Integration Tests (OpenAI-compatible cloud judge)

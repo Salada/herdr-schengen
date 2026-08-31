@@ -42,6 +42,28 @@ class TestHostRuntimeEnvironment(unittest.TestCase):
     def test_backward_compat_alias(self):
         self.assertIs(verify_agy_runtime_environment, verify_host_runtime_environment)
 
+    def test_missing_semgrep_hard_fails(self):
+        """semgrep is a declared required dependency: absence hard-fails startup
+        (INV-2 fail-closed) with a nonzero exit — never a silent SAST degrade."""
+        with mock.patch.dict(os.environ, {"OPENCODE": "1", "HERDR_ENV": "1"}, clear=True):
+            with mock.patch("cmd.schengen_watcher.shutil.which", return_value=None):
+                with self.assertRaises(SystemExit) as ctx:
+                    verify_host_runtime_environment()
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_missing_shellcheck_still_warns(self):
+        """shellcheck keeps the pre-existing non-fatal DEGRADED warning path."""
+        import shutil as _shutil
+
+        original_which = _shutil.which
+
+        def _which(cmd, *a, **k):
+            return None if cmd == "shellcheck" else original_which(cmd, *a, **k)
+
+        with mock.patch.dict(os.environ, {"OPENCODE": "1", "HERDR_ENV": "1"}, clear=True):
+            with mock.patch("cmd.schengen_watcher.shutil.which", side_effect=_which):
+                verify_host_runtime_environment()  # must not raise
+
 
 class TestStrictParentDieWithParent(unittest.TestCase):
     def test_strict_parent_returns_false_when_parent_dead(self):

@@ -3,6 +3,12 @@ name = "herdr-schengen"
 version = "0.1.0"
 description = "Herdr Schengen (SmartGate) Trusted Clearance gatekeeper"
 requires-python = ">=3.9"
+# Declared required dependencies (SSOT): semgrep is the SAST pre-filter core and
+# must be present in the runtime venv — the daemon's host-runtime gate hard-fails
+# at startup when the `semgrep` CLI is missing (INV-2 fail-closed).
+dependencies = [
+    "semgrep>=1.70.0",
+]
 
 [tool.ruff]
 line-length = 120
