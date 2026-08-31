@@ -1266,5 +1266,220 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
                     app.tui_lock_fd.close()
 
 
+class TestTUIStatusCardAndSettings(unittest.TestCase):
+    """Sprint 2: sidebar System Status card + consolidated Settings modal.
+
+    Presentation/organization only: every value comes from EXISTING config
+    (guard_config getters, daemon lock state, runtime role). Approval Bias /
+    Fast-Track have no backing config keys and are intentionally absent.
+    """
+
+    def test_status_card_text_render(self):
+        from cmd.schengen_tui import format_status_card_text
+
+        text = format_status_card_text(
+            is_controller=True,
+            leader_pid=None,
+            guard_pid=4242,
+            lang="korean",
+            send_approve_instruction=False,
+            send_reject_instruction=True,
+        )
+        self.assertIn("Mode  :", text)
+        self.assertIn("Controller (👑)", text)
+        self.assertIn("Guard :", text)
+        self.assertIn("ACTIVE (🛡️) PID 4242", text)
+        self.assertIn("Lang  :", text)
+        self.assertIn("Korean (KO)", text)
+        self.assertIn("Instr :", text)
+        self.assertIn("Reject-only", text)
+        # no invented rows
+        self.assertNotIn("Bias", text)
+        self.assertNotIn("Fast", text)
+
+    def test_status_card_text_variants(self):
+        from cmd.schengen_tui import format_status_card_text
+
+        obs = format_status_card_text(
+            is_controller=False, leader_pid=7, guard_pid=None,
+            lang="english", send_approve_instruction=True, send_reject_instruction=True,
+        )
+        self.assertIn("Observer (👁) — Leader PID 7", obs)
+        self.assertIn("INACTIVE (○)", obs)
+        self.assertIn("English (EN)", obs)
+        self.assertIn("Approve+Reject", obs)
+
+        off = format_status_card_text(
+            is_controller=True, leader_pid=None, guard_pid=None,
+            lang="japanese", send_approve_instruction=False, send_reject_instruction=False,
+        )
+        self.assertIn("Japanese (JA)", off)
+        self.assertIn("None", off)
+
+        approve_only = format_status_card_text(
+            is_controller=True, leader_pid=None, guard_pid=None,
+            lang="korean", send_approve_instruction=True, send_reject_instruction=False,
+        )
+        self.assertIn("Approve-only", approve_only)
+
+        unknown = format_status_card_text(
+            is_controller=True, leader_pid=None, guard_pid=None,
+            lang="esperanto", send_approve_instruction=False, send_reject_instruction=True,
+        )
+        self.assertIn("esperanto", unknown)  # unknown lang passes through
+
+    def test_settings_bindings_and_open_action(self):
+        from cmd.schengen_tui import SchengenTUIApp
+
+        actions = {b.action for b in SchengenTUIApp.BINDINGS}
+        self.assertIn("open_settings", actions)
+        self.assertTrue(hasattr(SchengenTUIApp, "action_open_settings"))
+        # at least one settings binding is footer-visible (^s)
+        self.assertTrue(any(b.action == "open_settings" and b.show for b in SchengenTUIApp.BINDINGS))
+
+
+class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
+    """Async half: live modal open/close/toggle + status-card live updates."""
+
+    def _config_patches(self, state):
+        from unittest.mock import patch
+
+        return [
+            patch("cmd.schengen_tui.list_active_guard_locks", side_effect=lambda: state["locks"]),
+            patch("cmd.schengen_tui.get_instruction_delivery_config", side_effect=lambda: dict(state["instr"])),
+            patch("cmd.schengen_tui.set_instruction_delivery_config",
+                  side_effect=lambda **kw: state["instr"].update({k: v for k, v in kw.items()})),
+            patch("cmd.schengen_tui.get_answer_language", side_effect=lambda: state["lang"]),
+            patch("cmd.schengen_tui.set_answer_language", side_effect=lambda lang: state.update(lang=lang)),
+            patch("cmd.schengen_tui.get_channel_approve_config", side_effect=lambda: state["chan"]),
+            patch("cmd.schengen_tui.set_channel_approve_config", side_effect=lambda v: state.update(chan=v)),
+            patch("cmd.schengen_tui.get_current_active_escalation", return_value=None),
+            patch("cmd.schengen_tui.get_pending_escalations", return_value=[]),
+            patch("cmd.schengen_tui.get_recent_audit_logs", return_value=[]),
+        ]
+
+    @staticmethod
+    def _fresh_state():
+        return {
+            "locks": [],
+            "instr": {"send_approve_instruction": False, "send_reject_instruction": True},
+            "lang": "korean",
+            "chan": False,
+        }
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_status_card_live_updates_from_config(self):
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.7)
+                card = app.query_one("#status-card", Static)
+                self.assertIn("INACTIVE", card.content)
+                self.assertIn("Reject-only", card.content)
+                # guard comes up -> next radar tick reflects it
+                state["locks"].append(("auto", "/tmp/l", 1234))
+                await pilot.pause(0.7)
+                self.assertIn("ACTIVE (🛡️) PID 1234", card.content)
+                # instruction change -> card flips
+                state["instr"]["send_approve_instruction"] = True
+                await pilot.pause(0.7)
+                self.assertIn("Approve+Reject", card.content)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_opens_via_slash_command_and_toggles(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal, Static
+        from contextlib import ExitStack
+        from textual.widgets import Button
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                w = app.process_user_chat("/config")
+                await w.wait()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsModal)
+                modal = app.screen
+                # initial labels from config
+                self.assertIn("OFF", modal.query_one("#set-approve-instr", Button).label.plain)
+                self.assertIn("ON", modal.query_one("#set-reject-instr", Button).label.plain)
+                # toggle approve instruction
+                modal.query_one("#set-approve-instr", Button).press()
+                await pilot.pause()
+                self.assertTrue(state["instr"]["send_approve_instruction"])
+                self.assertIn("ON", modal.query_one("#set-approve-instr", Button).label.plain)
+                # sidebar toggle synced
+                self.assertIn("ON", app.query_one("#btn-toggle-approve-instr").label.plain)
+                # status card behind the modal synced
+                self.assertIn("Approve+Reject", app.query_one("#status-card", Static).content)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_f2_and_language_change(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
+        from contextlib import ExitStack
+        from textual.widgets import RadioButton
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.press("f2")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsModal)
+                modal = app.screen
+                # switch language inside the modal
+                modal.query_one("#lang-english", RadioButton).value = True
+                await pilot.pause()
+                self.assertEqual(state["lang"], "english")
+                # sidebar language radio synced
+                sidebar_english = app.query_one("#answer-language-set").query_one("#lang-english", RadioButton)
+                self.assertTrue(sidebar_english.value)
+                # close via ESC
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, SettingsModal)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_close_button_and_reopen(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
+        from contextlib import ExitStack
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                app.action_open_settings()
+                await pilot.pause()
+                modal = app.screen
+                # ✕ close pops exactly once (ModalCloseMixin via MRO)
+                modal.query_one("#modal-close").press()
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, SettingsModal)
+                # reopen with ^s
+                await pilot.press("ctrl+s")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsModal)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+
 if __name__ == "__main__":
     unittest.main()
