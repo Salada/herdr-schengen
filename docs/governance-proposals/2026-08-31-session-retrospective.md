@@ -1,8 +1,11 @@
 # Governance Proposal — Session Retrospective (2026-08-31)
 
-> **Status**: PROPOSAL-ONLY (not yet applied). A human reviews before any
-> AGENTS.md / `.agents/rules/` edit. This document records the proposed rules,
-> their rationale, and residual objections from the AGY↔Hermes retrospective.
+> **Status**: RESOLVED (2026-08-31). Rules **#5 (One-Way GitHub Mirror)** and
+> **#6 (TOCTOU Fuzzy Matching)** were **ACCEPTED** and applied to
+> `AGENTS.md` §1 as rules 13–14. Rules #1–4 (global review process) and
+> #7–8 (upsert clearing, merge backoff) remain **deferred** for a later
+> decision. This document records the proposals, rationale, and residual
+> objections from the AGY↔Hermes retrospective.
 
 ## Summary
 
