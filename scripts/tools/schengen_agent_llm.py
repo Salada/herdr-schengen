@@ -54,6 +54,7 @@ from core.guard_db import (
     get_answer_language,
     get_db_connection,
     get_instruction_delivery_config,
+    get_pending_command_escalations,
     get_pending_escalations,
     get_recent_audit_logs,
     group_pending_escalations,
@@ -284,6 +285,23 @@ def get_current_active_escalation() -> Optional[Dict[str, Any]]:
     return pending[0] if pending else None
 
 
+def get_current_command_escalation() -> Optional[Dict[str, Any]]:
+    """Return the oldest (FIFO) active COMMAND escalation (QUESTION excluded).
+
+    A PENDING QUESTION must not occupy the Command Approval slot (strict
+    FIFO, INV-QN-1/2) — it stays PENDING for the sidebar hint + auto-dissolve
+    (#2800) while the command head proceeds.
+    """
+    pending = get_pending_command_escalations(include_delivered=False)
+    return pending[0] if pending else None
+
+
+def get_oldest_question_escalation() -> Optional[Dict[str, Any]]:
+    """Return the oldest PENDING QUESTION escalation (sidebar hint, INV-QN-3)."""
+    pending = get_pending_escalations(include_delivered=False)
+    return next((r for r in pending if r.get("decision_layer") == "QUESTION"), None)
+
+
 def _get_escalation_row(esc_id: int) -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     try:
@@ -484,8 +502,10 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
         raw_feedback = args.get("english_feedback") or args.get("feedback") or "Approved by security gatekeeper."
         feedback = _sanitize_feedback(raw_feedback)
         try:
-            # Enforce FIFO Head validation before keystroke injection
-            active_head = get_current_active_escalation()
+            # Enforce FIFO Head validation before keystroke injection. The
+            # command-slot head EXCLUDES questions (INV-QN-1/2) so a pending
+            # QUESTION can never block approve_escalation.
+            active_head = get_current_command_escalation()
             if not active_head or active_head["id"] != esc_id:
                 active_id = active_head["id"] if active_head else None
                 return json.dumps({
@@ -549,8 +569,9 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
         raw_feedback = args.get("english_feedback") or args.get("reason") or "Rejected by security gatekeeper."
         feedback = _sanitize_feedback(raw_feedback)
         try:
-            # Enforce FIFO Head validation before keystroke injection
-            active_head = get_current_active_escalation()
+            # Enforce FIFO Head validation before keystroke injection. The
+            # command-slot head EXCLUDES questions (INV-QN-1/2).
+            active_head = get_current_command_escalation()
             if not active_head or active_head["id"] != esc_id:
                 active_id = active_head["id"] if active_head else None
                 return json.dumps({
@@ -702,7 +723,9 @@ def build_system_prompt(language: Optional[str] = None, allow_adjudication: bool
     lang = language or get_answer_language()
     lang_instruction = _ANSWER_LANGUAGE_MAP.get(lang, _ANSWER_LANGUAGE_MAP["korean"])
 
-    active_esc = get_current_active_escalation()
+    # Command-slot head excludes questions (INV-QN-1/2); a pending QUESTION is
+    # surfaced via the sidebar hint, never blocks the gatekeeper prompt.
+    active_esc = get_current_command_escalation()
 
     if not active_esc:
         return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
@@ -824,7 +847,8 @@ class SchengenAgentChat:
             return "⚠️ No API key found. Set OPENAI_API_KEY or SCHENGEN_INSPECTOR_API_KEY."
 
         self.reset_cancel()
-        active_esc = get_current_active_escalation()
+        # Command-slot head excludes questions (INV-QN-1/2).
+        active_esc = get_current_command_escalation()
         active_id = active_esc["id"] if active_esc else None
 
         if active_id != self._current_esc_id:

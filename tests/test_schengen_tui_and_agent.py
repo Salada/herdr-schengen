@@ -136,7 +136,7 @@ Approved. All files verified safely."""
         s5 = format_tool_call_beautified("reject_escalation", {"escalation_id": 42, "english_feedback": "Critical risk."})
         self.assertIn("🛑 **[Action Reject]**", s5)
 
-    @patch("tools.schengen_agent_llm.get_current_active_escalation")
+    @patch("tools.schengen_agent_llm.get_current_command_escalation")
     def test_build_system_prompt_structure(self, mock_get_active):
         mock_get_active.return_value = {
             "id": 123,
@@ -154,7 +154,7 @@ Approved. All files verified safely."""
         self.assertIn("NO Autonomous Reject", prompt)
         self.assertIn("AGY Worker Context", prompt)
 
-    @patch("tools.schengen_agent_llm.get_current_active_escalation")
+    @patch("tools.schengen_agent_llm.get_current_command_escalation")
     def test_build_system_prompt_language_directive(self, mock_get_active):
         mock_get_active.return_value = {
             "id": 123,
@@ -1173,11 +1173,14 @@ class TestTUIActionRequiredPanel(unittest.TestCase):
 class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
     """Async half: live app rendering of banner / radar card / chat card."""
 
-    def _mount_patches(self, active_esc, pending):
+    def _mount_patches(self, active_esc, pending, question_esc=None):
         from unittest.mock import MagicMock, patch
 
         return [
-            patch("cmd.schengen_tui.get_current_active_escalation", return_value=active_esc),
+            # Command-slot head EXCLUDES questions (INV-QN-1/2); the question is
+            # surfaced via the sidebar #question-hint (get_oldest_question_escalation).
+            patch("cmd.schengen_tui.get_current_command_escalation", return_value=active_esc),
+            patch("cmd.schengen_tui.get_oldest_question_escalation", return_value=question_esc),
             patch("cmd.schengen_tui.get_pending_escalations", return_value=pending),
             patch("cmd.schengen_tui.list_active_guard_locks", return_value=[]),
             patch("cmd.schengen_tui.get_recent_audit_logs", return_value=[]),
@@ -1242,6 +1245,9 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_question_keeps_pane_answer_presentation(self):
+        # Question 분리 (INV-QN-1/2): a QUESTION no longer occupies the Command
+        # Approval banner — it is surfaced via the sidebar #question-hint and
+        # answered in the pane (never adjudicated).
         from cmd.schengen_tui import SchengenTUIApp, Static
         from contextlib import ExitStack
 
@@ -1249,19 +1255,23 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
         app = SchengenTUIApp()
         app.is_controller = True
         with ExitStack() as stack:
-            for p in self._mount_patches(esc, [esc]):
+            for p in self._mount_patches(None, [esc], question_esc=esc):
                 stack.enter_context(p)
             async with app.run_test(size=(120, 40)) as pilot:
                 await pilot.pause(0.7)
                 banner = app.query_one("#active-target-banner", Static)
-                # question flow keeps the in-pane answer presentation
-                self.assertIn("❓", banner.content)
-                self.assertIn("Answer this question", banner.content)
+                # command slot is EMPTY — the question must NOT appear in it
+                self.assertNotIn("❓", banner.content)
+                self.assertNotIn("Answer this question", banner.content)
                 self.assertNotIn("ACTION REQUIRED", banner.content)
-                # radar card still flags human intervention (answer in pane)
+                # the question is surfaced as a non-blocking sidebar hint
+                hint = app.query_one("#question-hint", Static)
+                self.assertTrue(hint.display)
+                self.assertIn("Question Awaiting Answer", hint.content)
+                self.assertIn("w1D:p1", hint.content)
+                # radar card hidden (no command awaiting adjudication)
                 card = app.query_one("#action-card", Static)
-                self.assertTrue(card.display)
-                self.assertIn("HUMAN INTERVENTION REQUIRED", card.content)
+                self.assertFalse(card.display)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
 
@@ -1479,6 +1489,140 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(app.screen, SettingsModal)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
+
+
+class TestQuestionNonBlockingTUI(unittest.TestCase):
+    """Question 분리 (non-blocking) TUI surface (#160 / INV-QN-1..5).
+
+    A PENDING QUESTION is surfaced via the sidebar #question-hint, never in the
+    Command Approval banner; /jump focuses an arbitrary pane.
+    """
+
+    def test_format_question_hint(self):
+        from cmd.schengen_tui import format_question_hint
+
+        hint = format_question_hint({"pane_id": "w1D:p5"})
+        self.assertIn("💬 [w1D:p5 Question Awaiting Answer]", hint)
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_question_does_not_block_command_slot(self):
+        from cmd.schengen_tui import SchengenTUIApp
+
+        app = SchengenTUIApp.__new__(SchengenTUIApp)
+        app._columns_initialized = True
+        app.is_controller = False
+        app.leader_pid = None
+        app._last_guard_active = False
+        app._last_audit_hash = ""
+        app._last_escalation_hash = ""
+        app._pane_direct_polls = {}
+        app._pane_direct_head = None
+        app._last_active_id = None
+        app._last_resolved_ref = None
+        app._notified_escalation_ids = set()
+        app._processing_chat = False
+        app._write = MagicMock()
+        app.agent = MagicMock()
+        app.agent.get_token_usage_stats.return_value = {
+            "api_calls": 1,
+            "prompt_tokens": 2,
+            "completion_tokens": 3,
+            "cached_tokens": 4,
+            "cache_hit_pct": "0%",
+            "inspector_in": 0,
+            "inspector_out": 0,
+            "judge_in": 0,
+            "judge_out": 0,
+        }
+
+        # Per-id fake widgets: capture banner + question-hint content.
+        captured = {}
+
+        def fake_query_one(selector, *a, **kw):
+            sel = selector if isinstance(selector, str) else str(selector)
+            if sel not in captured:
+                w = MagicMock()
+                w.size.width = 40
+                w.content_region.width = 74
+                captured[sel] = w
+            return captured[sel]
+
+        app.query_one = fake_query_one
+
+        command_esc = {
+            "id": 2,
+            "pane_id": "w1D:c",
+            "agent_kind": "agy",
+            "decision_layer": "GRAY_ZONE",
+            "raw_command": "rm -rf /tmp/command_slot",
+            "safety_reason": "test command",
+        }
+        question_esc = {
+            "id": 1,
+            "pane_id": "w1D:q",
+            "agent_kind": "agy",
+            "decision_layer": "QUESTION",
+            "raw_command": "question: proceed?",
+            "safety_reason": "test question",
+        }
+        with patch("cmd.schengen_tui.get_current_command_escalation", return_value=command_esc), patch(
+            "cmd.schengen_tui.get_oldest_question_escalation", return_value=question_esc
+        ), patch("cmd.schengen_tui.list_active_guard_locks", return_value=[]), patch(
+            "cmd.schengen_tui.get_recent_audit_logs", return_value=[]
+        ), patch("cmd.schengen_tui.get_pending_escalations", return_value=[]), patch(
+            "cmd.schengen_tui.get_answer_language", return_value="korean"
+        ), patch("cmd.schengen_tui.get_instruction_delivery_config", return_value={}):
+            app.update_radar_data(force=True)
+
+        banner_text = captured["#active-target-banner"].update.call_args.args[0]
+        self.assertIn("rm -rf /tmp/command_slot", banner_text)   # COMMAND in the slot
+        self.assertNotIn("question: proceed?", banner_text)       # QUESTION NOT in the slot
+
+        hint_text = captured["#question-hint"].update.call_args.args[0]
+        self.assertIn("💬 [w1D:q Question Awaiting Answer]", hint_text)  # sidebar hint
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_jump_command_dispatch(self):
+        import asyncio
+
+        from cmd.schengen_tui import SchengenTUIApp
+
+        app = SchengenTUIApp.__new__(SchengenTUIApp)
+        app._processing_chat = False
+        app.is_controller = True
+        app.leader_pid = None
+        app._write = MagicMock()
+        app.update_radar_data = MagicMock()
+        app.query_one = MagicMock()
+        app._last_chat_date = None
+        # process_user_chat is @work-decorated (needs a live Textual app); call
+        # the unwrapped coroutine directly on the bare instance.
+        process_chat = SchengenTUIApp.process_user_chat.__wrapped__
+        with patch("cmd.schengen_tui.run_cmd", return_value="") as mock_run:
+            asyncio.run(process_chat(app, "/jump w1D:p9"))
+        mock_run.assert_called_once_with(["herdr", "pane", "focus", "w1D:p9"])
+        app._write.assert_any_call("[bold cyan]↩ Focusing agent pane w1D:p9...[/]")
+        app.update_radar_data.assert_called_once_with(force=True)
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_jump_requires_pane_id(self):
+        import asyncio
+
+        from cmd.schengen_tui import SchengenTUIApp
+
+        app = SchengenTUIApp.__new__(SchengenTUIApp)
+        app._processing_chat = False
+        app.is_controller = True
+        app.leader_pid = None
+        app._write = MagicMock()
+        app.update_radar_data = MagicMock()
+        app.query_one = MagicMock()
+        app._last_chat_date = None
+        process_chat = SchengenTUIApp.process_user_chat.__wrapped__
+        with patch("cmd.schengen_tui.run_cmd", return_value="") as mock_run:
+            asyncio.run(process_chat(app, "/jump"))
+        mock_run.assert_not_called()
+        app._write.assert_any_call("[bold yellow]⚠️ Usage: /jump <pane_id>[/]")
 
 
 if __name__ == "__main__":
