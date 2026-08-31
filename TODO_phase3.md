@@ -23,9 +23,18 @@
 
 ---
 
-## 🎯 Active Execution Backlog (23 Items)
+## 🎯 Active Execution Backlog (24 Items)
+
+[] [P0/Docs] 전체 문서 전수조사, ADR Superseded 표기 및 `docs/index.md` 마스터 색인 체계 구축 (Issue #166, OpenCode 위임):
+  - Forgejo Issue: [Issue #166](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/issues/166)
+  - 상세 실행 지침:
+    1) 디렉터리 재배치: `docs/adr/`, `docs/guides/`, `docs/archive/` 생성, 모든 `docs/adr-*.md` 이동, `TODO.md` -> `docs/archive/TODO_phase1.md`, `bloat_message_opencode.md` 이동, `docs/setup*.md` 및 `github-mirror.md` -> `docs/guides/` 이동.
+    2) ADR 전수조사: 13개 ADR 상단에 상태 메타데이터(`Active` vs `Superseded / Evolved`: ADR-006, ADR-011) 명시 및 상대 경로 일괄 보정.
+    3) `docs/index.md` 마스터 색인 작성: 4대 카테고리 매트릭스, 1줄 핵심 요약, 관련 소스코드 경로 색인으로 LLM 탐색 토큰 소모 최소화.
+    4) 테스트: `HERDR_ENV=1 python -m unittest discover -s tests` 통과 확인 후 PR 발행.
 
 [] [Bug/Question] Pane 질문(decision_layer='QUESTION') 답변 완료 후에도 TUI 상단 배너 및 Pending 큐에 영구 잔류하는 현상 수정 (사례: #2800):
+
   - 대원칙: **Question에는 명령과 같은 '승인/거절(resolve)' 상태가 없음** (단순히 인간이 Pane에서 직접 타이핑/엔터하여 다이얼로그가 사라지면 큐에서 자동 제거/소멸되어야 하는 대상).
   - 현상 및 원인 (사례: Escalation #2800 Codex 질문 등):
     • 에이전트가 사용자에게 질문(`Question 1/1 ...`)을 하여 `decision_layer='QUESTION'`으로 에스컬레이션된 후, 사용자가 해당 Pane에서 직접 답변을 완료했음에도 TUI 상단 배너와 `pending_escalations` 큐에서 제거되지 않고 계속 Pending 상태로 고착됨.
