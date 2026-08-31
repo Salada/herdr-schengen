@@ -88,21 +88,12 @@
   - 해결 방안:
     • `enqueue_pending_escalation`의 `ON CONFLICT(pane_id, command_hash) DO UPDATE SET` 구문에 `resolution = NULL, approver = NULL, delivered_at = NULL` 명시적 초기화 추가.
 
-[] [Idea/Architecture] Question 분리 처리: 커맨드 에스컬레이션 큐 비차단(Non-blocking) & 사이드바/힌트 버튼 기반 Pane 점프 분리
-
-
-  - Context & Core Problem:
-    • Question은 TUI에서 승인/거절할 수 없고 반드시 사용자가 해당 Pane으로 가서 텍스트를 입력해야 함.
-    • 현재 구조에서는 Question이 발생하면 TUI 단일 활성 슬롯을 점유하여, 다른 에이전트들의 모든 위험 명령 에스컬레이션 및 승인 파이프라인이 전면 병목(Block)되는 심각한 비효율 발생.
-  - Solution & UI/UX Architecture:
-    1) [Command Approval Slot과 Question 전면 분리 (Non-blocking)]:
-       - Question(`decision_layer == "QUESTION"`)은 메인 커맨드 결재 슬롯(`Active Action Required Slot`)을 점유하지 않고 백그라운드 힌트로 격리.
-       - 다른 Pane의 쉘 명령 에스컬레이션은 차질 없이 계속 TUI 메인 화면에 올라오고 정상 승인/거절 수행.
-    2) [사이드바/레이더 힌트 배지 & 원클릭 Jump 연동]:
-       - 우측 사이드 패널(Radar) 또는 상단 칩에 `💬 [w1N:p1 Question Awaiting Answer]` 미니 힌트 배지 표시.
-       - 클릭 또는 `/jump <pane_id>` 입력 시 Herdr를 통해 해당 Pane으로 포커스를 즉시 전환하여 사용자가 타이핑할 수 있도록 안내.
-    3) [자동 소멸 생명주기]:
-       - 사용자가 해당 Pane에서 답변을 제출하면 `dialog_is_live == False` 감지와 함께 사이드바 힌트 배지가 무음 소멸.
+[x] [Idea/Architecture] Question 분리 처리: 커맨드 에스컬레이션 큐 비차단(Non-blocking) & 사이드바/힌트 버튼 기반 Pane 점프 분리 (기구현 검증 완료):
+  - 대원칙 & 해결 상태:
+    • Question은 TUI에서 승인/거절할 수 없고 사용자가 해당 Pane에서 직접 입력해야 하므로 커맨드 결재 슬롯을 비차단(Non-blocking) 격리.
+    • `INV-QN-1/2` 불변식: Question 에스컬레이션은 메인 결재 슬롯을 점유하지 않고 백그라운드 힌트/Radar 배지로 표시.
+    • 사이드바 힌트 배지 + `/jump <pane_id>` 및 마우스 클릭 포커스 전환 연동.
+    • 사용자가 해당 Pane에서 답변 시 `sweep_answered_questions` / `dialog_is_live == False` 감지를 통해 무음 자동 소멸.
 
 [x] [Refactor/Adapters] Codex 및 AGY 다이얼로그 앵커 liveness 한정 주석 명시 2종 (#146 피어리뷰 후속, PR #171 완료):
   1) Codex 앵커(digit) 확대는 liveness-only 전용: 향후 옵션 번호 -> 승인/거절 매핑 시 '1=Yes' 가정 금지 주의.
@@ -113,17 +104,13 @@
   2) 해소 상태값 표준화 및 검증: `resolve_escalation`의 `RESOLVED` vs `CANCELLED` 처리 경로 일관성 점검 및 `approver="pane-direct"` 다운스트림 정상 연동 확인.
   3) 명령 일치성(Command-Match) 검사 추가: `pane_id` 단독 키 매칭 외에 `raw_command` 동일성 확인을 추가하여, 다이얼로그 내용이 다른 미승인 명령으로 교체된 경우의 오퇴출 방지.
 
-[] [Task/Dependency] semgrep 필수 디펜던시(Required Dependency) 체계적 관리 및 자동화 방안 수립:
-  - Context & Objective:
-    • semgrep은 SmartGate의 SAST Pre-Filter 및 Fail-Closed 보안의 핵심 축이나, 현재 호스트 수동 설치에 의존하고 있어 환경 간 드리프트(Drift) 발생 위험이 있음.
-  - Recommended Solutions & Multi-Layer Management:
-    1) [Python venv 디펜던시 선언 (pyproject.toml)]:
-       - `semgrep`은 PyPI 표준 배포 패키지(`semgrep>=1.70.0`)이므로, `pyproject.toml` 및 `requirements.txt`에 명시적 의존성으로 추가.
-       - TUI venv(`~/.local/share/herdr-schengen-tui-venv/`) 생성/동기화 시 `semgrep` CLI 바이너리가 venv `bin/`에 자동 설치·동기화되도록 보장.
-    2) [Host Runtime Gate 강제 (Startup Pre-Flight Check)]:
-       - `verify_host_runtime_environment()`에서 `semgrep` 탐색 실패 시 무조건 fail-closed 및 명확한 액션 가이드(`pip install semgrep` 또는 `brew install semgrep`) 안내.
-    3) [CI / Forgejo Runner 및 Dotfiles 연동]:
-       - `.forgejo/workflows/` CI 테스트 환경 및 배포 스크립트에 semgrep 설치 스텝 공식화.
+[x] [Task/Dependency] semgrep 필수 디펜던시(Required Dependency) 체계적 관리 및 자동화 완결 (PR #174 완료, e61187f + 7abf941):
+  - 완료 내역:
+    1) `pyproject.toml`에 `semgrep>=1.70.0` 명시적 필수 디펜던시 선언.
+    2) `scripts/core/security_evaluator.py`: Host Runtime Gate에서 semgrep 부재 시 fail-closed hard-fail(`INV-2`) 및 설치 가이드 안내.
+    3) `.forgejo/workflows/` CI 테스트 환경에 semgrep 설치 단계 공식화.
+    4) 단위테스트 환경 독립성 확보: `test_opencode_plugin_gating` mock 보강 (총 630 tests OK).
+
 
 [x] [Refactor/SAST] `_inject_runtime_path()` 및 Host Runtime Gate 안정화 4종 (#45 피어리뷰 후속, PR #171 완료):
   1) `_inject_runtime_path()` 선행순서 버그 수정: `parts.insert(0, d)` 반복으로 `~/.local/bin`이 최우선순위가 되어 Homebrew 바이너리를 섀도잉(shadow)할 위험 해소 (reverse iteration 또는 시스템/Homebrew 우선순위 보존).
@@ -293,17 +280,16 @@
         - 원격/로컬 컨테이너(Synology Docker / 로컬 서비스) 자동 재시작 스크립트/Webhook 연계 가능성 검토.
         - LLM 서버 다운 시 무한 대기 방지 및 안전한 Fail-Closed 에스컬레이션 보장.
 
-[] [Task/UX] TUI 토글/설정 옵션 전용 윈도우(Settings Modal) 분리 및 첫 화면(Main/Sidebar) 핵심 상태 직관화
-   - Context & Feedback:
-     - 기능 확장(Guard 토글, Controller/Observer 모드, 승인/거절 지침 토글, 다국어 선택, Approval Bias, Fast-Track 모드 등)에 따라 메인 TUI 화면에 토글 버튼이 과도하게 증식하여 화면이 복잡해지는 문제 해소.
-     - **사용자 핵심 피드백**:
-       1) **첫 화면 상시 노출**: 가장 자주 확인하고 조작하는 `Guard daemon (ACTIVE/INACTIVE)` 및 `Mode (Controller/Observer)` 2개만 첫 화면(상단 헤더 또는 우측 사이드바 최상단)에 간결하게 상시 노출.
-       2) **첫 화면에서 제거 (Settings 모달로 격리)**: 현재 첫 화면과 Settings에 중복 노출되고 있는 `Instruction Delivery (지침 주입 토글)` 및 `Answer Language (다국어 선택 버튼그룹)`는 **첫 화면에서 완전히 제거**하고 전용 Settings 모달 내부로만 일원화하여 메인 뷰포트의 시각적 노이즈 최소화.
-   - Solution & Architecture:
-     1. 첫 화면(Main Header / Sidebar Top): `Guard Daemon` 및 `Leader Mode` 2대 핵심 상태만 노출.
-     2. 전용 설정 모달(SettingsModal):
-        - 진입 방법: 단축키 `^s` (Settings), `F2`, 설정 버튼 클릭, 또는 Slash Command `/config`, `/settings`
-        - 모달 내부로 격리/일원화: Instruction Delivery(승인/거절 지침), Answer Language(KO/EN/JA), Approval Bias, Fast-Track 모드.
+[x] [Task/UX] TUI 토글/설정 옵션 전용 윈도우(Settings Modal) 분리 및 첫 화면(Main/Sidebar) 핵심 상태 직관화 (PR #173 완료, 91bb4d2):
+   - 완료 내역:
+     1) 첫 화면 정리: `Guard Daemon` 및 `Leader Mode` 핵심 2개만 노출하여 메인 뷰포트 시각적 노이즈 최소화.
+     2) `SettingsModal` 분리: `Instruction Delivery`, `Answer Language`, `Channel Approve` 이전 및 `Automation` 그룹(Batch, Origin Weighting, Pane-Direct) 토글 신설.
+     3) 진입 경로: `^s` 단축키, `[⚙ Settings]` 버튼, `/settings`, `/config` 슬래시 커맨드.
+   - 주의/후속: `Approval Bias` 및 `Fast-Track Mode`는 `guard_config` 키 부재로 1차 미포함 ➔ 아래 후속 백로그로 관리.
+
+[] [Deferred/TUI] `SettingsModal` 내 `Approval Bias` 및 `Fast-Track Mode` 설정 토글 연동:
+   - Context: `guard_config` 테이블 내 bias/fast-track 전용 키 선행 정의 후 `SettingsModal` 라디오/스위치 연동.
+
 
 
 [x] [Task/UX] 에스컬레이션 배너/메시지 타이밍 및 상태 전이 명확화: Phase-1 In-flight IPC & Phase 2b 인간 개입 gating 완결 (PR #161 & PR #167 완료, INV-PH1-1..6 / INV-HR-1..6):
