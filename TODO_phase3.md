@@ -290,12 +290,15 @@
         - 모달 내부로 격리/일원화: Instruction Delivery(승인/거절 지침), Answer Language(KO/EN/JA), Approval Bias, Fast-Track 모드.
 
 
-[x] [Task/UX] 에스컬레이션 배너/메시지 타이밍 및 상태 전이 명확화: Phase-1 In-flight IPC 기반 조사 중 vs 인간 개입 필수 색상·시각적 분리 (PR #161 완료, INV-PH1-1..6):
-   - 해결:
-     1) **Phase-1 in-flight IPC**: inspector 평가 진행 중(escalation 전) 상태를 JSON 상태파일(`in_flight_state.json`, 단일 writer 원자적 쓰기 + STALE_TTL 30s)로 TUI에 노출.
-     2) **2단계 Phase 구분**: `🔍 Inspector: checking`(dim, 결정론적 AST ms 단위) vs `🤖 Gatekeeper: judging`(dim magenta, LLM/cloud-judge 초 단위) 시각 분리.
-     3) **인간 개입 필수 시각화**: PENDING(인간 개입 필수 확정)일 때만 `🚨 Human Action Required`(bold red) 배너 노출하여 #3363 인지 혼선 완벽 해소.
-     4) **불변식 & 테스트**: INV-PH1-1..6 불변식 확립, 단위테스트 14종 추가 (총 560 OK).
+[x] [Task/UX] 에스컬레이션 배너/메시지 타이밍 및 상태 전이 명확화: Phase-1 In-flight IPC & Phase 2b 인간 개입 gating 완결 (PR #161 & PR #167 완료, INV-PH1-1..6 / INV-HR-1..6):
+   - 해결 (PR #161 & PR #167):
+     1) **Phase-1 in-flight IPC**: inspector 평가 진행 중(escalation 전) 상태를 JSON 상태파일(`in_flight_state.json`, 단일 writer 원자적 쓰기 + STALE_TTL 30s)로 TUI에 노출 (PR #161).
+     2) **2단계 Phase 구분**: `🔍 Inspector: checking`(dim, 결정론적 AST ms 단위) vs `🤖 Gatekeeper: judging`(dim magenta, LLM/cloud-judge 초 단위) 시각 분리 (PR #161).
+     3) **Phase 2b 인간 개입 확정 시만 카드 노출**: Human Authorization Required 카드가 judge(게이트키퍼 LLM) 조사 완료 후 인간 개입이 정말 필요한 최종 단계에서만 노출되도록 gating (`INV-HR-1/2`, PR #167).
+     4) **시스템 라벨 정돈**: judge 호출 프롬프트가 "You:"가 아닌 "Inspector -> Gatekeeper:" 시스템 라벨로 명확화 (`INV-HR-3`, PR #167).
+     5) **Flat 텍스트 복사성 개선**: Decision card가 command/reason을 손쉽게 copy-paste 가능한 flat 텍스트로 재설계(박스 테두리 제거) (`INV-HR-6`, PR #167).
+     6) **불변식 & 테스트**: INV-PH1-1..6 및 INV-HR-1..6 불변식 확립, 단위테스트 14종 추가 (총 560 OK).
+
 
 
 
