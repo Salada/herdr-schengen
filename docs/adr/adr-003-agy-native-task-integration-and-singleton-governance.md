@@ -1,6 +1,6 @@
 # ADR-003: AGY-Native Task Integration, Single-Session Authority & Conversational Escalation
 
-- **Status**: Accepted
+- **Status**: Evolved (AGY-exclusive wording superseded by ADR-008; daemon lifecycle owned by the TUI per ADR-009 / Issue #114)
 - **Date**: 2026-08-18
 - **Context**: Herdr SmartGate / Schengen Security Architecture
 - **Authors**: `bot-agy-macmini <bot-agy-macmini@noreply.localhost>`

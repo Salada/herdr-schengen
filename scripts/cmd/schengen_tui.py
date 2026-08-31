@@ -164,7 +164,7 @@ def format_approver_badge(approver: Optional[str], decision: str = "") -> str:
 #
 # Presentation-only helpers: every badge is derived from EXISTING stored fields
 # (status, decision_layer, resolution, approver, FIFO position). No new data is
-# invented. See TODO_phase3.md "Pending Queue Status Taxonomy" + "Universal
+# invented. See docs/todo/TODO_phase3.md "Pending Queue Status Taxonomy" + "Universal
 # Deep-Link".
 
 # Deep-link tokens rendered in chat / queue lists. `[#N]` and `[Audit #N]` carry
@@ -1011,7 +1011,7 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
     Every control reads from and writes to the EXISTING guard_config setters
     (instruction delivery, channel approve, answer language) or the existing
     daemon lifecycle toggle. Settings that have no backing config key
-    (Approval Bias, Fast-Track) are intentionally absent — see TODO_phase3.
+    (Approval Bias, Fast-Track) are intentionally absent — see docs/todo/TODO_phase3.md.
     """
 
     CSS = """
@@ -1220,7 +1220,7 @@ def format_status_card_text(
 ) -> str:
     """Render the sidebar System Status card from EXISTING live state.
 
-    Mirrors the phase3 mockup (TODO_phase3.md "Sidebar Status Card Widget").
+    Mirrors the phase3 mockup (docs/todo/TODO_phase3.md "Sidebar Status Card Widget").
     No approval-bias or fast-track keys exist in guard_config, so those rows
     are omitted rather than invented.
     """

@@ -19,7 +19,7 @@ what you do with your fork is entirely up to you.
 
 ## Setup
 
-For a clean local setup, see [Setup from scratch](docs/setup-from-scratch.md).
+For a clean local setup, see [Setup from scratch](docs/guides/setup-from-scratch.md).
 It assumes that Herdr and the coding agent you intend to use are already
 installed.
 

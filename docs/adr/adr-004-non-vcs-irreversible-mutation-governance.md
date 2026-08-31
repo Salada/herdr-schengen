@@ -1,6 +1,6 @@
 # ADR-004: Non-VCS Irreversible Mutation Governance & Filesystem Gray-Zone Dynamic Evaluation
 
-- **Status**: Accepted
+- **Status**: Active
 - **Date**: 2026-08-18
 - **Context**: Herdr SmartGate / Schengen Security Architecture
 - **Authors**: `bot-agy-macmini <bot-agy-macmini@noreply.localhost>`

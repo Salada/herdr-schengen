@@ -14,7 +14,7 @@ welcome.
 
 This is a source-history mirror with one intentional presentation change:
 GitHub renders only the root `README.md`, so the publishing branch uses
-[`README.github.md`](../README.github.md) as its root README. That lets GitHub
+[`README.github.md`](../../README.github.md) as its root README. That lets GitHub
 state the mirror policy without changing the canonical Forgejo README.
 
 An exact `git push --mirror` cannot make `README.github.md` the GitHub landing

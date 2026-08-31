@@ -1,7 +1,7 @@
 # ADR-012: High-Contrast Text Selection Visibility in the TUI
 
 ## Status
-**Accepted**
+**Active**
 
 ## Context
 

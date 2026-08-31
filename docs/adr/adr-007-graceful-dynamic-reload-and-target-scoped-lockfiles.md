@@ -1,6 +1,6 @@
 # ADR-007: Graceful Dynamic Reload (SIGHUP) & Target-Scoped Lockfile Architecture
 
-- **Status**: Accepted
+- **Status**: Active
 - **Date**: 2026-08-21
 - **Deciders**: Antigravity/AGY (Orchestrator), Hermes (Reviewer), Human Engineer (SaladaQoo)
 - **Consulted**: Herdr Schengen Core Team
@@ -65,4 +65,4 @@ In a multi-agent Herdr multiplexer environment, multiple AGY agent sessions oper
 - [ADR-003: AGY Native Task Integration & Singleton Governance](./adr-003-agy-native-task-integration-and-singleton-governance.md)
 - [ADR-004: Non-VCS Irreversible Mutation Governance](./adr-004-non-vcs-irreversible-mutation-governance.md)
 - [ADR-006: Destructive Intent Taxonomy & Hybrid SAST Pre-Execution Gate](./adr-006-destructive-intent-taxonomy-and-sast-pre-execution-gate.md)
-- [Herdr Schengen SKILL.md](../SKILL.md)
+- [Herdr Schengen SKILL.md](../../SKILL.md)

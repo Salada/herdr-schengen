@@ -1,7 +1,7 @@
 # ADR-011: Default LLM Provider — OpenAI (GPT) with DeepSeek Removal from Defaults
 
 ## Status
-**Accepted**
+**Active**
 
 ## Context
 

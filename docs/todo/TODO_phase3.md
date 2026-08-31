@@ -31,7 +31,7 @@
     1) 디렉터리 재배치: `docs/adr/`, `docs/guides/`, `docs/todo/`, `docs/issues/` (또는 `docs/misc/`), `docs/archive/` 생성.
        - **TODO 및 이슈 문서의 `docs/` 내부 완전 이관**: `TODO.md` -> `docs/todo/TODO_phase1.md`, `TODO_phase2.md` -> `docs/todo/TODO_phase2.md`, `TODO_phase3.md` -> `docs/todo/TODO_phase3.md`, `bloat_message_opencode.md` -> `docs/issues/` (루트 클린 유지).
        - 모든 `docs/adr-*.md` -> `docs/adr/` 이동.
-       - `docs/setup*.md`, `github-mirror.md`, `json_data_beautify.md` -> `docs/guides/` 이동.
+       - `docs/setup*.md`, `github-mirror.md` -> `docs/guides/` 이동, `json_data_beautify.md` -> `docs/archive/` 이동.
        - 과거 세션 기록물(`BENCHMARK_SLM_CHOICE.md`, `diary.md`, `handoff-*.md`) -> `docs/archive/` 이동.
     2) `README.md` 다이어트, 라이선스/미러링 정책 & 보조도구 분리:
        - `Project Maintenance`: 레거시 서술을 쳐내고, 에이전트 필수 불변식만 추출하여 `AGENTS.md`로 이전.

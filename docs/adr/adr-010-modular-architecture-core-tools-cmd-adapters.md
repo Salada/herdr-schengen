@@ -1,7 +1,7 @@
 # ADR-010: Modular Architecture — Core, Tools, Cmd, and Adapters Separation
 
 ## Status
-**Accepted**
+**Active**
 
 ## Context
 Previously, all Python scripts in `herdr-schengen` resided directly in a flat `scripts/` directory. As the system expanded to include AST evaluators, SQLite backlogs, Textual TUI dashboards, Claude/DeepSeek dual-model chains, and terminal multiplexer adapters, maintaining all files in a single flat namespace compromised modularity, code organization, and architectural clarity.
