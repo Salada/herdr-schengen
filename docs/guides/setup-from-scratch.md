@@ -6,12 +6,14 @@ this checkout to live in a dotfiles directory.
 
 ## 1. Clone and prepare Python
 
-Choose any local directory, then record the absolute checkout path for the
+Choose any local directory (e.g. `~/.local/src/herdr-schengen` following
+standard Unix/XDG practices), then record the absolute checkout path for the
 commands below.
 
 ```bash
-git clone <repository-url> "$HOME/src/herdr-schengen"
-cd "$HOME/src/herdr-schengen"
+mkdir -p ~/.local/src
+git clone <repository-url> ~/.local/src/herdr-schengen
+cd ~/.local/src/herdr-schengen
 export SCHENGEN_HOME="$(pwd -P)"
 
 python3 -m venv "$SCHENGEN_HOME/.venv"
