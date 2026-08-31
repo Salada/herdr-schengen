@@ -40,17 +40,18 @@
       2) `schengen_tui.py`: `pre-render slot validation`에서 `is_question` 예외를 제거하고, `adapter.dialog_is_live(pane_text) == False`일 때 즉시 큐에서 자동 퇴출(Silent Eviction)하여 상단 배너 고착 해소.
 
 
-[] [Bug/OpenCode] OpenCode 장문 커밋/Heredoc 승인 시 뷰포트 절단으로 인한 `_norm_req_cmd` 불일치 및 키 주입 실패 (사례: #3143):
-  - 현상 및 원인 (사례: Escalation #3143 OpenCode `w1D:p1` Git 커밋 명령):
-    • Gatekeeper LLM이 타당성 검토 후 `APPROVE` 판정을 내렸고 DB 상에는 `status='RESOLVED', resolution='APPROVED', approver='gatekeeper'`로 기록되었으나, 실제 OpenCode 터미널은 `Permission required` 모달 상태로 계속 멈춰 있어 승인이 해소되지 않는 현상 발생.
-    • 근본 원인:
-      1) `opencode.py`의 `inject_approval`은 키 주입 직전 TOCTOU 안전을 위해 `_norm_req_cmd(live_req) == _norm_req_cmd(req_cmd)`를 검증함.
-      2) 에스컬레이션 원문 `req_cmd`는 다줄 Heredoc 전체(~800자)를 포함하지만, OpenCode TUI 뷰포트에서는 화면 크기 한계로 커밋 본문 중간이 잘린 채 렌더링되어 `live_req`가 절단된 문자열로 추출됨.
-      3) 이로 인해 `_norm_req_cmd` 비교가 실패하여 `inject_approval`이 `(False, INJECT_SKIP_CHANGED)`를 반환하고 실제 `enter` 키를 전송하지 못함.
+[] [Bug/OpenCode] OpenCode 승인 시 `_norm_req_cmd` 불일치(뷰포트 절단 및 access_directory 경로 차이)로 인한 키 주입 실패 & DB 상태 불일치 (사례: #3143, #3219):
+  - 현상 및 원인 (사례: Escalation #3143 Git 커밋 & Escalation #3219 `access_directory`):
+    • Gatekeeper LLM이 승인(`APPROVE`)하여 DB 상에는 `status='RESOLVED', resolution='APPROVED', approver='gatekeeper'`로 기록되었으나, 실제 OpenCode 터미널은 `Permission required` 모달 상태로 계속 멈춰 있어 승인이 해소되지 않는 현상 반복 발생.
+    • 근본 원인 (2가지 불일치 유형):
+      1) **사례 #3143 (장문 커밋 절단)**: 원문 `req_cmd`는 다줄 Heredoc 전체(~800자)이나, 터미널 뷰포트에서는 화면 크기 한계로 커밋 본문 중간이 잘린 채 렌더링되어 `live_req`가 절단된 문자열로 추출됨.
+      2) **사례 #3219 (구조화 이벤트 vs 시각 다이얼로그 경로 표현 차이)**: 구조화 채널 `req_cmd`는 파일 절대경로(`/path/to/scripts/cmd/schengen_tui.py`)인 반면, 터미널 화면상 `live_req`는 상위 디렉터리(`~/code/.../scripts/cmd` 또는 glob `.../scripts/cmd/*`)로 렌더링되어 문자열 불일치 발생.
+      3) **결과**: `_norm_req_cmd` 비교 실패로 `inject_approval`이 `(False, INJECT_SKIP_CHANGED)`를 반환하고 실제 `enter` 키를 전송하지 못함. 그럼에도 상위 승인 로직은 DB를 `RESOLVED`로 전이시켜 심각한 상태 불일치 초래.
   - 해결 방안:
-    1) Prefix/포괄 매칭 허용: `live_req`가 `req_cmd`의 선행 Prefix와 일치하고 다이얼로그 헤더/옵션이 유효하면 동일 명령으로 인정.
+    1) Prefix 및 상위/하위 경로 포괄 매칭: `live_req`가 `req_cmd`의 Prefix이거나, `access_directory`의 경우 파일 경로의 상위 디렉터리와 매칭 시 동일 요청으로 인정.
     2) `ctrl+f` 풀스크린 전개 연동 (PR #152 `expand_dialog` 활용): 절단 의심 시 `ctrl+f`로 전개 후 재비교.
-    3) 주입 실패 시 DB 상태 불일치 방어 (`INV-INJ-1`): 키 주입이 실패했을 때는 `RESOLVED`로 성급히 전이되지 않도록 방어.
+    3) 키 주입 실패 시 DB 상태 불일치 방어 (`INV-INJ-1`): 키 주입이 `False`를 반환했을 때는 DB를 `RESOLVED`로 전이시키지 않고 에러/재시도로 처리.
+
 
 [] [Idea/Architecture] Question 분리 처리: 커맨드 에스컬레이션 큐 비차단(Non-blocking) & 사이드바/힌트 버튼 기반 Pane 점프 분리
 
