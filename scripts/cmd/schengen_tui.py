@@ -233,7 +233,7 @@ def _truncate_cells(text: str, max_cells: int) -> str:
 
 
 def format_decision_card(esc: dict, width: int = 74) -> Text:
-    """Render the boxed "Commander Authorization Required" decision card.
+    """Render the boxed "Human Authorization Required" decision card.
 
     Mirrors the phase3 mockup (TODO_phase3.md "Main Chat Area: Decision
     Card"): a frame with header, target/command/reason body, and the
@@ -278,7 +278,7 @@ def format_decision_card(esc: dict, width: int = 74) -> Text:
     card.append("\n")
 
     # ── Header ──
-    header = f"🚨 [ESCALATION #{esc_id}] Commander Authorization Required"
+    header = f"🚨 [ESCALATION #{esc_id}] Human Authorization Required"
     box_line(_truncate_cells(header, box_inner), [(0, len(header), "bold red")])
 
     # ── Body: target / command / 1-line reason (from decision_layer) ──
@@ -318,7 +318,7 @@ def format_decision_card(esc: dict, width: int = 74) -> Text:
 
     action("[✔ Approve]", f"/approve {esc_id}", "bold green")
     action("[✖ Reject]", f"/reject {esc_id} [reason]", "bold red")
-    action("[🔒 Always Allow]", f"/allow {esc_id}", "bold cyan")
+    action("[🔒 Always Allow]", "/allow-last", "bold cyan")
 
     # ── Bottom frame ──
     card.append("╰" + "─" * frame_inner + "╯\n", style="bold red")
@@ -1597,7 +1597,7 @@ class SchengenTUIApp(App):
                 if self.is_controller:
                     input_widget.disabled = False
                     input_widget.placeholder = (
-                        f"Commander: /approve {active_esc['id']} · /reject {active_esc['id']} [reason] · "
+                        f"/approve {active_esc['id']} · /reject {active_esc['id']} [reason] · "
                         f"/allow-last — or ask Gatekeeper"
                     )
             else:
@@ -1842,11 +1842,11 @@ class SchengenTUIApp(App):
                     except Exception:
                         batch_note = ""
                     banner_text = (
-                        f"[bold red]🚨 ▶ ACTION REQUIRED: Escalation #{active_id} Awaiting Commander Decision[/]\n"
+                        f"[bold red]🚨 ▶ ACTION REQUIRED: Escalation #{active_id} Awaiting Human Decision[/]\n"
                         f"[bold white]Cmd:[/] {rich_escape(alarm_cmd)}\n"
                         f"{batch_note}"
                         f"[bold yellow]Reason:[/] {rich_escape(reason_short)}\n"
-                        f"[dim]   [✔ Approve] /approve {active_id} · [✖ Reject] /reject {active_id} <reason> · [🔒 Always Allow] /allow {active_id}[/]"
+                        f"[dim]   [✔ Approve] /approve {active_id} · [✖ Reject] /reject {active_id} <reason> · [🔒 Always Allow] /allow-last[/]"
                     )
                 _update_static_if_changed(banner, banner_text)
                 self._set_action_state_ui(active_esc)

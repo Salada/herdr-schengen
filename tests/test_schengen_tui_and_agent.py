@@ -1123,13 +1123,13 @@ class TestTUIActionRequiredPanel(unittest.TestCase):
         plain = card.plain
         self.assertIn("ACTION REQUIRED", plain)
         self.assertIn("[#7494]", plain)  # deep-link token in the frame
-        self.assertIn("Commander Authorization Required", plain)
+        self.assertIn("Human Authorization Required", plain)
         self.assertIn("w1D:p1 (opencode)", plain)
         self.assertIn("git show --stat HEAD | head -12", plain)
         self.assertIn("FAIL_CLOSED", plain)
         self.assertIn("/approve 7494", plain)
         self.assertIn("/reject 7494 [reason]", plain)
-        self.assertIn("/allow 7494", plain)
+        self.assertIn("/allow-last", plain)
         # every rendered line is exactly `width` terminal cells
         self.assertEqual(len({cell_len(l) for l in plain.splitlines()}), 1)
         self.assertEqual(cell_len(plain.splitlines()[0]), 70)
@@ -1156,8 +1156,8 @@ class TestTUIActionRequiredPanel(unittest.TestCase):
         from cmd.schengen_tui import _chat_plain_text
 
         plain = _chat_plain_text(
-            "[bold red]🚨 ▶ ACTION REQUIRED: Escalation [#7494] Awaiting Commander Decision[/]\n"
-            "[dim]   [✔ Approve] /approve 7494 · [✖ Reject] /reject 7494 [reason] · [🔒 Always Allow] /allow 7494[/]\n"
+            "[bold red]🚨 ▶ ACTION REQUIRED: Escalation [#7494] Awaiting Human Decision[/]\n"
+            "[dim]   [✔ Approve] /approve 7494 · [✖ Reject] /reject 7494 [reason] · [🔒 Always Allow] /allow-last[/]\n"
             "╭── [ESCALATION #7494] ──╮"
         )
         self.assertIn("[#7494]", plain)
