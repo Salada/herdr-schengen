@@ -240,30 +240,78 @@ def _pad_cells(text: str, target: int) -> str:
     return text + " " * max(0, target - cell_len(text))
 
 
-def _truncate_cells(text: str, max_cells: int) -> str:
-    """Truncate ``text`` so it renders within ``max_cells`` terminal cells."""
-    if cell_len(text) <= max_cells:
-        return text
-    out = ""
-    used = 0
-    for ch in text:
-        w = cell_len(ch)
-        if used + w > max_cells - 1:
-            break
-        out += ch
-        used += w
-    return out + "…"
+def _wrap_flat_lines(text: str, max_cells: int, label: str) -> List[str]:
+    """Word-wrap ``text`` into lines that fit within ``max_cells`` terminal cells.
+
+    ``label`` (a fixed-width prefix column such as ``💻 Command:  ``) is
+    prepended to the FIRST line only. Continuation lines carry the PURE
+    original text — no indentation, no added padding — so the command and
+    reason select and copy as-is (INV-HR-6). Original newlines in ``text``
+    are preserved as hard line breaks. Long unbreakable tokens are hard-split
+    on cell boundaries. Nothing is truncated.
+    """
+    avail = max(8, max_cells - cell_len(label))
+    out: List[str] = []
+
+    def _wrap_segment(seg: str) -> List[str]:
+        lines: List[str] = []
+        cur = ""
+        cur_cells = 0
+
+        def flush() -> None:
+            nonlocal cur, cur_cells
+            if cur:
+                lines.append(cur)
+                cur, cur_cells = "", 0
+
+        for word in seg.split(" "):
+            w = cell_len(word)
+            if cur and cur_cells + 1 + w <= avail:
+                cur += " " + word
+                cur_cells += 1 + w
+                continue
+            if w <= avail:
+                flush()
+                cur, cur_cells = word, w
+                continue
+            # unbreakable token longer than one line: hard-split on cells
+            flush()
+            remaining = word
+            while cell_len(remaining) > avail:
+                chunk = ""
+                used = 0
+                for ch in remaining:
+                    cw = cell_len(ch)
+                    if used + cw > avail:
+                        break
+                    chunk += ch
+                    used += cw
+                lines.append(chunk)
+                remaining = remaining[len(chunk):]
+            cur, cur_cells = remaining, cell_len(remaining)
+        flush()
+        return lines
+
+    for i, seg in enumerate(text.split("\n")):
+        seg_lines = _wrap_segment(seg)
+        for j, ln in enumerate(seg_lines):
+            if i == 0 and j == 0:
+                out.append(label + ln)
+            else:
+                out.append(ln)
+    return out
 
 
 def format_decision_card(esc: dict, width: int = 74) -> Text:
-    """Render the boxed "Human Authorization Required" decision card.
+    """Render the "Human Authorization Required" decision card.
 
-    Mirrors the phase3 mockup (TODO_phase3.md "Main Chat Area: Decision
-    Card"): a frame with header, target/command/reason body, and the
-    approve / reject / always-allow action bar. Presentation-only — every
-    field comes from the existing escalation row, and the ``[#<id>]`` frame
-    token doubles as a deep-link (hit-tested by
-    ``FocusableRichLog._link_target_at``, which scans rendered text).
+    Only the header badge is framed. The target / command / reason / action
+    lines below the frame are FLAT text — no ``│`` box borders and no added
+    padding — so the full command and full reason can be selected and copied
+    as original text (INV-HR-6). Body lines word-wrap to the card width and
+    are never truncated. The ``[#<id>]`` frame token stays in the top frame
+    line, where it remains a deep-link (hit-tested by
+    ``FocusableRichLog._link_target_at`` on the rendered text).
     """
     width = max(52, int(width))
     frame_inner = width - 2   # between ╭…╮ / ├…┤ / ╰…╯
@@ -272,9 +320,11 @@ def format_decision_card(esc: dict, width: int = 74) -> Text:
     esc_token = f"[#{esc_id}]"
     pane = str(esc.get("pane_id") or "?")
     agent = str(esc.get("agent_kind") or "agent")
-    cmd = " ".join(str(esc.get("raw_command") or "").split())
+    # Preserve the original whitespace of the command/reason (only outer trim);
+    # the raw text must copy-paste faithfully (INV-HR-6).
+    cmd = str(esc.get("raw_command") or "").strip()
     layer = str(esc.get("decision_layer") or "UNKNOWN")
-    reason = " ".join(str(esc.get("safety_reason") or "").split())
+    reason = str(esc.get("safety_reason") or "").strip()
     if not reason:
         reason = f"Deferred to human review ({layer})."
 
@@ -291,6 +341,8 @@ def format_decision_card(esc: dict, width: int = 74) -> Text:
                 card.stylize(style, base + s, base + e)
 
     # ── Top frame: ╭── 🚨 ACTION REQUIRED ── Escalation [#id]────╮
+    #    The [#id] deep-link token lives in this frame line (MUST stay in the
+    #    rendered text for FocusableRichLog._link_target_at hit-testing).
     prefix = "── 🚨 ACTION REQUIRED ── Escalation "
     suffix = "──"
     filler = max(1, frame_inner - cell_len(prefix + esc_token + suffix))
@@ -300,44 +352,45 @@ def format_decision_card(esc: dict, width: int = 74) -> Text:
     card.stylize("bold underline cyan", tok_start, tok_start + len(esc_token))
     card.append("\n")
 
-    # ── Header ──
+    # ── Header badge (framed) ──
     header = f"🚨 [ESCALATION #{esc_id}] Human Authorization Required"
-    box_line(_truncate_cells(header, box_inner), [(0, len(header), "bold red")])
-
-    # ── Body: target / command / 1-line reason (from decision_layer) ──
-    def field(icon: str, name: str, value: str) -> str:
-        return f"{icon} {name:<9}: {value}"
-
-    target = field("🌐", "Target", f"{pane} ({agent})")
-    box_line(target, [(0, cell_len("🌐 Target"), "bold"),
-                      (cell_len("🌐 Target   : "), len(target), "bold white")])
-
-    cmd_label = field("💻", "Command", "")
-    max_cmd = box_inner - cell_len(cmd_label)
-    cmd_plain = _truncate_cells(cmd, max_cmd)
-    cmd_line = cmd_label + cmd_plain
-    box_line(cmd_line, [(0, cell_len("💻 Command"), "bold"),
-                        (len(cmd_label), len(cmd_line), "white")])
-
-    reason_label = field("⚠️", "Reason", "")
-    max_reason = box_inner - cell_len(reason_label)
-    reason_plain = _truncate_cells(f"{layer} — {reason}", max_reason)
-    reason_line = reason_label + reason_plain
-    box_line(reason_line, [(0, cell_len("⚠️ Reason"), "bold"),
-                           (len(reason_label), len(reason_line), "yellow")])
+    for ln in _wrap_flat_lines(header, box_inner, ""):
+        box_line(ln, [(0, len(ln), "bold red")])
 
     # ── Separator ──
     card.append("├" + "─" * frame_inner + "┤\n", style="dim")
 
-    # ── Action bar ──
-    action_header = "👉 MANDATORY ACTION (type to execute):"
-    box_line(action_header, [(0, len(action_header), "bold yellow")])
+    # ── Flat body: target / command / reason — copy-paste-able (INV-HR-6) ──
+    def flat_field(icon: str, name: str, value: str, value_style: str = "white") -> None:
+        label = f"{icon} {name:<9}: "
+        lines = _wrap_flat_lines(value, width, label)
+        for i, ln in enumerate(lines):
+            start = len(card.plain)
+            card.append(ln + "\n")
+            if i == 0:
+                card.stylize("bold", start, start + cell_len(label))
+                card.stylize(value_style, start + cell_len(label), start + len(ln))
+            else:
+                # continuation lines are pure text; dim styling only (copy
+                # output is unaffected — the characters are unchanged)
+                card.stylize("dim", start, start + len(ln))
+
+    flat_field("🌐", "Target", f"{pane} ({agent})", "bold white")
+    flat_field("💻", "Command", cmd, "white")
+    flat_field("⚠️", "Reason", f"{layer} — {reason}", "yellow")
+
+    # ── Flat action bar (copy-paste-able) ──
+    start = len(card.plain)
+    card.append("👉 MANDATORY ACTION (type to execute):\n")
+    card.stylize("bold yellow", start, start + len("👉 MANDATORY ACTION (type to execute):"))
 
     def action(label: str, value: str, label_style: str) -> None:
         padded = _pad_cells(label, 17)
-        line = "   " + padded + ": " + value
-        box_line(line, [(0, len("   " + padded), label_style),
-                        (len("   " + padded + ": "), len(line), "white")])
+        line = padded + " : " + value
+        start = len(card.plain)
+        card.append(line + "\n")
+        card.stylize(label_style, start, start + cell_len(label))
+        card.stylize("white", start + cell_len(padded) + 3, start + len(line))
 
     action("[✔ Approve]", f"/approve {esc_id}", "bold green")
     action("[✖ Reject]", f"/reject {esc_id} [reason]", "bold red")
@@ -1604,6 +1657,15 @@ class SchengenTUIApp(App):
         self._chat_plain: List[str] = []  # Plain-text buffer for clipboard copy
         self._last_escalation_hash = ""
         self._notified_escalation_ids: Set[int] = set()
+        # INV-HR-1: id of the escalation whose TUI-local judge round-trip is
+        # in flight. While it equals the active escalation id, the red
+        # "Human Authorization Required" card is suppressed (Phase 2a
+        # "Gatekeeper Checking…"); it renders only at Phase 2b (judge
+        # finished AND the escalation is still PENDING).
+        self._judging_escalation_id: Optional[int] = None
+        # Escalation ids that already rendered the Phase-2b decision card
+        # (written exactly once, when judging completes).
+        self._decision_card_written: Set[int] = set()
         # Pane-direct pre-render eviction (INV-PD-4/5): escalation_id ->
         # CONSECUTIVE not-live renders. Eviction requires confirm_polls
         # consecutive not-live reads AND a non-blocked pane status — a single
@@ -1649,6 +1711,9 @@ class SchengenTUIApp(App):
         if hasattr(self, "agent") and self.agent:
             self.agent.cancel()
         self._processing_chat = False
+        # The judge round-trip is over: the escalation (if still PENDING)
+        # falls back to the Phase-2b red path (fail-safe).
+        self._judging_escalation_id = None
         self._write(f"\n[bold red]🛑 [Aborted]:[/] In-flight LLM call interrupted ({reason}).\n")
         self.update_radar_data(force=True)
 
@@ -2127,51 +2192,10 @@ class SchengenTUIApp(App):
 
                 reason_short = active_esc['safety_reason'][:72]
 
-                # Radar side state card (live, while human intervention is due)
-                _update_static_if_changed(
-                    action_card,
-                    f"[bold red]🚨 Action Required[/]\n"
-                    f"[dim]Blocked Pane :[/] [bold white]{active_esc['pane_id']}[/] [dim]({active_esc.get('agent_kind','agent')})[/]\n"
-                    f"[dim]Awaiting     :[/] [bold yellow]👤 HUMAN INTERVENTION REQUIRED[/]",
-                )
-                action_card.display = True
-
-                if is_question:
-                    banner_text = (
-                        f"[bold cyan]❓ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
-                        f"[bold white]{rich_escape(cmd_display)}[/]\n"
-                        f"[dim]   ↩ Answer this question directly in the pane — resolves automatically.[/]"
-                    )
-                else:
-                    # M7 anti-fatigue (INV-13): when the FIFO head group aggregates
-                    # >1 identical (decision_layer, canonical_pattern) rows, surface a
-                    # batch line with one-key /approve-batch | /reject-batch actions.
-                    batch_note = ""
-                    try:
-                        batch_cfg = get_batch_approval_config()
-                        if batch_cfg.get("batch_approval_enabled", True):
-                            groups = group_pending_escalations(get_pending_escalations())
-                            head = groups[0] if groups else None
-                            if head and head["count"] > 1 and head["items"][0]["id"] == active_id:
-                                batch_note = (
-                                    f"[bold magenta]⚠ {head['count']} similar commands — pattern:[/] "
-                                    f"[white]{rich_escape(head['canonical_pattern'][:60])}[/] "
-                                    f"[dim](layer: {head['decision_layer']})[/]\n"
-                                    f"[dim]   [/][bold magenta]/approve-batch[/] [dim]or[/] [bold magenta]/reject-batch[/] [dim]for one-key resolution[/]\n"
-                                )
-                    except Exception:
-                        batch_note = ""
-                    banner_text = (
-                        f"[bold red]🚨 ▶ ACTION REQUIRED: Escalation #{active_id} Awaiting Human Decision[/]\n"
-                        f"[bold white]Cmd:[/] {rich_escape(alarm_cmd)}\n"
-                        f"{batch_note}"
-                        f"[bold yellow]Reason:[/] {rich_escape(reason_short)}\n"
-                        f"[dim]   [✔ Approve] /approve {active_id} · [✖ Reject] /reject {active_id} <reason> · [🔒 Always Allow] /allow-last[/]"
-                    )
-                _update_static_if_changed(banner, banner_text)
-                self._set_action_state_ui(active_esc)
-
-                # STRICT SEQUENTIAL FIFO: Only CONTROLLER awakens/delivers chat for active escalation
+                # ── STRICT SEQUENTIAL FIFO first-sight notification (INV-HR-4):
+                #    runs ONCE, BEFORE any red presentation, so the judge is
+                #    invoked on the first tick and the escalation is marked as
+                #    under review (INV-HR-1) before the banner renders.
                 if self.is_controller and active_id not in self._notified_escalation_ids and not self._processing_chat:
                     self._notified_escalation_ids.add(active_id)
                     self._last_active_id = active_id
@@ -2194,9 +2218,8 @@ class SchengenTUIApp(App):
                     except Exception:
                         self.bell()
 
-                    safe_cmd = rich_escape(active_esc['raw_command'])
-
                     if is_question:
+                        safe_cmd = rich_escape(active_esc['raw_command'])
                         self._write(f"\n[cyan]{'─'*20} ❓ Question [#{active_id}] {'─'*20}[/]")
                         self._write(f"  [dim]Pane:[/]     {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})")
                         self._write(f"  [dim]Question:[/] [white]{safe_cmd}[/]")
@@ -2206,9 +2229,90 @@ class SchengenTUIApp(App):
                         # the gatekeeper any ability to adjudicate (AGENTS.md rule 10).
                         self._interpret_question()
                     else:
-                        # Phase 2 decision card: the escalation is ALWAYS awaiting
-                        # human authorization here (PENDING/DELIVERED); in-flight
-                        # inspection is never persisted and is not presented.
+                        # INV-HR-1: mark the escalation as under judge review.
+                        # The red "Human Authorization Required" card is NOT
+                        # written yet — it renders only at Phase 2b (judge
+                        # finished AND the escalation is still PENDING). The
+                        # first-sight notice shows the checking state instead.
+                        self._judging_escalation_id = active_id
+                        self._write("\n[bold cyan]🔍 Gatekeeper Checking…[/]")
+                        self._write(f"  [dim]Escalation [#{active_id}] · {active_esc['pane_id']} ({active_esc.get('agent_kind','agent')})[/]")
+                        self._write("[dim]  Judge LLM evaluating command safety — you will be prompted only if human review is required.[/]\n")
+                        self.process_user_chat(
+                            "New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.",
+                            author="inspector",
+                        )
+
+                # ── INV-HR-1/INV-HR-2 phase gate: while the judge investigates
+                #    this escalation, render the checking state — never the red
+                #    "Human Authorization Required" card.
+                is_judging = (
+                    not is_question
+                    and self.is_controller
+                    and self._judging_escalation_id == active_id
+                )
+                if is_judging:
+                    _update_static_if_changed(
+                        banner,
+                        f"\n[bold cyan]🔍 Gatekeeper Checking…[/]\n"
+                        f"[dim]   Escalation [#{active_id}] · {active_esc['pane_id']} ({active_esc.get('agent_kind','agent')})[/]\n"
+                        f"[dim]   Judge evaluating command safety — no action required yet.[/]",
+                    )
+                    action_card.display = False
+                    self._set_action_state_ui(None)
+                else:
+                    # ── Phase 2b: judge finished (or no judge) and the
+                    #    escalation is still PENDING — human authorization due.
+                    if is_question:
+                        banner_text = (
+                            f"[bold cyan]❓ #{active_id}[/]  [bold white]{active_esc['pane_id']}[/]  [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                            f"[bold white]{rich_escape(cmd_display)}[/]\n"
+                            f"[dim]   ↩ Answer this question directly in the pane — resolves automatically.[/]"
+                        )
+                    else:
+                        # M7 anti-fatigue (INV-13): when the FIFO head group aggregates
+                        # >1 identical (decision_layer, canonical_pattern) rows, surface a
+                        # batch line with one-key /approve-batch | /reject-batch actions.
+                        batch_note = ""
+                        try:
+                            batch_cfg = get_batch_approval_config()
+                            if batch_cfg.get("batch_approval_enabled", True):
+                                groups = group_pending_escalations(get_pending_escalations())
+                                head = groups[0] if groups else None
+                                if head and head["count"] > 1 and head["items"][0]["id"] == active_id:
+                                    batch_note = (
+                                        f"[bold magenta]⚠ {head['count']} similar commands — pattern:[/] "
+                                        f"[white]{rich_escape(head['canonical_pattern'][:60])}[/] "
+                                        f"[dim](layer: {head['decision_layer']})[/]\n"
+                                        f"[dim]   [/][bold magenta]/approve-batch[/] [dim]or[/] [bold magenta]/reject-batch[/] [dim]for one-key resolution[/]\n"
+                                    )
+                        except Exception:
+                            batch_note = ""
+                        banner_text = (
+                            f"[bold red]🚨 ▶ ACTION REQUIRED: Escalation #{active_id} Awaiting Human Decision[/]\n"
+                            f"[bold white]Cmd:[/] {rich_escape(alarm_cmd)}\n"
+                            f"{batch_note}"
+                            f"[bold yellow]Reason:[/] {rich_escape(reason_short)}\n"
+                            f"[dim]   [✔ Approve] /approve {active_id} · [✖ Reject] /reject {active_id} <reason> · [🔒 Always Allow] /allow-last[/]"
+                        )
+                    _update_static_if_changed(banner, banner_text)
+                    # Radar side state card (live, while human intervention is due)
+                    _update_static_if_changed(
+                        action_card,
+                        f"[bold red]🚨 Action Required[/]\n"
+                        f"[dim]Blocked Pane :[/] [bold white]{active_esc['pane_id']}[/] [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                        f"[dim]Awaiting     :[/] [bold yellow]👤 HUMAN INTERVENTION REQUIRED[/]",
+                    )
+                    action_card.display = True
+                    self._set_action_state_ui(active_esc)
+
+                    # Phase-2b decision card: written exactly once, only after
+                    # the judge finished and the escalation is still PENDING
+                    # (INV-HR-2) — never while it is being investigated.
+                    if (not is_question
+                            and active_id in self._notified_escalation_ids
+                            and active_id not in self._decision_card_written):
+                        self._decision_card_written.add(active_id)
                         try:
                             chat_log = self.query_one("#chat-log", FocusableRichLog)
                             cw = chat_log.content_region.width
@@ -2217,8 +2321,6 @@ class SchengenTUIApp(App):
                         card_width = max(52, min(78, (cw - 2) if cw else 74))
                         self._write(format_decision_card(active_esc, width=card_width))
                         self._write("\n")
-
-                        self.process_user_chat("New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.")
 
         else:
             action_card.display = False
@@ -2387,14 +2489,22 @@ class SchengenTUIApp(App):
             self._processing_chat = False
 
     @work(exclusive=False)
-    async def process_user_chat(self, user_msg: str) -> None:
+    async def process_user_chat(self, user_msg: str, author: str = "user") -> None:
         trimmed = user_msg.strip()
+        # INV-HR-3: label the message author — real user input renders
+        # "👤 You:", while the inspector's judge invocation renders a system
+        # label so it is not mistaken for a human-typed message.
+        _author_label = (
+            "[bold yellow]👤 You:"
+            if author == "user"
+            else "[bold cyan]🤖 Inspector → Gatekeeper:"
+        )
 
         # 1. Non-blocking Feature Request Command Handling (Queues immediately even if an agent task is in-flight)
         if (trimmed.startswith("/feature-request") or trimmed.startswith("/feature") or 
             trimmed.startswith("/idea") or trimmed.startswith("/features") or trimmed.startswith("/feature-list")):
             safe_user_msg = rich_escape(user_msg)
-            self._write(f"\n[bold yellow]👤 You:[/] {safe_user_msg}")
+            self._write(f"\n{_author_label}[/] {safe_user_msg}")
 
             if trimmed in ("/features", "/feature-list", "/feature --list", "/feature-request --list"):
                 items = list_feature_requests(status="PENDING", limit=10)
@@ -2480,7 +2590,7 @@ class SchengenTUIApp(App):
         self._processing_chat = True
         try:
             safe_user_msg = rich_escape(user_msg)
-            self._write(f"\n{self._timestamp()} [bold yellow]👤 You:[/] {safe_user_msg}")
+            self._write(f"\n{self._timestamp()} {_author_label}[/] {safe_user_msg}")
 
             if user_msg.strip() in ("/start", "/stop", "/toggle"):
                 msg = self.toggle_guard_daemon()
@@ -2635,6 +2745,10 @@ class SchengenTUIApp(App):
                 pass
         finally:
             self._processing_chat = False
+            # INV-HR-1: the judge round-trip for this escalation is complete;
+            # the next radar tick may now render the Phase-2b red card if the
+            # escalation is still PENDING (fail-safe on error paths too).
+            self._judging_escalation_id = None
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         val = event.value.strip()
