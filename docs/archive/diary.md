@@ -59,3 +59,22 @@ Completed the 4-step phased implementation of ADR-006 (9-Layer Hybrid SAST, 2D T
 1. **Permission_id binding**: programmatic approval must be a reply bound to the exact `permission_id` (never a bare `enter`).
 2. **Opt-in gate**: an async, plugin-dependent approve path must default OFF (keystroke injection) and be enabled by an explicit env flag.
 3. **Redirect-aware substitution**: dynamic-substitution file resolution must drop redirection tokens before treating tokens as paths.
+
+---
+
+## 2026-08-31: Phase-Gating / IPC / Copy-Paste-UI Retrospective (PR #161/#167/#168/#169)
+
+### What Went Well
+- **Ephemeral JSON state-file IPC** (`in_flight_state.json`, single-writer + atomic + TTL) let the TUI observe the watcher's transient state with no schema and no DB contention.
+- **Thread-local phase hook** (`set_phase_hook`/`_emit_phase`) labeled inspector-vs-gatekeeper sub-phases with <1µs overhead and no cross-thread stomping.
+- **TUI-local phase gating** (2a "Checking" vs 2b "Human Required") removed the #3363 premature "Human Authorization Required" without a DB column.
+- **Copy-paste-able flat decision card** (no `│` box, no truncation) restored the human adjudication artifact's usability.
+- **Oracle→designer/fixer→reviewer two-round pipeline** bounded each review to a small diff, keeping 560+ tests green throughout.
+
+### Frictions & Mistakes Encountered
+- **Sandbox reviewer unreachable host path**: the reviewer spent a full turn probing `/Users/...` and `/run/host_mark/Users` before confirming the branch wasn't pushed. *Lesson*: verify `git ls-remote --heads origin` + PR existence in one batched call up front; reviews are PR-based, never "uncommitted host diff".
+- **DISPUTED on a stale base**: flagged a stuck-race as DISPUTED, but it was already fixed in newer main. *Lesson*: diff `origin/main` vs the branch base early and prefix verdicts with "branch may be behind main".
+- **Over-weighted a sub-tick race**: a theoretical `_processing_chat` interleave was escalated to DISPUTED before being downgraded. *Lesson*: race severity is by reachability, not existence.
+- **Tool-layer redaction false positive**: the ADR-003 filename `...-task-integration-...` contains the substring `sk`, which the redaction layer false-positively masked as an API key; one agent rewrote the markdown link with a literal `[REDACTED:api-key]` placeholder, breaking it. *Lesson*: `sk-` inside ordinary identifiers is a false positive — never rewrite as `[REDACTED]`, never flag as a leak absent a real credential.
+- **Test mock-timing**: `app.process_user_chat = MagicMock()` placed after `run_test` let `on_mount` run the real `@work` judge, clearing state before the assertion. *Lesson*: patch collaborators before `run_test`.
+- **TOCTOU exact-match key-injection drop** (#3143/#3219) and **upsert leftover resolution columns** (#3159/#2997) and **Forgejo merge 405** — see governance proposal 2026-08-31.
