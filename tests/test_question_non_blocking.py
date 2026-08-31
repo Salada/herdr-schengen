@@ -28,10 +28,12 @@ if str(SCRIPTS_DIR) not in sys.path:
 import core.guard_db as guard_db
 from cmd.schengen_watcher import _question_not_live_streak, sweep_answered_questions
 from tools.schengen_agent_llm import (
+    approve_batch_escalations,
     execute_tool_call,
     get_current_active_escalation,
     get_current_command_escalation,
     get_oldest_question_escalation,
+    reject_batch_escalations,
 )
 
 
@@ -129,6 +131,47 @@ class TestQuestionNonBlocking(unittest.TestCase):
         self.assertEqual(data["status"], "error")
         self.assertIn("not the current active FIFO head", data["error"])
         self.assertEqual(self._get_row(c2)["status"], "PENDING")
+
+    # ---- INV-QN-4: batch approve/reject exclude questions -----------------
+
+    def test_approve_batch_skips_question_head(self):
+        # A QUESTION is the OLDEST row, but the batch head must be the oldest
+        # COMMAND group — the question is never injected/resolved/adjudicated.
+        q_id = self._enqueue("w1D:q8", "question: batch me?", "QUESTION")
+        c_id = self._enqueue("w1D:c8", "brew install untrusted-pkg", "GRAY_ZONE")
+        with patch("tools.schengen_agent_llm._inject_approval", return_value=(True, "ok")), patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_adjudicate:
+            result = approve_batch_escalations(feedback="ok")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resolved"], [c_id])  # only the COMMAND resolved
+        q_row = self._get_row(q_id)
+        self.assertEqual(q_row["status"], "PENDING")  # question untouched
+        self.assertIsNone(q_row["resolution"])
+        c_row = self._get_row(c_id)
+        self.assertEqual(c_row["status"], "RESOLVED")
+        self.assertEqual(c_row["approver"], "human-tui")
+        # record_adjudication never saw the QUESTION escalation id
+        adjudicated_ids = [c.args[0] for c in mock_adjudicate.call_args_list]
+        self.assertNotIn(q_id, adjudicated_ids)
+        self.assertIn(c_id, adjudicated_ids)
+
+    def test_reject_batch_skips_question_head(self):
+        q_id = self._enqueue("w1D:q9", "question: reject me?", "QUESTION")
+        c_id = self._enqueue("w1D:c9", "sudo rm -rf /tmp/x", "GRAY_ZONE")
+        with patch("subprocess.run", return_value=None), patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_adjudicate:
+            result = reject_batch_escalations(feedback="no")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resolved"], [c_id])  # only the COMMAND resolved
+        q_row = self._get_row(q_id)
+        self.assertEqual(q_row["status"], "PENDING")  # question untouched
+        c_row = self._get_row(c_id)
+        self.assertEqual(c_row["status"], "CANCELLED")
+        adjudicated_ids = [c.args[0] for c in mock_adjudicate.call_args_list]
+        self.assertNotIn(q_id, adjudicated_ids)
+        self.assertIn(c_id, adjudicated_ids)
 
     # ---- INV-QN-3: sweep still resolves a non-head question ---------------
 

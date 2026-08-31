@@ -280,7 +280,14 @@ def _sanitize_feedback(text: str) -> str:
 
 
 def get_current_active_escalation() -> Optional[Dict[str, Any]]:
-    """Return the oldest (FIFO) active pending escalation so tasks are processed in strict sequence."""
+    """Return the oldest (FIFO) active pending escalation so tasks are processed in strict sequence.
+
+    DEPRECATED for the Command Approval slot: this INCLUDES QUESTION rows. The
+    command slot (banner, approve/reject head checks, batch head, system prompt,
+    send_message) must use get_current_command_escalation() instead (INV-QN-1) —
+    a question is surfaced via get_oldest_question_escalation() + the sidebar
+    hint. Kept for backward compatibility only.
+    """
     pending = get_pending_escalations(include_delivered=False)
     return pending[0] if pending else None
 
@@ -369,7 +376,9 @@ def approve_batch_escalations(feedback: str = "Approved in batch via TUI") -> Di
     its own adjudication_log entry. Later groups stay PENDING (FIFO head-only).
     Returns {"status": "empty"|"ok", "resolved": [...], "deferred": [...]}.
     """
-    pending = get_pending_escalations()
+    # Question 분리 (INV-QN-1/2/4): the batch head EXCLUDES questions — they are
+    # never injected/resolved/adjudicated by the batch path (AGENTS.md rule 10).
+    pending = get_pending_command_escalations()
     groups = group_pending_escalations(pending)
     if not groups:
         return {"status": "empty", "resolved": 0}
@@ -406,7 +415,9 @@ def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dic
     row as CANCELLED, and record a REJECT adjudication — no gatekeeper LLM call.
     Returns {"status": "empty"|"ok", "resolved": [...], "deferred": [...]}.
     """
-    pending = get_pending_escalations()
+    # Question 분리 (INV-QN-1/2/4): the batch head EXCLUDES questions — they are
+    # never injected/resolved/adjudicated by the batch path (AGENTS.md rule 10).
+    pending = get_pending_command_escalations()
     groups = group_pending_escalations(pending)
     if not groups:
         return {"status": "empty", "resolved": 0}
