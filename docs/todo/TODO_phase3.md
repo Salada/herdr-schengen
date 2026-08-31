@@ -80,6 +80,19 @@
   - 해결 방안:
     1) Prefix 및 상위/하위 경로 포괄 매칭: `live_req`가 `req_cmd`의 Prefix이거나, `access_directory`의 경우 파일 경로의 상위 디렉터리와 매칭 시 동일 요청으로 인정.
     2) `ctrl+f` 풀스크린 전개 연동 (PR #152 `expand_dialog` 활용): 절단 의심 시 `ctrl+f`로 전개 후 재비교.
+
+[] [Bug/OpenCode] OpenCode 승인 지침(Instruction Delivery) 전달 유실 및 연쇄 명령 다이얼로그 전이 불일치 (사례: #3615):
+  - 현상 및 원인 (사례: Escalation #3615 `herdr agent read` 등 연쇄 실행):
+    • Gatekeeper/TUI에서 승인 메시지 및 지침을 전달했으나 OpenCode 터미널 화면에는 지침이 전달되지 않거나 유실되는 현상 발생.
+    • 근본 원인 (3가지 요인):
+      1) **Bubble Tea 모달 상태에서 `send-text` 무효화**: `herdr pane send-text`로 주입되는 지침 메시지는 쉘 프롬프트/채팅 입력창이 열려 있을 때만 유효하며, OpenCode의 `Permission required` 모달 뷰포트가 활성화된 상태에서는 키 입력이 포커스를 받지 못하고 유실됨.
+      2) **연쇄 명령 실행 시 Dialog Trampoline/TOCTOU 불일치**: `herdr agent read ...`와 같이 에이전트가 연속 명령을 빠르게 트리거할 때, 이전 명령의 다이얼로그가 승인되자마자 다음 명령(`w1D:p5X` ➔ `w1H:p6`)이 연속해서 모달을 띄워 `INJECT_SKIP_CHANGED` 또는 `pane-direct`로 처리되면서 승인 지침 전달 타이밍이 어긋남.
+      3) **Instruction Delivery 정책 기본값**: `send_approve_instruction` 기본값이 `False`(Reject-only)로 설정되어 있어 승인 시에는 메시지가 전송되지 않는 기본 설정 영향.
+  - 해결 방안:
+    1) 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
+    2) OpenCode 플러그인 레벨에서의 지침 전달 채널 확장 (`opencode_permissions` IPC 연계).
+    3) 연쇄 명령 다이얼로그 연속 발생 시 디바운스 및 큐 동기화 강화.
+
 [] [Bug/DB] `enqueue_pending_escalation` ON CONFLICT 시 `resolution` 및 `approver` 미초기화 버그 (사례: #3159):
   - 현상 및 원인 (사례: Escalation #3159 Codex `w1N:p1` 빌드 명령):
     • 동일 Pane에서 과거에 승인된 동일 명령이 재실행되어 에스컬레이션될 때, DB 레코드가 `status='PENDING'`으로 갱신되면서도 이전 승인 이력인 `resolution='APPROVED', approver='pane-direct'`가 `NULL`로 리셋되지 않고 그대로 잔류.
