@@ -33,13 +33,17 @@
        - 모든 `docs/adr-*.md` -> `docs/adr/` 이동.
        - `docs/setup*.md`, `github-mirror.md`, `json_data_beautify.md` -> `docs/guides/` 이동.
        - 과거 세션 기록물(`BENCHMARK_SLM_CHOICE.md`, `diary.md`, `handoff-*.md`) -> `docs/archive/` 이동.
-    2) `README.md` 다이어트 & 배경 문서 분리:
+    2) `README.md` 다이어트, 포터블 셋업 & 보조도구 분리:
        - `Project Maintenance`: 레거시 서술을 쳐내고, 에이전트 필수 불변식만 추출하여 `AGENTS.md`로 이전.
        - `The Motivation & Design Philosophy`: TUI 일원화 시점 기준 과도한 개인적/역사적 배경은 `docs/archive/motivation.md`로 이관하고, `README.md`에는 핵심 목적/9개 레이어만 간결하게 유지.
-       - `Chezmoi dotfiles`: 로컬 환경 종속을 탈피하여 로컬 전용으로 격리, VCS 가이드는 `docs/guides/setup-from-scratch.md` 독립 셋업으로 일원화.
-    3) ADR 전수조사: 13개 ADR 상단에 상태 메타데이터(`Active` vs `Superseded / Evolved`: ADR-006, ADR-011) 명시 및 상대 경로 일괄 보정.
-    4) `docs/index.md` 마스터 색인 작성: 4대 카테고리 매트릭스, 1줄 핵심 요약, 관련 소스코드 경로 색인으로 LLM 탐색 토큰 소모 최소화.
-    5) 테스트: `HERDR_ENV=1 python -m unittest discover -s tests` 통과 확인 후 PR 발행.
+       - `Quick Commands 포터블화`: `~/.local/share/herdr-schengen-tui-venv` 등 고정 dotfiles 경로를 제거하고, 표준 가상환경(`python3 scripts/cmd/schengen_tui.py` 또는 `"$SCHENGEN_HOME/.venv/bin/python"`) 기준으로 포터블화.
+       - `History CLI 보조 도구(Companion Tools) 분리`: `schengen_history.py` (감사 로그 검색, 레이어 필터, CSV/통계)를 핵심 데몬과 분리하여 **"🛠️ Companion Tools / Auxiliary Utilities"** 섹션으로 독립 편성.
+    3) 환경변수 & 설정 종합 문서화 (`docs/guides/configuration.md`):
+       - 핵심 환경변수(`HERDR_ENV`, `HERDR_PANE_ID`, `SCHENGEN_HOME`, `SCHENGEN_HISTORY_PATH`), LLM 설정(`OPENAI_API_KEY`, `GUARD_LLM_MODEL`), 어댑터 튜닝 변수, `config/schengen_watcher.json` 기본값 및 SQLite 런타임 상태 디렉터리(`~/.local/state/herdr-schengen/`) 구조 명확화.
+    4) ADR 전수조사: 13개 ADR 상단에 상태 메타데이터(`Active` vs `Superseded / Evolved`: ADR-006, ADR-011) 명시 및 상대 경로 일괄 보정.
+    5) `docs/index.md` 마스터 색인 작성: 4대 카테고리 매트릭스, 1줄 핵심 요약, 관련 소스코드 경로 색인으로 LLM 탐색 토큰 소모 최소화.
+    6) 테스트: `HERDR_ENV=1 python3 -m unittest discover -s tests` 통과 확인 후 PR 발행.
+
 
 
 
