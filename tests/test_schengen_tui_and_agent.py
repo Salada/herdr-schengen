@@ -1130,20 +1130,93 @@ class TestTUIActionRequiredPanel(unittest.TestCase):
         self.assertIn("/approve 7494", plain)
         self.assertIn("/reject 7494 [reason]", plain)
         self.assertIn("/allow-last", plain)
-        # every rendered line is exactly `width` terminal cells
-        self.assertEqual(len({cell_len(l) for l in plain.splitlines()}), 1)
-        self.assertEqual(cell_len(plain.splitlines()[0]), 70)
+        lines = plain.splitlines()
+        # frame lines (top / header box / separator / bottom) are exactly
+        # `width` cells; the flat body lines never exceed the card width
+        self.assertEqual(cell_len(lines[0]), 70)   # top frame
+        self.assertEqual(cell_len(lines[-1]), 70)  # bottom frame
+        self.assertTrue(all(cell_len(l) <= 70 for l in lines))
+        # INV-HR-6: the command/reason lines are flat — no │ box chars
+        cmd_line = next(l for l in lines if l.startswith("💻 Command"))
+        self.assertFalse(cmd_line.startswith("│"))
+        self.assertFalse(any(
+            l.startswith("│") and "git show" in l or l.startswith("│") and "Not in fast-track" in l
+            for l in lines
+        ))
 
     def test_decision_card_width_alignment(self):
         from cmd.schengen_tui import format_decision_card
         from rich.cells import cell_len
 
-        esc = _fake_escalation(raw_command="x" * 300, safety_reason="r" * 300)
+        # "§"/"£" never appear in the card's static text, so their counts
+        # prove the full command/reason survive wrapping (no truncation).
+        esc = _fake_escalation(raw_command="§" * 300, safety_reason="£" * 300)
         for w in (52, 60, 70, 78):
             card = format_decision_card(esc, width=w)
-            widths = {cell_len(l) for l in card.plain.splitlines()}
-            self.assertEqual(widths, {w}, f"misaligned at width {w}")
-            self.assertLessEqual(len(card.plain.splitlines()), 12)
+            lines = card.plain.splitlines()
+            # frame lines stay exactly `w` cells; flat body fits within it
+            self.assertEqual(cell_len(lines[0]), w, f"misaligned frame at width {w}")
+            self.assertEqual(cell_len(lines[-1]), w, f"misaligned frame at width {w}")
+            self.assertTrue(all(cell_len(l) <= w for l in lines), f"body overflows at width {w}")
+            # Bug 3: the full command/reason survive — wrapped, never truncated
+            self.assertEqual(card.plain.count("§"), 300)
+            self.assertEqual(card.plain.count("£"), 300)
+            self.assertNotIn("…", card.plain)
+
+    def test_decision_card_copy_paste_flat_no_box(self):
+        # INV-HR-6: the full command and full reason are copy-paste-able as
+        # original text — no │ box chars interleaved, no padding that needs
+        # sanitizing, no truncation. The box only frames the header badge.
+        from cmd.schengen_tui import format_decision_card
+
+        esc = _fake_escalation(
+            raw_command="git push --force origin main",
+            safety_reason="Force-push rewrites published history",
+        )
+        card = format_decision_card(esc, width=70)
+        plain = card.plain
+        lines = plain.splitlines()
+        # the full command and full reason appear intact on flat lines
+        self.assertIn("git push --force origin main", plain)
+        self.assertIn("Force-push rewrites published history", plain)
+        # no box char wraps the command or the reason
+        self.assertNotIn("│ git push", plain)
+        self.assertNotIn("│ Force-push", plain)
+        self.assertFalse(any(
+            (l.startswith("│") and "git push" in l) or (l.startswith("│") and "Force-push" in l)
+            for l in lines
+        ))
+        # the flat command line carries only the label prefix (separate column)
+        cmd_line = next(l for l in lines if "git push --force origin main" in l)
+        self.assertEqual(cmd_line, "💻 Command  : git push --force origin main")
+        # deep-link token + action bar preserved (MUST-NOT-break)
+        self.assertIn("[#7494]", plain)
+        self.assertIn("/approve 7494", plain)
+        self.assertIn("/reject 7494 [reason]", plain)
+        self.assertIn("/allow-last", plain)
+
+    def test_decision_card_wrapped_command_flat_lines(self):
+        # a command longer than the card wraps onto flat continuation lines —
+        # pure text, no │ borders, no indentation padding, nothing truncated
+        from cmd.schengen_tui import format_decision_card
+
+        long_cmd = "rm -rf /tmp/herdr-staging && mv -v /tmp/herdr-staging /opt/app"
+        esc = _fake_escalation(raw_command=long_cmd, safety_reason="x")
+        card = format_decision_card(esc, width=70)
+        plain = card.plain
+        lines = plain.splitlines()
+        self.assertNotIn("…", plain)
+        # every word of the command is present, on flat (non-│) lines
+        for word in ("rm", "-rf", "/tmp/herdr-staging", "&&", "mv", "-v", "/opt/app"):
+            self.assertIn(word, plain)
+        # the wrapped command occupies ≥2 lines; the first carries the label
+        cmd_lines = [l for l in lines if ("rm" in l or "/opt" in l) and not l.startswith("│")]
+        self.assertGreaterEqual(len(cmd_lines), 2)
+        self.assertTrue(cmd_lines[0].startswith("💻 Command"))
+        # continuation lines are pure original text — no box, no indent padding
+        for l in cmd_lines[1:]:
+            self.assertFalse(l.startswith("│"))
+            self.assertFalse(l.startswith(" "))
 
     def test_decision_card_fallback_reason(self):
         from cmd.schengen_tui import format_decision_card
@@ -1192,6 +1265,10 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_alarm_banner_and_radar_card_when_active(self):
+        # Phase 2b (INV-HR-1/2): first tick shows "Gatekeeper Checking" while
+        # the judge round-trip is in flight; once the judge finishes and the
+        # escalation is still PENDING, the red banner/action-card/decision
+        # card render.
         from cmd.schengen_tui import SchengenTUIApp, Static
         from contextlib import ExitStack
         from unittest.mock import MagicMock
@@ -1199,11 +1276,27 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
         esc = _fake_escalation()
         app = SchengenTUIApp()
         app.is_controller = True
+        # Patch the judge invocation BEFORE run_test: on_mount's first radar
+        # tick runs the first-sight block, which would otherwise schedule the
+        # REAL @work process_user_chat — its judge worker calls the LLM (fails
+        # fast with no key) and its finally clears _judging_escalation_id
+        # before the first assertion. Mocking pre-mount keeps the two-phase
+        # transition deterministic regardless of whether an LLM key is present.
+        app.process_user_chat = MagicMock()
         with ExitStack() as stack:
             for p in self._mount_patches(esc, [esc]):
                 stack.enter_context(p)
             async with app.run_test(size=(120, 40)) as pilot:
-                app.process_user_chat = MagicMock()
+                await pilot.pause(0.7)
+                banner = app.query_one("#active-target-banner", Static)
+                # judge in flight -> checking state, never the red card
+                self.assertIn("Gatekeeper Checking", banner.content)
+                self.assertNotIn("ACTION REQUIRED", banner.content)
+                card = app.query_one("#action-card", Static)
+                self.assertFalse(card.display)
+                # judge round-trip completes (finally clears state)
+                app._judging_escalation_id = None
+                app._processing_chat = False
                 await pilot.pause(0.7)
                 banner = app.query_one("#active-target-banner", Static)
                 self.assertIn("ACTION REQUIRED", banner.content)
@@ -1217,9 +1310,9 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("HUMAN INTERVENTION REQUIRED", card.content)
                 # commander prompt placeholder
                 self.assertIn("/approve 7494", app.query_one("#input-box").placeholder)
-                # decision card reached the chat
+                # decision card reached the chat at Phase 2b
                 chat_plain = "\n".join(app._chat_plain)
-                self.assertIn("ACTION REQUIRED", chat_plain)
+                self.assertIn("Human Authorization Required", chat_plain)
                 self.assertIn("/approve 7494", chat_plain)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
@@ -1623,6 +1716,314 @@ class TestQuestionNonBlockingTUI(unittest.TestCase):
             asyncio.run(process_chat(app, "/jump"))
         mock_run.assert_not_called()
         app._write.assert_any_call("[bold yellow]⚠️ Usage: /jump <pane_id>[/]")
+
+
+class TestTUIPhase2JudgeGating(unittest.TestCase):
+    """Phase-2 gating (INV-HR-1..3): judge-in-flight vs final human-required.
+
+    The red "Human Authorization Required" card must appear ONLY at the final
+    stage — after the TUI-local judge LLM finishes and the escalation is still
+    PENDING. During the judge round-trip the TUI shows a checking state.
+    """
+
+    def test_judging_state_initialized(self):
+        from cmd.schengen_tui import SchengenTUIApp
+
+        app = SchengenTUIApp()
+        self.assertIsNone(app._judging_escalation_id)
+        self.assertEqual(app._decision_card_written, set())
+        if app.tui_lock_fd:
+            app.tui_lock_fd.close()
+
+    def test_author_label_inspector_vs_user(self):
+        # INV-HR-3: author="inspector" renders the system label, not "👤 You:"
+        from cmd.schengen_tui import _chat_plain_text
+
+        plain = _chat_plain_text("[bold cyan]🤖 Inspector → Gatekeeper:[/] evaluating…")
+        self.assertIn("Inspector → Gatekeeper", plain)
+        self.assertNotIn("👤 You:", plain)
+        plain_user = _chat_plain_text("\n[bold yellow]👤 You:[/] /approve 1")
+        self.assertIn("👤 You:", plain_user)
+        self.assertNotIn("Inspector → Gatekeeper", plain_user)
+
+    def test_decision_card_full_text_wrapped_not_truncated(self):
+        # Bug 3: the full command and reason survive word-wrap (no "…").
+        from cmd.schengen_tui import format_decision_card
+
+        esc = _fake_escalation(
+            raw_command=" ".join(f"flag-{i}" for i in range(40)),
+            safety_reason=" ".join(f"reasonword{i}" for i in range(40)),
+        )
+        plain = format_decision_card(esc, width=70).plain
+        self.assertIn("flag-39", plain)
+        self.assertIn("reasonword39", plain)
+        self.assertNotIn("…", plain)
+        # deep-link token + action bar preserved (MUST-NOT-break)
+        self.assertIn("[#7494]", plain)
+        self.assertIn("/approve 7494", plain)
+        self.assertIn("/reject 7494 [reason]", plain)
+        self.assertIn("/allow-last", plain)
+        self.assertIn("Human Authorization Required", plain)
+
+
+class TestTUIPhase2JudgeGatingAsync(unittest.IsolatedAsyncioTestCase):
+    """Live radar gating scenarios (INV-HR-1..5).
+
+    NOTE: mocks must be installed BEFORE ``run_test()`` — the first radar tick
+    can fire during app startup, before the first ``pilot.pause()``.
+    """
+
+    def _patches(self, active_esc, pending):
+        from unittest.mock import MagicMock, patch
+
+        return [
+            patch("cmd.schengen_tui.get_current_command_escalation", return_value=active_esc),
+            patch("cmd.schengen_tui.get_oldest_question_escalation", return_value=None),
+            patch("cmd.schengen_tui.get_pending_escalations", return_value=pending),
+            patch("cmd.schengen_tui.list_active_guard_locks", return_value=[]),
+            patch("cmd.schengen_tui.get_recent_audit_logs", return_value=[]),
+            patch("cmd.schengen_tui.get_pane_info", return_value={"agent_status": "blocked"}),
+            patch("cmd.schengen_tui.get_pane_direct_config", return_value={}),
+            patch("cmd.schengen_tui.get_batch_approval_config", return_value={"batch_approval_enabled": False}),
+            patch("cmd.schengen_tui.read_in_flight_state", return_value=[]),
+            patch("cmd.schengen_tui.subprocess.Popen", return_value=MagicMock()),
+        ]
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_1_judging_shows_checking_not_human_required(self):
+        # INV-HR-1: while the judge investigates, the banner says
+        # "Gatekeeper Checking", never "Human Authorization Required"; the
+        # action card is hidden and no decision card is written.
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock
+
+        esc = _fake_escalation()
+        app = SchengenTUIApp()
+        app.is_controller = True
+        app.process_user_chat = MagicMock()  # judge invoked but never completes
+        with ExitStack() as stack:
+            for p in self._patches(esc, [esc]):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.7)
+                banner = app.query_one("#active-target-banner", Static)
+                self.assertIn("Gatekeeper Checking", banner.content)
+                self.assertNotIn("ACTION REQUIRED", banner.content)
+                self.assertNotIn("Human Authorization", banner.content)
+                card = app.query_one("#action-card", Static)
+                self.assertFalse(card.display)
+                chat_plain = "\n".join(app._chat_plain)
+                self.assertNotIn("Human Authorization Required", chat_plain)
+                # judge was invoked exactly once, authored by the inspector
+                app.process_user_chat.assert_called_once()
+                self.assertEqual(app.process_user_chat.call_args.kwargs.get("author"), "inspector")
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_2_judge_finished_pending_renders_red_card(self):
+        # INV-HR-2: judge finished + escalation still PENDING -> Phase 2b red
+        # banner/action-card/decision card.
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock
+
+        esc = _fake_escalation()
+        app = SchengenTUIApp()
+        app.is_controller = True
+        app.process_user_chat = MagicMock()
+        with ExitStack() as stack:
+            for p in self._patches(esc, [esc]):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.7)
+                # judge round-trip completes; escalation stays PENDING
+                app._judging_escalation_id = None
+                app._processing_chat = False
+                await pilot.pause(0.7)
+                banner = app.query_one("#active-target-banner", Static)
+                self.assertIn("ACTION REQUIRED", banner.content)
+                self.assertNotIn("Gatekeeper Checking", banner.content)
+                card = app.query_one("#action-card", Static)
+                self.assertTrue(card.display)
+                chat_plain = "\n".join(app._chat_plain)
+                self.assertIn("Human Authorization Required", chat_plain)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_3_inspector_invocation_label_in_chat(self):
+        # INV-HR-3: the judge invocation renders "Inspector → Gatekeeper",
+        # never "👤 You:". The REAL process_user_chat runs (its send_message is
+        # mocked) so the author label is actually written to the chat.
+        from cmd.schengen_tui import SchengenTUIApp
+        from contextlib import ExitStack
+        from unittest.mock import AsyncMock
+
+        esc = _fake_escalation()
+        app = SchengenTUIApp()
+        app.is_controller = True
+        app.agent.send_message = AsyncMock(return_value="ok")
+        with ExitStack() as stack:
+            for p in self._patches(esc, [esc]):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.7)
+                chat_plain = "\n".join(app._chat_plain)
+                self.assertIn("Inspector → Gatekeeper", chat_plain)
+                self.assertNotIn("👤 You:", chat_plain)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_4_user_input_still_renders_you_label(self):
+        from cmd.schengen_tui import SchengenTUIApp
+        from contextlib import ExitStack
+        from unittest.mock import AsyncMock
+
+        app = SchengenTUIApp()
+        app.agent.send_message = AsyncMock(return_value="Understood.")
+        with ExitStack() as stack:
+            for p in self._patches(None, []):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                w = app.process_user_chat("hello gatekeeper")
+                await w.wait()
+                await pilot.pause()
+                chat_plain = "\n".join(app._chat_plain)
+                self.assertIn("👤 You: hello gatekeeper", chat_plain)
+                self.assertNotIn("Inspector → Gatekeeper", chat_plain)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_5_judging_flag_cleared_on_round_trip_completion(self):
+        from cmd.schengen_tui import SchengenTUIApp
+        from contextlib import ExitStack
+        from unittest.mock import AsyncMock
+
+        app = SchengenTUIApp()
+        app.agent.send_message = AsyncMock(return_value="ok")
+        with ExitStack() as stack:
+            for p in self._patches(None, []):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                app._judging_escalation_id = 7494
+                w = app.process_user_chat(
+                    "New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.",
+                    author="inspector",
+                )
+                await w.wait()
+                await pilot.pause()
+                self.assertIsNone(app._judging_escalation_id)
+                self.assertFalse(app._processing_chat)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_6_judge_auto_resolve_queue_clear_no_red_card(self):
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock, patch
+
+        esc = _fake_escalation()
+        state = {"esc": esc}
+        app = SchengenTUIApp()
+        app.is_controller = True
+        app.process_user_chat = MagicMock()
+        with ExitStack() as stack:
+            for p in self._patches(None, []):
+                stack.enter_context(p)
+            stack.enter_context(patch(
+                "cmd.schengen_tui.get_current_command_escalation",
+                side_effect=lambda **kw: state["esc"],
+            ))
+            stack.enter_context(patch(
+                "cmd.schengen_tui.get_pending_escalations",
+                side_effect=lambda **kw: [state["esc"]] if state["esc"] else [],
+            ))
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(0.7)
+                banner = app.query_one("#active-target-banner", Static)
+                self.assertIn("Gatekeeper Checking", banner.content)
+                # the judge auto-resolves the escalation -> queue clears
+                state["esc"] = None
+                app._judging_escalation_id = None
+                app._processing_chat = False
+                await pilot.pause(0.7)
+                banner = app.query_one("#active-target-banner", Static)
+                self.assertIn("No active escalations", banner.content)
+                self.assertNotIn("ACTION REQUIRED", banner.content)
+                chat_plain = "\n".join(app._chat_plain)
+                self.assertNotIn("Human Authorization Required", chat_plain)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_7_judge_error_falls_back_to_red_card(self):
+        # fail-safe: a judge round-trip error clears the judging state and the
+        # still-PENDING escalation renders the Phase-2b red card.
+        from cmd.schengen_tui import SchengenTUIApp, Static
+        from contextlib import ExitStack
+        from unittest.mock import AsyncMock
+
+        esc = _fake_escalation()
+        app = SchengenTUIApp()
+        app.is_controller = True
+        app.agent.send_message = AsyncMock(side_effect=RuntimeError("LLM down"))
+        with ExitStack() as stack:
+            for p in self._patches(esc, [esc]):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                # wait for the failing judge round-trip to finish (finally
+                # clears the judging state)
+                for _ in range(8):
+                    await pilot.pause(0.3)
+                    if app._judging_escalation_id is None:
+                        break
+                await pilot.pause(0.7)  # next tick -> Phase 2b
+                banner = app.query_one("#active-target-banner", Static)
+                self.assertIn("ACTION REQUIRED", banner.content)
+                chat_plain = "\n".join(app._chat_plain)
+                self.assertIn("Human Authorization Required", chat_plain)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_8_judge_worker_guard_return_clears_flag(self):
+        # Fix 2: a judge worker that hits the _processing_chat guard (early
+        # return BEFORE the LLM try/finally) must still clear
+        # _judging_escalation_id — otherwise the escalation stays stuck in
+        # "Gatekeeper Checking" with the red card suppressed forever. The
+        # wrapper finally must NOT clobber the OTHER chat's in-flight flag.
+        from cmd.schengen_tui import SchengenTUIApp
+        from contextlib import ExitStack
+        from unittest.mock import AsyncMock
+
+        app = SchengenTUIApp()
+        app.is_controller = True
+        app.agent.send_message = AsyncMock(return_value="ok")
+        with ExitStack() as stack:
+            for p in self._patches(None, []):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 40)) as pilot:
+                # simulate the sub-tick race: another chat owns _processing_chat
+                # when the inspector's judge worker starts
+                app._processing_chat = True
+                app._judging_escalation_id = 7494
+                w = app.process_user_chat(
+                    "New escalation intercepted. Evaluate command safety, investigate using tools if necessary, and report or adjudicate.",
+                    author="inspector",
+                )
+                await w.wait()
+                await pilot.pause()
+                # guard returned early, but the wrapper finally cleared the flag
+                self.assertIsNone(app._judging_escalation_id)
+                # _processing_chat belongs to the other in-flight chat — untouched
+                self.assertTrue(app._processing_chat)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
 
 
 if __name__ == "__main__":
