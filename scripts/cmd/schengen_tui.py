@@ -197,10 +197,10 @@ def format_pending_queue_badge(
       1. Not the active FIFO slot  -> ``⏳ [Deferred (Slot #N)]``
          (strict single-pending FIFO: every non-head row waits behind the
          active slot; ``slot`` is the row's 1-based position in the FIFO line)
-      2. ``judging`` (active head, judge LLM investigating) ->
-         ``🔍 [Gatekeeper Checking]`` (INV-HR-1/2: NOT yet "Human Required")
-      3. ``decision_layer == QUESTION`` -> ``🚨 [Human Action Required]``
+      2. ``decision_layer == QUESTION`` -> ``🚨 [Human Action Required]``
          (the user answers in the pane; nothing else can auto-resolve it)
+      3. ``judging`` (active head, judge LLM investigating) ->
+         ``🔍 [Gatekeeper Checking]`` (INV-HR-1/2: NOT yet "Human Required")
       4. Otherwise -> ``🚨 [Human Action Required]``
 
     NOTE (logic dependency): a PENDING/DELIVERED non-question HEAD is ALWAYS
@@ -215,10 +215,12 @@ def format_pending_queue_badge(
     if active_id is not None and esc.get("id") != active_id:
         n = int(slot) if slot else 1
         return f"[bold yellow]⏳ [Deferred (Slot #{n})][/]"
+    if esc.get("decision_layer") == "QUESTION":
+        # QUESTION outranks judging by control flow (INV-HR-1/2): a question is
+        # never under judge investigation, so it must never render "Checking".
+        return "[bold red]🚨 [Human Action Required][/]"
     if judging:
         return "[bold cyan]🔍 [Gatekeeper Checking][/]"
-    if esc.get("decision_layer") == "QUESTION":
-        return "[bold red]🚨 [Human Action Required][/]"
     return "[bold red]🚨 [Human Action Required][/]"
 
 

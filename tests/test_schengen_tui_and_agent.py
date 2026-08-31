@@ -922,6 +922,26 @@ class TestTUIBadgesAndDeepLinks(unittest.TestCase):
         self.assertIn("Human Action Required", b)
         self.assertNotIn("Gatekeeper Checking", b)
 
+        # judging=True on a deferred row still shows Deferred (never "Checking").
+        b = format_pending_queue_badge(
+            {"id": 3, "status": "PENDING", "decision_layer": "SECRET_GUARD"},
+            active_id=1,
+            slot=3,
+            judging=True,
+        )
+        self.assertIn("Deferred (Slot #3)", b)
+        self.assertNotIn("Gatekeeper Checking", b)
+
+        # judging=True on a QUESTION head still shows Human Action Required
+        # (a question is never under judge investigation).
+        b = format_pending_queue_badge(
+            {"id": 1, "status": "DELIVERED", "decision_layer": "QUESTION"},
+            active_id=1,
+            judging=True,
+        )
+        self.assertIn("Human Action Required", b)
+        self.assertNotIn("Gatekeeper Checking", b)
+
     def test_non_question_head_awaits_human(self):
         from cmd.schengen_tui import format_pending_queue_badge
 
