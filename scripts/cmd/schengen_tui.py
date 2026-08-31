@@ -82,6 +82,7 @@ from core.guard_db import (
     get_escalation_approver,
     get_escalation_resolution,
     get_instruction_delivery_config,
+    get_origin_weighting_config,
     get_pane_direct_config,
     get_pending_command_escalations,
     get_pending_escalations,
@@ -93,8 +94,11 @@ from core.guard_db import (
     resolve_escalation,
     revoke_allowlist_rule,
     set_answer_language,
+    set_batch_approval_config,
     set_channel_approve_config,
     set_instruction_delivery_config,
+    set_origin_weighting_config,
+    set_pane_direct_config,
 )
 from tools.schengen_agent_llm import (
     SchengenAgentChat,
@@ -1007,12 +1011,13 @@ class AuditDetailModal(ModalCloseMixin, ModalScreen):
 
 
 class SettingsModal(ModalCloseMixin, ModalScreen):
-    """Consolidated settings window (^s / F2 / /config / /settings).
+    """Consolidated settings window (^s / F2 / settings button / /config / /settings).
 
     Every control reads from and writes to the EXISTING guard_config setters
-    (instruction delivery, channel approve, answer language) or the existing
-    daemon lifecycle toggle. Settings that have no backing config key
-    (Approval Bias, Fast-Track) are intentionally absent — see docs/todo/TODO_phase3.md.
+    (instruction delivery, channel approve, answer language, batch approval,
+    origin weighting, pane-direct auto-eviction) or the existing daemon
+    lifecycle toggle. Settings that have no backing config key (Approval Bias,
+    Fast-Track) are intentionally absent — see docs/todo/TODO_phase3.md.
     """
 
     CSS = """
@@ -1095,6 +1100,16 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
             with Horizontal(classes="settings-row"):
                 yield Label("OpenCode channel approve")
                 yield Button("—", id="set-channel-approve")
+            yield Label("🤖 Automation", classes="settings-category")
+            with Horizontal(classes="settings-row"):
+                yield Label("Batch approval")
+                yield Button("—", id="set-batch-approval")
+            with Horizontal(classes="settings-row"):
+                yield Label("Origin weighting (M5)")
+                yield Button("—", id="set-origin-weighting")
+            with Horizontal(classes="settings-row"):
+                yield Label("Pane-direct auto-eviction")
+                yield Button("—", id="set-pane-direct")
             yield Label("🗣️ Answer Language", classes="settings-category")
             with RadioSet(id="settings-lang-set"):
                 yield RadioButton("English", id="lang-english")
@@ -1137,6 +1152,25 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
             )
         except Exception:
             pass
+        # automation toggles (existing guard_config keys, human-only setters)
+        try:
+            self.query_one("#set-batch-approval", Button).label = (
+                "Batch Approval: ON" if get_batch_approval_config().get("batch_approval_enabled", True) else "Batch Approval: OFF"
+            )
+        except Exception:
+            pass
+        try:
+            self.query_one("#set-origin-weighting", Button).label = (
+                "Origin Weighting: ON" if get_origin_weighting_config().get("origin_weighting_enabled", True) else "Origin Weighting: OFF"
+            )
+        except Exception:
+            pass
+        try:
+            self.query_one("#set-pane-direct", Button).label = (
+                "Pane-Direct: ON" if get_pane_direct_config().get("pane_direct_eviction_enabled", True) else "Pane-Direct: OFF"
+            )
+        except Exception:
+            pass
         # language radios
         try:
             lang = get_answer_language()
@@ -1148,27 +1182,15 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
             pass
 
     def _notify_app(self) -> None:
-        """Sync the sidebar controls + status card after a change."""
+        """Sync the first-screen status card after a change.
+
+        The modal refreshes its own controls in-place; the app only needs the
+        radar/status-card refresh so the first screen (Guard + Mode) reflects
+        the new config immediately.
+        """
         app = getattr(self, "app", None)
         if app is None:
             return
-        try:
-            app._refresh_instruction_buttons()
-        except Exception:
-            pass
-        # Sync the sidebar language radios (scoped to the sidebar RadioSet —
-        # the modal carries RadioButtons with the same ids).
-        try:
-            lang = get_answer_language()
-            btn_id = _BUTTON_ID_BY_LANG.get(lang)
-            if btn_id:
-                sidebar_set = app.query_one("#answer-language-set", RadioSet)
-                for rb in sidebar_set.query(RadioButton):
-                    if rb.id == btn_id:
-                        rb.value = True
-                        break
-        except Exception:
-            pass
         try:
             app.update_radar_data(force=True)
         except Exception:
@@ -1194,6 +1216,15 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
             set_instruction_delivery_config(send_reject_instruction=not cfg.get("send_reject_instruction", True))
         elif bid == "set-channel-approve":
             set_channel_approve_config(not get_channel_approve_config())
+        elif bid == "set-batch-approval":
+            cfg = get_batch_approval_config()
+            set_batch_approval_config(enabled=not cfg.get("batch_approval_enabled", True))
+        elif bid == "set-origin-weighting":
+            cfg = get_origin_weighting_config()
+            set_origin_weighting_config(enabled=not cfg.get("origin_weighting_enabled", True))
+        elif bid == "set-pane-direct":
+            cfg = get_pane_direct_config()
+            set_pane_direct_config(enabled=not cfg.get("pane_direct_eviction_enabled", True))
         else:
             return
         self._refresh()
@@ -1215,15 +1246,14 @@ def format_status_card_text(
     leader_pid: Optional[int],
     guard_pid: Optional[int],
     guard_target: Optional[str] = None,
-    lang: str,
-    send_approve_instruction: bool,
-    send_reject_instruction: bool,
 ) -> str:
     """Render the sidebar System Status card from EXISTING live state.
 
-    Mirrors the phase3 mockup (docs/todo/TODO_phase3.md "Sidebar Status Card Widget").
-    No approval-bias or fast-track keys exist in guard_config, so those rows
-    are omitted rather than invented.
+    First-screen declutter (docs/todo/TODO_phase3.md "[Task/UX] TUI 토글/설정
+    옵션 전용 윈도우(Settings Modal) 분리"): the sidebar top shows ONLY the 2
+    core states — Guard daemon (ACTIVE/INACTIVE) and Mode (Controller/
+    Observer). Instruction-delivery / language / automation knobs live in the
+    SettingsModal (^s / F2 / settings button / /config / /settings) instead.
     """
     mode = "Controller (👑)" if is_controller else f"Observer (👁) — Leader PID {leader_pid or 'active'}"
     if guard_pid:
@@ -1232,20 +1262,9 @@ def format_status_card_text(
             guard += f" · {guard_target}"
     else:
         guard = "INACTIVE (○)"
-    if send_approve_instruction and send_reject_instruction:
-        instr = "Approve+Reject"
-    elif send_approve_instruction:
-        instr = "Approve-only"
-    elif send_reject_instruction:
-        instr = "Reject-only"
-    else:
-        instr = "None"
-    lang_label = {"korean": "Korean (KO)", "english": "English (EN)", "japanese": "Japanese (JA)"}.get(lang, lang)
     return (
         f"[bold]Mode  :[/] {mode}\n"
-        f"[bold]Guard :[/] {guard}\n"
-        f"[bold]Lang  :[/] {lang_label}\n"
-        f"[bold]Instr :[/] {instr}"
+        f"[bold]Guard :[/] {guard}"
     )
 
 
@@ -1454,11 +1473,6 @@ _LANG_BY_BUTTON_ID = {
     "lang-japanese": "japanese",
 }
 _BUTTON_ID_BY_LANG = {v: k for k, v in _LANG_BY_BUTTON_ID.items()}
-_LANG_LABELS = {
-    "english": "English",
-    "korean": "한국어",
-    "japanese": "日本語",
-}
 
 
 class SchengenTUIApp(App):
@@ -1562,31 +1576,21 @@ class SchengenTUIApp(App):
         margin-bottom: 1;
         padding: 0 1;
     }
-    #instruction-control {
-        layout: vertical;
-        height: auto;
-        margin-bottom: 1;
-    }
-    #instruction-control Button {
+    /* Settings button: opens the consolidated SettingsModal (^s / F2 / /config) */
+    #btn-open-settings {
         width: 100%;
         height: 3;
-        padding: 0 1;
-        margin-bottom: 0;
-    }
-    #answer-language-set {
-        layout: horizontal;
-        height: auto;
+        min-width: 10;
         margin-bottom: 1;
+        padding: 0 1;
     }
-    #answer-language-set RadioButton {
-        width: auto;
-        margin-right: 1;
-    }
-    /* Sidebar System Status card: live consolidated guard state (phase3). */
+    /* Sidebar System Status card: live consolidated guard state (phase3).
+       Decluttered to the 2 core first-screen states (Guard + Mode); all
+       secondary knobs moved into the SettingsModal. */
     #status-card {
         height: auto;
-        min-height: 6;
-        max-height: 8;
+        min-height: 5;
+        max-height: 7;
         background: $surface-darken-1;
         border: solid $surface-lighten-1;
         border-left: heavy $accent;
@@ -1742,18 +1746,10 @@ class SchengenTUIApp(App):
             # Right: Compact Radar with Token Meter
             with Vertical(id="radar-column"):
                 yield Button("⚡ Toggle Guard", id="btn-toggle-guard", variant="warning")
+                yield Button("⚙️ Settings (^s)", id="btn-open-settings", variant="default")
                 yield Static(id="status-card")
                 yield Static(id="question-hint")
                 yield Static(id="action-card")
-                with Vertical(id="instruction-control"):
-                    yield Button("📤 Approve Instr: OFF", id="btn-toggle-approve-instr")
-                    yield Button("📤 Reject Instr: ON", id="btn-toggle-reject-instr")
-                    yield Button("🔑 OpenCode Channel Approve: OFF", id="btn-toggle-channel-approve")
-                yield Label("🗣️ Answer Language", classes="section-title")
-                with RadioSet(id="answer-language-set"):
-                    yield RadioButton("English", id="lang-english")
-                    yield RadioButton("한국어", id="lang-korean", value=True)
-                    yield RadioButton("日本語", id="lang-japanese")
                 yield Label("⚡ Token & Cache Meter", classes="section-title")
                 yield Static(id="token-meter-box")
                 yield AuditSectionHeader("📜 Recent Audits (Click: ⛶ Fullscreen)", classes="section-title")
@@ -1827,9 +1823,6 @@ class SchengenTUIApp(App):
         table.cursor_type = "row"
         self._columns_initialized = True
 
-        self._refresh_instruction_buttons()
-        self._sync_language_selection()
-
         existing = get_pending_escalations(include_delivered=True)
         for e in existing:
             if e["status"] != "PENDING":
@@ -1891,29 +1884,8 @@ class SchengenTUIApp(App):
             msg = self.toggle_guard_daemon()
             self._write(f"[bold yellow]⚙️ [Daemon Control]:[/] {msg}")
             self.update_radar_data(force=True)
-        elif event.button.id == "btn-toggle-approve-instr":
-            cfg = get_instruction_delivery_config()
-            new_val = not cfg.get("send_approve_instruction", False)
-            set_instruction_delivery_config(send_approve_instruction=new_val)
-            self._write(
-                f"[bold yellow]📤 [Instruction Delivery]:[/] Approve instruction {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
-            )
-            self._refresh_instruction_buttons()
-        elif event.button.id == "btn-toggle-reject-instr":
-            cfg = get_instruction_delivery_config()
-            new_val = not cfg.get("send_reject_instruction", True)
-            set_instruction_delivery_config(send_reject_instruction=new_val)
-            self._write(
-                f"[bold yellow]📤 [Instruction Delivery]:[/] Reject instruction {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
-            )
-            self._refresh_instruction_buttons()
-        elif event.button.id == "btn-toggle-channel-approve":
-            new_val = not get_channel_approve_config()
-            set_channel_approve_config(new_val)
-            self._write(
-                f"[bold yellow]🔑 [OpenCode Channel Approve]:[/] permission.reply approval {'[green]ENABLED[/]' if new_val else '[dim]DISABLED[/]'}."
-            )
-            self._refresh_instruction_buttons()
+        elif event.button.id == "btn-open-settings":
+            self.action_open_settings()
         elif event.button.id == "btn-go-to-pane":
             # Command-slot head excludes questions (INV-QN-1/2); the "Go to
             # agent pane" button focuses the ACTIVE COMMAND's pane.
@@ -1963,44 +1935,6 @@ class SchengenTUIApp(App):
                 if self.is_controller:
                     input_widget.disabled = False
                     input_widget.placeholder = "Ask Gatekeeper or type command (Enter to submit, Shift+Enter for newline)..."
-        except Exception:
-            pass
-
-    def _refresh_instruction_buttons(self) -> None:
-        """Sync the instruction-delivery toggle button labels to the current config."""
-        cfg = get_instruction_delivery_config()
-        try:
-            approve_btn = self.query_one("#btn-toggle-approve-instr", Button)
-            approve_btn.label = "📤 Approve Instr: ON" if cfg.get("send_approve_instruction") else "📤 Approve Instr: OFF"
-        except Exception:
-            pass
-        try:
-            reject_btn = self.query_one("#btn-toggle-reject-instr", Button)
-            reject_btn.label = "📤 Reject Instr: ON" if cfg.get("send_reject_instruction") else "📤 Reject Instr: OFF"
-        except Exception:
-            pass
-        try:
-            ch_btn = self.query_one("#btn-toggle-channel-approve", Button)
-            ch_btn.label = "🔑 OpenCode Channel Approve: ON" if get_channel_approve_config() else "🔑 OpenCode Channel Approve: OFF"
-        except Exception:
-            pass
-
-    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
-        lang = _LANG_BY_BUTTON_ID.get(event.pressed.id or "")
-        if not lang:
-            return
-        set_answer_language(lang)
-        self._write(f"[bold yellow]🗣️ [Answer Language]:[/] {_LANG_LABELS.get(lang, lang)}")
-
-    def _sync_language_selection(self) -> None:
-        lang = get_answer_language()
-        button_id = _BUTTON_ID_BY_LANG.get(lang)
-        if not button_id:
-            return
-        try:
-            btn = self.query_one(f"#{button_id}", RadioButton)
-            # Setting only the target to True lets RadioSet deselect the others.
-            btn.value = True
         except Exception:
             pass
 
@@ -2083,17 +2017,26 @@ class SchengenTUIApp(App):
             return
 
         locks = list_active_guard_locks()
-        instr_cfg = get_instruction_delivery_config()
         status_card_text = format_status_card_text(
             is_controller=self.is_controller,
             leader_pid=self.leader_pid,
             guard_pid=locks[0][2] if locks else None,
             guard_target=locks[0][0] if locks else None,
-            lang=get_answer_language(),
-            send_approve_instruction=bool(instr_cfg.get("send_approve_instruction", False)),
-            send_reject_instruction=bool(instr_cfg.get("send_reject_instruction", True)),
         )
         _update_static_if_changed(status_card, status_card_text)
+
+        # 0a. Guard toggle button carries the live ACTIVE/INACTIVE state on the
+        #     first screen (docs/todo/TODO_phase3.md: Guard daemon + Mode are
+        #     the only always-visible sidebar controls).
+        try:
+            guard_btn = self.query_one("#btn-toggle-guard", Button)
+            new_label = (
+                f"⚡ Guard: ACTIVE (🛡️ PID {locks[0][2]})" if locks else "⚡ Guard: INACTIVE"
+            )
+            if getattr(guard_btn, "label", None) is None or guard_btn.label.plain != new_label:
+                guard_btn.label = new_label
+        except Exception:
+            pass
 
         # 0b. Non-blocking QUESTION hint (INV-QN-3): the oldest pending question
         #     is surfaced here instead of the Command Approval slot; clicking it
