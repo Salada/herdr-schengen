@@ -33,9 +33,14 @@
        - 모든 `docs/adr-*.md` -> `docs/adr/` 이동.
        - `docs/setup*.md`, `github-mirror.md`, `json_data_beautify.md` -> `docs/guides/` 이동.
        - 과거 세션 기록물(`BENCHMARK_SLM_CHOICE.md`, `diary.md`, `handoff-*.md`) -> `docs/archive/` 이동.
-    2) ADR 전수조사: 13개 ADR 상단에 상태 메타데이터(`Active` vs `Superseded / Evolved`: ADR-006, ADR-011) 명시 및 상대 경로 일괄 보정.
-    3) `docs/index.md` 마스터 색인 작성: 4대 카테고리 매트릭스, 1줄 핵심 요약, 관련 소스코드 경로 색인으로 LLM 탐색 토큰 소모 최소화.
-    4) 테스트: `HERDR_ENV=1 python -m unittest discover -s tests` 통과 확인 후 PR 발행.
+    2) `README.md` 다이어트 & 배경 문서 분리:
+       - `Project Maintenance`: 레거시 서술을 쳐내고, 에이전트 필수 불변식만 추출하여 `AGENTS.md`로 이전.
+       - `The Motivation & Design Philosophy`: TUI 일원화 시점 기준 과도한 개인적/역사적 배경은 `docs/archive/motivation.md`로 이관하고, `README.md`에는 핵심 목적/9개 레이어만 간결하게 유지.
+       - `Chezmoi dotfiles`: 로컬 환경 종속을 탈피하여 로컬 전용으로 격리, VCS 가이드는 `docs/guides/setup-from-scratch.md` 독립 셋업으로 일원화.
+    3) ADR 전수조사: 13개 ADR 상단에 상태 메타데이터(`Active` vs `Superseded / Evolved`: ADR-006, ADR-011) 명시 및 상대 경로 일괄 보정.
+    4) `docs/index.md` 마스터 색인 작성: 4대 카테고리 매트릭스, 1줄 핵심 요약, 관련 소스코드 경로 색인으로 LLM 탐색 토큰 소모 최소화.
+    5) 테스트: `HERDR_ENV=1 python -m unittest discover -s tests` 통과 확인 후 PR 발행.
+
 
 
 [] [Bug/Question] Pane 질문(decision_layer='QUESTION') 답변 완료 후에도 TUI 상단 배너 및 Pending 큐에 영구 잔류하는 현상 수정 (사례: #2800):
