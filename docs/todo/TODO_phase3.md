@@ -16,14 +16,14 @@
 
 2. 🎨 **[Sprint 2 — 관측성 & 인터랙션 극대화]** Action Required 3단 패널 + Queue Taxonomy + Universal Deep-Link
    - Top Banner(붉은 점멸) + Radar 상태 카드 + 채팅창 결재 카드 + 큐 4단계 배지 + `[#ID]` 원클릭 Audit 점프.
-3. 🎉 **[Sprint 3 — 코드베이스 위생 & 테스트 수렴]** 피어리뷰 후속 일괄 수렴 (PR #171 완료 — 606 pass, 3 skipped)
+3. 🎉 **[Sprint 3 — 코드베이스 위생 & 테스트 수렴]** 피어리뷰 후속 일괄 수렴 (PR #171 완료 — 606 ran, 3 skipped (미커밋 트리 무결성 게이트 1건은 커밋 후 해소))
    - #139 Complexity / #2555 TestRunner / M6 CloudJudge / #33 Eviction / #45 SAST / #146 Adapter / M7 AntiFatigue / #7207 WorkspacePolicy 전면 완료.
 4. ⚙️ **[Sprint 4 — 대형 동시성 엔진]** [EPIC] Parallel Silent Inspection & Single-Slot Deferred UI
    - M1(WAL/Lock) ➔ M2(ThreadPool 10) ➔ M3(DeferredHumanQueue) ➔ M4(Pre-Display Purge).
 
 ---
 
-## 🎯 Active Execution Backlog (24 Items)
+## 🎯 Active Execution Backlog
 
 [] [P0/Docs] 전체 문서 전수조사, ADR Superseded 표기 및 `docs/index.md` 마스터 색인 체계 구축 (Issue #166, OpenCode 위임):
   - Forgejo Issue: [Issue #166](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/issues/166)
@@ -162,13 +162,20 @@
   3) `set_cloud_judge_config` clamp 하한선 상향: 0.5 하한이 약하므로 0.7 상향 검토.
   4) LLM Inspector(`audit_dynamic_substitution_with_llm`)의 의도적 confidence 무-게이트 범위 명문화.
 
-[x] [Refactor/TestRunner] Test Runner 및 읽기/진단용 체인 명령 파이프라인 정밀화 (사례: #3670, #2555 피어리뷰 후속, PR #171 완료):
+[x] [Refactor/TestRunner] Test Runner 파이프라인 정규식 대칭화 2종 (#2555 피어리뷰 후속, PR #171 완료):
   1) fd-redirect 스트립 대칭화: `2>&1` 외 `1>&2`, `&>` 미커버 갭 해소.
   2) 공백 포함 엣지케이스: `2 >&1` 등 스페이스 포함 시 미스트립(over-block) 방어.
   3) **[보안 갭 폐쇄 (INV-5/6)]**: Test Runner 체인 정규식 대칭화 과정에서 `pytest 2>&1 && rm -rf /`와 같은 메타문자 체인이 fast-track으로 빠져나가던 기존 보안 갭을 완전 차단.
-  4) **[Fast-Track/TestRunner 연쇄 진단 명령 확장 (사례 #3670 후속 백로그)]**:
-     - 에이전트들의 일상적인 검증/진단용 안전 체인 명령(`cd <worktree> && python3 -m unittest discover -s tests 2>&1 | tail -30`, `git status --short && echo "..." && git diff --stat`)이 `NOT_ALLOWLISTED`로 인간 승인을 매번 요구하는 피로도 해소.
-     - `cd <safe_dir> && <safe_runner>` 결합 체인 및 `| tail -N` / `| head -N` 안전 파이프라인의 AST Fast-Track / Test-Runner 인정 규칙 정밀화.
+
+[] [Refactor/TestRunner] 안전한 read-only 체인 진단 명령 Fast-Track 확장 (사례: #3670 후속 백로그):
+  - 현상 및 요구사항:
+    • 에이전트들의 일상적인 검증/진단용 안전 체인 명령(`cd <worktree> && python3 -m unittest discover -s tests 2>&1 | tail -30`, `git status --short && echo "..." && git diff --stat`)이 `NOT_ALLOWLISTED`로 인간 승인을 매번 요구하여 피로도 유발.
+    • `cd <safe_dir> && <safe_runner>` 결합 체인 및 `| tail -N` / `| head -N` 안전 파이프라인의 Fast-Track / Test-Runner 인정 규칙 정밀화.
+  - **[INV-5/6 긴장 명시 및 Narrow Carve-out 요건]**:
+    • 주의: INV-5/6 불변식은 Fast-Track에서 셸 메타문자(`|`, `&`, `;`, `&&`, `||`)를 원칙적으로 거부함. #2555(item 3)에서 `pytest 2>&1 && rm -rf /` 우회 갭을 fail-closed로 엄격 차단한 보안 원칙과 정면 충돌하지 않아야 함.
+    • 따라서 단순 메타문자 허용이 아닌, **"모든 세그먼트가 엄격히 검증된 read-only 체인인 경우에만 한정 허용 + sensitive path 및 변이(mutating) 세그먼트 즉시 재거부"**하는 좁은 예외(Narrow Carve-out) 모델만 적용.
+    • 구현 힌트: `security_evaluator.py:1118` `_is_read_only_pipeline` 확장 검토 (read-only 세그먼트만 파싱·검증, `&& rm -rf` 등 변이 세그먼트 탐지 시 fail-closed 에스컬레이션).
+
 
 [x] [Refactor/AntiFatigue] Anti-Fatigue 배치 집계 및 동의 품질 개선 4종 (M7 피어리뷰 후속, PR #171 완료):
   1) 배치 배너 raw 명령 목록 표시: quoted string/path 축약 패턴 대신 실제 raw 명령 목록을 표시하여 사용자 동의 품질 개선.
