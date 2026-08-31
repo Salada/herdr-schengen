@@ -250,13 +250,15 @@
 [] [Task/UX] TUI 토글/설정 옵션 전용 윈도우(Settings Modal) 분리 및 첫 화면(Main/Sidebar) 핵심 상태 직관화
    - Context & Feedback:
      - 기능 확장(Guard 토글, Controller/Observer 모드, 승인/거절 지침 토글, 다국어 선택, Approval Bias, Fast-Track 모드 등)에 따라 메인 TUI 화면에 토글 버튼이 과도하게 증식하여 화면이 복잡해지는 문제 해소.
-     - **사용자 핵심 피드백**: 가장 자주 확인하고 조작하는 `Guard daemon (ACTIVE/INACTIVE)` 및 `Mode (Controller/Observer)`는 깊은 모달 진입 없이도 **TUI 첫 화면(상단 헤더 또는 우측 사이드바 최상단)**에서 직관적으로 즉시 확인 및 원클릭 토글이 가능해야 함.
+     - **사용자 핵심 피드백**:
+       1) **첫 화면 상시 노출**: 가장 자주 확인하고 조작하는 `Guard daemon (ACTIVE/INACTIVE)` 및 `Mode (Controller/Observer)` 2개만 첫 화면(상단 헤더 또는 우측 사이드바 최상단)에 간결하게 상시 노출.
+       2) **첫 화면에서 제거 (Settings 모달로 격리)**: 현재 첫 화면과 Settings에 중복 노출되고 있는 `Instruction Delivery (지침 주입 토글)` 및 `Answer Language (다국어 선택 버튼그룹)`는 **첫 화면에서 완전히 제거**하고 전용 Settings 모달 내부로만 일원화하여 메인 뷰포트의 시각적 노이즈 최소화.
    - Solution & Architecture:
-     1. 첫 화면(Main Header / Sidebar Top) 상시 노출:
-        - `Guard Daemon` 및 `Leader Mode`는 첫 화면 핵심 위젯으로 상시 노출하여 즉시 시인성 확보.
-     2. 세부 설정 모달(SettingsModal):
+     1. 첫 화면(Main Header / Sidebar Top): `Guard Daemon` 및 `Leader Mode` 2대 핵심 상태만 노출.
+     2. 전용 설정 모달(SettingsModal):
         - 진입 방법: 단축키 `^s` (Settings), `F2`, 설정 버튼 클릭, 또는 Slash Command `/config`, `/settings`
-        - 세부 카테고리(지침 주입 토글, Gatekeeper 다국어 KO/EN/JA 선택, Approval Bias, Fast-Track 모드) 관리.
+        - 모달 내부로 격리/일원화: Instruction Delivery(승인/거절 지침), Answer Language(KO/EN/JA), Approval Bias, Fast-Track 모드.
+
 
 [x] [Task/UX] 에스컬레이션 배너/메시지 타이밍 및 상태 전이 명확화: Phase-1 In-flight IPC 기반 조사 중 vs 인간 개입 필수 색상·시각적 분리 (PR #161 완료, INV-PH1-1..6):
    - 해결:
