@@ -88,6 +88,7 @@ from core.guard_db import (
     get_session_dashboard_summary,
     group_pending_escalations,
     list_allowlist_rules,
+    read_in_flight_state,
     resolve_escalation,
     revoke_allowlist_rule,
     set_answer_language,
@@ -171,6 +172,17 @@ def format_approver_badge(approver: Optional[str], decision: str = "") -> str:
 # target (or the caller-supplied default) on the same message.
 _LINK_TOKEN_RE = re.compile(r"(\[Audit\s*#(\d+)\])|(\[#(\d+)\])|(\[▼\s*Details\])")
 _LINK_STYLE = "bold underline cyan"
+
+
+def format_inflight_phase_badge(phase: str) -> str:
+    """Render the Phase-1 in-flight sub-phase badge (INV-PH1-1).
+
+    Sourced ONLY from the watcher-published read_in_flight_state(); a PENDING
+    escalation always renders the Phase-2 "Human Action Required" map instead.
+    """
+    if phase == "gatekeeper":
+        return "[dim magenta]🤖 Gatekeeper: judging[/]"
+    return "[dim]🔍 Inspector: checking[/]"
 
 
 def format_pending_queue_badge(
@@ -2052,7 +2064,25 @@ class SchengenTUIApp(App):
         banner = self.query_one("#active-target-banner", Static)
         action_card = self.query_one("#action-card", Static)
 
-        if active_esc:
+        # Phase-1 in-flight IPC (INV-PH1-1/2): while the inspector evaluates
+        # (BEFORE any escalation), show the live sub-phase badge and SKIP the
+        # Phase-2 banner for this tick. Sourced ONLY from read_in_flight_state()
+        # (watcher-written, TTL 30s); a PENDING row always renders the Phase-2
+        # "Human Action Required" map instead.
+        in_flight = read_in_flight_state()
+        if in_flight:
+            oldest = min(in_flight, key=lambda e: e.get("started_at", 0))
+            pane_id = oldest.get("pane_id", "?")
+            preview = (oldest.get("command_preview") or "")[:60]
+            _update_static_if_changed(
+                banner,
+                f"\n[bold cyan]⏳ Phase-1 In-Flight (pre-escalation)[/]\n"
+                f"[dim]   {format_inflight_phase_badge(oldest.get('phase', 'inspector'))}[/]\n"
+                f"[dim]   Pane {pane_id}: {rich_escape(preview)}[/]",
+            )
+            action_card.display = False
+            self._set_action_state_ui(None)
+        elif active_esc:
             active_id = active_esc["id"]
             is_question = active_esc.get('decision_layer') == "QUESTION"
             raw_cmd = active_esc['raw_command'].strip()

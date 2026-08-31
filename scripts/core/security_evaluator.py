@@ -18,6 +18,7 @@ import re
 import shlex
 import stat
 import textwrap
+import threading
 import tokenize as _tokenize
 from enum import Enum
 from pathlib import Path
@@ -47,6 +48,28 @@ from core.guard_db import (
 from core.redaction import redact_for_cloud
 from core.semgrep_evaluator import audit_script_with_semgrep
 from core.shellcheck_evaluator import audit_shell_with_shellcheck
+
+# ── Phase-1 in-flight phase hook (INV-PH1-6) ────────────────────────────────
+# Per-thread callback so the watcher's InspectorCoordinator can observe the
+# inspector ("deterministic AST, ms") vs gatekeeper ("LLM/cloud-judge, seconds")
+# sub-phases WITHOUT touching the hot path. The hook is invoked ONLY around
+# post_cloud_judge calls (never for cache hits / short-circuits), resets via
+# finally even on exception, and is thread-local (no cross-pane stomping).
+_phase_hooks = threading.local()
+
+
+def set_phase_hook(hook):
+    """Per-thread phase callback; invoked only by LLM tiers (never the hot path)."""
+    _phase_hooks.hook = hook
+
+
+def _emit_phase(phase: str) -> None:
+    hook = getattr(_phase_hooks, "hook", None)
+    if hook is not None:
+        try:
+            hook(phase)
+        except Exception:
+            pass
 
 # 1. Sensitive file patterns (Secrets & Credentials)
 SEP = r"(^|[\s/\"'@:=])"
@@ -732,7 +755,13 @@ def audit_with_cloud_judge(
     ]
 
     try:
-        data = post_cloud_judge(messages, target_endpoint, target_model, target_key, reasoning_effort)
+        # INV-PH1-6: flip to "gatekeeper" ONLY around the LLM call; reset via
+        # finally even on exception; cache hits / short-circuits never flip.
+        _emit_phase("gatekeeper")
+        try:
+            data = post_cloud_judge(messages, target_endpoint, target_model, target_key, reasoning_effort)
+        finally:
+            _emit_phase("inspector")
         content_str = data["choices"][0].get("message", {}).get("content", "")
         parsed = parse_json_verdict(content_str)
         if parsed is not None:
@@ -815,73 +844,80 @@ def audit_dynamic_substitution_with_llm(
 
     visited_paths = set()
 
-    for _hop in range(max_hops):
-        try:
-            data = post_cloud_judge(
-                messages, target_endpoint, target_model, target_key, reasoning_effort, tools=INSPECTOR_TOOLS
-            )
-            choice = data["choices"][0]
-            message = choice.get("message", {})
-            tool_calls = message.get("tool_calls", [])
-
-            if tool_calls:
-                messages.append(message)
-                for tc in tool_calls:
-                    fn_name = tc.get("function", {}).get("name")
-                    fn_args_raw = tc.get("function", {}).get("arguments", "{}")
-                    try:
-                        fn_args = json.loads(fn_args_raw)
-                    except Exception:
-                        fn_args = {}
-
-                    if fn_name == "read_file_content":
-                        target_file = fn_args.get("file_path", "")
-                        norm_path = str(Path(target_file).expanduser().resolve())
-
-                        if norm_path in visited_paths:
-                            tool_result = f"Error: Circular reference loop detected for '{norm_path}'"
-                        else:
-                            visited_paths.add(norm_path)
-                            success, content = safe_read_file_content(target_file)
-                            tool_result = content if success else f"Error: {content}"
-
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tc.get("id", "call_1"),
-                                "content": redact_for_cloud(tool_result),
-                            }
-                        )
-                continue  # Next turn in loop
-
-            # Final text response
-            content_str = message.get("content", "")
-            parsed = parse_json_verdict(content_str)
-            if parsed is not None:
-                is_safe, _conf, reason = parsed  # M6: inspector keeps binary behavior (confidence discarded)
-                _cache_cloud_verdict(
-                    cache_key, cmd_str, is_safe, reason, "LLM_INSPECTOR", cwd, scope, agent_id, origin
+    # INV-PH1-6: flip to "gatekeeper" around the WHOLE multi-hop LLM loop (one
+    # flip, not per hop); reset via finally on every exit path (verdict, error,
+    # max-hops exhaustion).
+    _emit_phase("gatekeeper")
+    try:
+        for _hop in range(max_hops):
+            try:
+                data = post_cloud_judge(
+                    messages, target_endpoint, target_model, target_key, reasoning_effort, tools=INSPECTOR_TOOLS
                 )
-                if is_safe:
-                    try:
-                        from core.session_memory import record_pane_approval
-                        record_pane_approval(scope, cmd_str, decision_layer="LLM_INSPECTOR", reason=reason, cwd=cwd)
-                    except Exception:
-                        pass
-                return is_safe, reason
-            if raise_on_error:
-                raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
-            return False, f"[Cloud Judge] Uncertain verdict: {content_str[:80]}; delegating to human"
+                choice = data["choices"][0]
+                message = choice.get("message", {})
+                tool_calls = message.get("tool_calls", [])
 
-        except Exception as e:
-            if raise_on_error:
-                raise
-            # Fail-Safe to Human Review when the cloud inspector is unreachable
-            return False, f"Dynamic substitution detected & cloud judge offline ({e}); requires human review"
+                if tool_calls:
+                    messages.append(message)
+                    for tc in tool_calls:
+                        fn_name = tc.get("function", {}).get("name")
+                        fn_args_raw = tc.get("function", {}).get("arguments", "{}")
+                        try:
+                            fn_args = json.loads(fn_args_raw)
+                        except Exception:
+                            fn_args = {}
 
-    if raise_on_error:
-        raise RuntimeError("Dynamic substitution inspection could not be completed within max hops")
-    return False, "Dynamic substitution inspection could not be completed; requires human review"
+                        if fn_name == "read_file_content":
+                            target_file = fn_args.get("file_path", "")
+                            norm_path = str(Path(target_file).expanduser().resolve())
+
+                            if norm_path in visited_paths:
+                                tool_result = f"Error: Circular reference loop detected for '{norm_path}'"
+                            else:
+                                visited_paths.add(norm_path)
+                                success, content = safe_read_file_content(target_file)
+                                tool_result = content if success else f"Error: {content}"
+
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.get("id", "call_1"),
+                                    "content": redact_for_cloud(tool_result),
+                                }
+                            )
+                    continue  # Next turn in loop
+
+                # Final text response
+                content_str = message.get("content", "")
+                parsed = parse_json_verdict(content_str)
+                if parsed is not None:
+                    is_safe, _conf, reason = parsed  # M6: inspector keeps binary behavior (confidence discarded)
+                    _cache_cloud_verdict(
+                        cache_key, cmd_str, is_safe, reason, "LLM_INSPECTOR", cwd, scope, agent_id, origin
+                    )
+                    if is_safe:
+                        try:
+                            from core.session_memory import record_pane_approval
+                            record_pane_approval(scope, cmd_str, decision_layer="LLM_INSPECTOR", reason=reason, cwd=cwd)
+                        except Exception:
+                            pass
+                    return is_safe, reason
+                if raise_on_error:
+                    raise RuntimeError(f"Unparseable LLM inspector output: {content_str}")
+                return False, f"[Cloud Judge] Uncertain verdict: {content_str[:80]}; delegating to human"
+
+            except Exception as e:
+                if raise_on_error:
+                    raise
+                # Fail-Safe to Human Review when the cloud inspector is unreachable
+                return False, f"Dynamic substitution detected & cloud judge offline ({e}); requires human review"
+
+        if raise_on_error:
+            raise RuntimeError("Dynamic substitution inspection could not be completed within max hops")
+        return False, "Dynamic substitution inspection could not be completed; requires human review"
+    finally:
+        _emit_phase("inspector")
 
 
 def is_managed_git_safe_command(cmd_str: str) -> tuple[bool, Optional[str]]:

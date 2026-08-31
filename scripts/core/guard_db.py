@@ -8,6 +8,7 @@ Stores:
 Database location: ~/.local/state/herdr-schengen/schengen_history.db (XDG compliant, no skill pollution)
 """
 
+import json
 import os
 import re
 import sqlite3
@@ -20,6 +21,38 @@ from typing import Any, Optional
 
 DB_DIR = Path.home() / ".local" / "state" / "herdr-schengen"
 DB_PATH = DB_DIR / "schengen_history.db"
+
+# Phase-1 in-flight inspection IPC (INV-PH1-2/5): the watcher (single writer)
+# publishes inspector in-flight state to this JSON file; the TUI reads it
+# read-only. Entries older than IN_FLIGHT_TTL seconds are treated as stale and
+# auto-cleared so a dead watcher never leaves a perpetual "Checking" banner.
+IN_FLIGHT_TTL = 30
+IN_FLIGHT_STATE_PATH = DB_DIR / "in_flight_state.json"
+
+
+def read_in_flight_state() -> list[dict]:
+    """Return the watcher-published Phase-1 in-flight entries (INV-PH1-1/2).
+
+    Returns [] on missing/malformed JSON, on a stale snapshot
+    (now - ts > IN_FLIGHT_TTL), or when the entries list is absent. Read-only
+    consumer side; the watcher is the single writer (atomic tmp+replace).
+    """
+    try:
+        data = json.loads(IN_FLIGHT_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    try:
+        ts = float(data.get("ts", 0))
+    except (TypeError, ValueError):
+        return []
+    if time.time() - ts > IN_FLIGHT_TTL:
+        return []
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict)]
 
 
 def _resolve_log_dir() -> Path:
