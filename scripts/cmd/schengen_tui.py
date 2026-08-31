@@ -2065,12 +2065,14 @@ class SchengenTUIApp(App):
         action_card = self.query_one("#action-card", Static)
 
         # Phase-1 in-flight IPC (INV-PH1-1/2): while the inspector evaluates
-        # (BEFORE any escalation), show the live sub-phase badge and SKIP the
-        # Phase-2 banner for this tick. Sourced ONLY from read_in_flight_state()
-        # (watcher-written, TTL 30s); a PENDING row always renders the Phase-2
-        # "Human Action Required" map instead.
+        # (BEFORE any escalation), show the live sub-phase badge. Sourced ONLY
+        # from read_in_flight_state() (watcher-written, TTL 30s). A PENDING
+        # command escalation ALWAYS outranks the informational Phase-1 badge
+        # (INV-PH1-4): on multi-pane concurrency a different pane may already be
+        # awaiting human /approve, and that Action-Required banner must not be
+        # hidden behind an in-flight "checking" badge.
         in_flight = read_in_flight_state()
-        if in_flight:
+        if in_flight and not active_esc:
             oldest = min(in_flight, key=lambda e: e.get("started_at", 0))
             pane_id = oldest.get("pane_id", "?")
             preview = (oldest.get("command_preview") or "")[:60]

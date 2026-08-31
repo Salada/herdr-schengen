@@ -46,6 +46,7 @@ import core.guard_db as guard_db
 import core.security_evaluator as security_evaluator
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
 from core.cloud_judge import DEFAULT_REASONING_EFFORT
+from core.redaction import redact_for_cloud
 from core.guard_db import (
     DB_DIR,
     IN_FLIGHT_STATE_PATH,
@@ -221,7 +222,7 @@ def sync_in_flight_state(inspector) -> None:
             "pane_id": str(pane_id),
             "agent_kind": str(pane_info.get("agent", "unknown")),
             "command_fp": hashlib.sha256(command.encode("utf-8")).hexdigest()[:12],
-            "command_preview": command[:80],
+            "command_preview": redact_for_cloud(command[:80]),
             "started_at": started_at,
             "phase": phase_box.get("phase", "inspector"),
         })
