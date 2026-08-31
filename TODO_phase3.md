@@ -28,10 +28,15 @@
 [] [P0/Docs] 전체 문서 전수조사, ADR Superseded 표기 및 `docs/index.md` 마스터 색인 체계 구축 (Issue #166, OpenCode 위임):
   - Forgejo Issue: [Issue #166](http://192.168.10.102:3000/InhouseOriented/herdr-schengen/issues/166)
   - 상세 실행 지침:
-    1) 디렉터리 재배치: `docs/adr/`, `docs/guides/`, `docs/archive/` 생성, 모든 `docs/adr-*.md` 이동, `TODO.md` -> `docs/archive/TODO_phase1.md`, `bloat_message_opencode.md` 이동, `docs/setup*.md` 및 `github-mirror.md` -> `docs/guides/` 이동.
+    1) 디렉터리 재배치: `docs/adr/`, `docs/guides/`, `docs/todo/`, `docs/issues/` (또는 `docs/misc/`), `docs/archive/` 생성.
+       - **TODO 및 이슈 문서의 `docs/` 내부 완전 이관**: `TODO.md` -> `docs/todo/TODO_phase1.md`, `TODO_phase2.md` -> `docs/todo/TODO_phase2.md`, `TODO_phase3.md` -> `docs/todo/TODO_phase3.md`, `bloat_message_opencode.md` -> `docs/issues/` (루트 클린 유지).
+       - 모든 `docs/adr-*.md` -> `docs/adr/` 이동.
+       - `docs/setup*.md`, `github-mirror.md`, `json_data_beautify.md` -> `docs/guides/` 이동.
+       - 과거 세션 기록물(`BENCHMARK_SLM_CHOICE.md`, `diary.md`, `handoff-*.md`) -> `docs/archive/` 이동.
     2) ADR 전수조사: 13개 ADR 상단에 상태 메타데이터(`Active` vs `Superseded / Evolved`: ADR-006, ADR-011) 명시 및 상대 경로 일괄 보정.
     3) `docs/index.md` 마스터 색인 작성: 4대 카테고리 매트릭스, 1줄 핵심 요약, 관련 소스코드 경로 색인으로 LLM 탐색 토큰 소모 최소화.
     4) 테스트: `HERDR_ENV=1 python -m unittest discover -s tests` 통과 확인 후 PR 발행.
+
 
 [] [Bug/Question] Pane 질문(decision_layer='QUESTION') 답변 완료 후에도 TUI 상단 배너 및 Pending 큐에 영구 잔류하는 현상 수정 (사례: #2800):
 
