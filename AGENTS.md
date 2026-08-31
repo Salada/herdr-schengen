@@ -60,6 +60,14 @@
 12. **Fail-Closed Bias**:
     - When an analyzer errors, a cache misses, or the LLM is unreachable, ambiguous commands MUST be deferred to the human operator — never auto-approved.
     - Fail-open is permitted **only** for provably side-effect-free, in-workspace local reads (`ls`, `cat src/`, `git status`), with a visible `[GATE DEGRADED]` banner (ADR-006).
+
+13. **One-Way GitHub Distribution Mirror**:
+    - ❌ **Never** develop, open issues, merge, or commit directly on GitHub — all development and issue tracking happen exclusively on the private Forgejo (`salada-git`).
+    - ✅ GitHub (`github.com/Salada/herdr-schengen`) is a **one-way distribution snapshot mirror only**: after a Forgejo `main` merge, push the snapshot (`git push github main:main`). Reverse merges and external-contribution intake are prohibited (Issue #166, `docs/guides/github-mirror.md`).
+
+14. **TOCTOU Guard Fuzzy/Prefix Matching**:
+    - Command-string guards that fire just before key injection must tolerate terminal viewport soft-wrap truncation and path-expression variance (`~` vs absolute, directory vs file).
+    - ✅ Use prefix / upper-directory / semantic comparison, never exact `==` string equality (incidents #3143/#3219 key-injection drop).
 ---
 
 ## 🗺️ 2. Architecture & Decision Records (ADR SSOT)
