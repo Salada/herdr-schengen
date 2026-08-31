@@ -15,6 +15,7 @@ Default keymap (approval): `y`/Enter approve, `n`/Esc decline, `d` deny,
 """
 
 import re
+import subprocess
 
 from adapters.herdr_client import run_cmd
 
@@ -37,6 +38,14 @@ _OPTION_ROW_RE = re.compile(r"^›?\s*\d+\.\s")
 # already-completed (enter-pressed) dialog has the marker moved off or gone
 # entirely. MULTILINE so '^' anchors at each LINE start (the option row is never
 # the first char of the pane read).
+#
+# ⚠️ LIVENESS-ONLY — #146 peer-review contract: the digit anchor is used for
+# liveness detection ONLY. The '›' glyph marks the currently-SELECTED option row,
+# and the selection can be navigated to any option ('2. No', '3. …') by the
+# user/agent without the dialog being answered. A future option-number ->
+# approve/reject mapping MUST NOT assume '1=Yes' or read the selected number as
+# an approval signal — e.g. a focused '› 2. No' is still a LIVE (unanswered)
+# dialog, and rejecting must never be derived from "not focused on 1".
 _ACTIVE_CHOICE_RE = re.compile(r"^\s*›\s*\d+\.", re.MULTILINE)
 
 # #7759: current Codex edit-dialog destination lines (`Destination: <path>` /
@@ -209,6 +218,10 @@ class CodexAdapter(AgentAdapter):
         """
         if not footer_is_live(visible_text, "Press enter to confirm or esc to cancel"):
             return False
+        # LIVENESS-ONLY (#146): `_ACTIVE_CHOICE_RE` proves a live dialog by the
+        # presence of the focused-row marker on ANY numbered option. It is NOT a
+        # '1=Yes' selection signal — a dialog focused on '2. No' is still live
+        # (must keep queueing), never "answered" or "rejected".
         return _ACTIVE_CHOICE_RE.search(_latest_dialog_region(visible_text)) is not None
 
     def question_is_live(self, visible_text: str) -> bool:
@@ -225,3 +238,14 @@ class CodexAdapter(AgentAdapter):
         print(f"🚀 Auto-approving codex request for {pane_id} (sending 'y')...", flush=True)
         run_cmd(["herdr", "agent", "send-keys", pane_id, "y"])
         return True, "approved (y)"
+
+    def inject_reject(self, pane_id, req_cmd):
+        """Reject via 'esc' — Codex default keymap: `esc` = decline/cancel
+        ("2. No, and tell Codex what to do differently (esc)"), which mirrors
+        the legacy reject_escalation escape-dismiss semantics (M7 item 4).
+        Fire-and-forget subprocess.run (NO check=True): a nonzero herdr CLI exit
+        does not raise and the caller records CANCELLED best-effort; only a
+        raised exception defers."""
+        print(f"🛑 Rejecting codex request for {pane_id} (sending 'escape')...", flush=True)
+        subprocess.run(["herdr", "agent", "send-keys", pane_id, "escape"], capture_output=True, timeout=5.0)
+        return True, "rejected (escape dismiss)"

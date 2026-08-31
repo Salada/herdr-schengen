@@ -149,6 +149,69 @@ class TestAntiFatigue(unittest.TestCase):
         self.assertEqual(len(remaining), 1)
         self.assertIn("mkdir", remaining[0]["raw_command"])
 
+    def test_batch_approve_inject_failure_defers_and_keeps_pending(self):
+        """M7 item 2: inject-failure rollback (approve path).
+
+        When _inject_approval returns injected=False (e.g. INJECT_SKIP_CHANGED /
+        dialog no longer live), the item MUST stay PENDING (deferred) and MUST
+        NOT be resolved as APPROVED — fail-closed, no silent DB/UI mismatch.
+        """
+        ids = []
+        for i, pane in enumerate(("wG1", "wG2")):
+            ids.append(
+                enqueue_pending_escalation(
+                    pane, f"git commit -m 'feat: {i}'", "cx", "COMPLEXITY_TAX", "opencode"
+                )
+            )
+        # Force verified-inject failure on EVERY item of the head batch.
+        fail_patch = patch(
+            "tools.schengen_agent_llm._inject_approval",
+            return_value=(False, "INJECT_SKIP_CHANGED"),
+        )
+        with fail_patch:
+            result = approve_batch_escalations("batch ok")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resolved"], [])
+        self.assertEqual(sorted(result["deferred"]), sorted(ids))
+        # No APPROVED resolution recorded — items stay PENDING (fail-closed).
+        approvers = _approvers_for(ids)
+        for esc_id in ids:
+            approver, status = approvers[esc_id]
+            self.assertEqual(status, "PENDING")
+            self.assertIsNone(approver)
+        # No adjudication entries and no audit rows for the failed injects.
+        self.assertEqual(_count_adjudications(), 0)
+        self.assertEqual(len(get_recent_audit_logs(limit=5)), 0)
+
+    def test_batch_reject_failure_defers_and_keeps_pending(self):
+        """M7 item 2: inject-failure rollback (reject variant).
+
+        If the per-item reject keystroke raises, the item is deferred and stays
+        PENDING — never recorded as CANCELLED/REJECTED.
+        """
+        from tools.schengen_agent_llm import reject_batch_escalations
+
+        ids = []
+        for i, pane in enumerate(("wH1", "wH2")):
+            ids.append(
+                enqueue_pending_escalation(
+                    pane, f"git commit -m 'feat: {i}'", "cx", "COMPLEXITY_TAX", "opencode"
+                )
+            )
+        with patch(
+            "tools.schengen_agent_llm.subprocess.run",
+            side_effect=RuntimeError("herdr pane gone"),
+        ):
+            result = reject_batch_escalations("batch no")
+        self.assertEqual(result["resolved"], [])
+        self.assertEqual(sorted(result["deferred"]), sorted(ids))
+        approvers = _approvers_for(ids)
+        for esc_id in ids:
+            approver, status = approvers[esc_id]
+            self.assertEqual(status, "PENDING")
+            self.assertIsNone(approver)
+        self.assertEqual(_count_adjudications(), 0)
+
     def test_novelty_cwd_fix_regression(self):
         from core.security_evaluator import DecisionLayer, audit_shell_command
 

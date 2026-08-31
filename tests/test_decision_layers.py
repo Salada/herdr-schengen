@@ -879,6 +879,46 @@ class TestFastTrackTestRunner(unittest.TestCase):
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
 
+    def test_fd_redirect_symmetry(self):
+        # #2555: pure fd-to-fd redirects (never a file write) must not over-block
+        # the test-runner fast-track — '2>&1' (legacy), '1>&2', the spaced
+        # '2 >&1' variant, and the '/dev/null' discard must all strip cleanly.
+        safe_cmds = (
+            "python3 -m unittest discover -s tests 2>&1",
+            "python3 -m unittest discover -s tests 1>&2",
+            "python3 -m unittest discover -s tests 2 >&1",
+            "python3 -m unittest discover -s tests 2>&1 | tail -5",
+            "python3 -m unittest discover -s tests &> /dev/null",
+        )
+        for cmd in safe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_fd_redirect_file_target_stays_fail_closed(self):
+        # #2555: '&>' with a REAL file target is a file write (== '> file 2>&1')
+        # and must stay fail-closed, like the plain '> file' redirection.
+        unsafe_cmds = (
+            "python3 -m unittest discover -s tests &> /tmp/out.log",
+            "python3 -m unittest discover -s tests > /tmp/out",
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
+    def test_separator_after_redirect_stays_fail_closed(self):
+        # #2555 hardening (INV-5/6): a trailing '&&'/'||'/';' separator after the
+        # fd-redirect strip must NOT slip a second segment into the narrow
+        # test-runner fast-track.
+        unsafe_cmds = (
+            "python3 -m unittest discover -s tests 2>&1 && rm -rf x",
+            "python3 -m unittest discover -s tests && rm -rf x",
+            "python3 -m unittest discover -s tests || echo fail",
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
 
 class TestComplexityTax(unittest.TestCase):
     """M3 COMPLEXITY_TAX (INV-16): structural-complexity deferral layer.
@@ -921,6 +961,34 @@ class TestComplexityTax(unittest.TestCase):
     def test_compute_complexity_boundary(self):
         self.assertEqual(compute_complexity(";".join(f"mkdir a{i}" for i in range(6))), 6)
         self.assertEqual(compute_complexity(";".join(f"mkdir a{i}" for i in range(7))), 7)
+
+    def test_fd_redirect_no_over_count(self):
+        # #139-1: 'n>&m' fd-redirects must not be split into extra segments by the
+        # '&' separator — `ls 2>&1` is 1 segment + 1 redirection = 2, NOT 3.
+        self.assertEqual(compute_complexity("ls 2>&1"), 2)
+        self.assertEqual(compute_complexity("ls 1>&2"), 2)
+        self.assertEqual(compute_complexity("ls &> /tmp/out"), 2)
+        # sanity: a genuine '&' separator still splits segments
+        self.assertEqual(compute_complexity("ls 2>&1 & wait"), 3)
+
+    def test_herestring_counts_as_redirection(self):
+        # #139-2: `<<<` (herestring) previously matched NOTHING on
+        # _COMPLEXITY_REDIR_RE (greedy backtrack + lookahead both fail), so
+        # `cat <<< hello` under-scored as 1. It must count as a redirection.
+        self.assertEqual(compute_complexity("cat <<< hello"), 2)
+        # heredoc `<< EOF` still counts exactly one redirection
+        self.assertEqual(compute_complexity("cat << EOF"), 2)
+        self.assertEqual(compute_complexity("cat <<< a < b"), 3)
+
+    def test_arithmetic_expansion_not_command_substitution(self):
+        # #139-3: `$((...))` is arithmetic expansion, NOT command substitution —
+        # previously `count("$(")` scored it as a substitution (over-count).
+        self.assertEqual(compute_complexity("echo $((1+2))"), 1)
+        # genuine `$(...)` substitution still scores
+        self.assertEqual(compute_complexity("echo $(date)"), 2)
+        self.assertEqual(compute_complexity("echo $((1+2)) $(date)"), 2)
+        # nested arithmetic+substitution counts only the inner substitution
+        self.assertEqual(compute_complexity("echo $(($(date)))"), 2)
 
     def test_separator_agnostic(self):
         # INV-16: |/&/; and surrounding whitespace/newlines are equivalent separators.

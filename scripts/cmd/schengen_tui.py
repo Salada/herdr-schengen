@@ -83,6 +83,7 @@ from core.guard_db import (
     get_escalation_resolution,
     get_instruction_delivery_config,
     get_pane_direct_config,
+    get_pending_command_escalations,
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
@@ -2283,17 +2284,36 @@ class SchengenTUIApp(App):
                         # M7 anti-fatigue (INV-13): when the FIFO head group aggregates
                         # >1 identical (decision_layer, canonical_pattern) rows, surface a
                         # batch line with one-key /approve-batch | /reject-batch actions.
+                        # The banner shows the ACTUAL raw command list of the head batch
+                        # (get_pending_command_escalations() — QUESTION rows excluded,
+                        # INV-QN-1/2) rather than a quoted canonical-pattern abbreviation,
+                        # so the operator consents to the real commands being approved.
+                        # Bounded: only the first MAX_RAW_LIST raw commands render, then a
+                        # visible "[+N more]" indicator (never an unbounded dump).
                         batch_note = ""
                         try:
                             batch_cfg = get_batch_approval_config()
                             if batch_cfg.get("batch_approval_enabled", True):
-                                groups = group_pending_escalations(get_pending_escalations())
+                                groups = group_pending_escalations(get_pending_command_escalations())
                                 head = groups[0] if groups else None
                                 if head and head["count"] > 1 and head["items"][0]["id"] == active_id:
+                                    MAX_RAW_LIST = 3
+                                    raw_list_lines = []
+                                    for it in head["items"][:MAX_RAW_LIST]:
+                                        one_line = str(it["raw_command"]).replace("\n", " ").strip()
+                                        if not one_line:
+                                            one_line = "(empty)"
+                                        raw_list_lines.append(
+                                            f"    · [white]{rich_escape(one_line[:100])}[/]"
+                                            f" [dim]({it['pane_id']})[/]"
+                                        )
+                                    extra = head["count"] - len(raw_list_lines)
+                                    if extra > 0:
+                                        raw_list_lines.append(f"    [dim]… [+{extra} more][/]")
                                     batch_note = (
-                                        f"[bold magenta]⚠ {head['count']} similar commands — pattern:[/] "
-                                        f"[white]{rich_escape(head['canonical_pattern'][:60])}[/] "
-                                        f"[dim](layer: {head['decision_layer']})[/]\n"
+                                        f"[bold magenta]⚠ {head['count']} similar commands — raw:[/]\n"
+                                        + "\n".join(raw_list_lines) + "\n"
+                                        f"[dim]   (layer: {head['decision_layer']})[/]\n"
                                         f"[dim]   [/][bold magenta]/approve-batch[/] [dim]or[/] [bold magenta]/reject-batch[/] [dim]for one-key resolution[/]\n"
                                     )
                         except Exception:

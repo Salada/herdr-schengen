@@ -10,6 +10,7 @@ selects 'once'; arrows/numbers are NOT supported and MUST NOT be sent.
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -522,6 +523,39 @@ class OpenCodeAdapter(AgentAdapter):
             return False, INJECT_SKIP_CHANGED
         write_decision(pane_id, event["permission_id"], "once")
         return True, "permission.reply decision written (permission_id bound)"
+
+    def inject_reject(self, pane_id, req_cmd):
+        """Reject via the agent-aware opencode reject protocol (M7 item 4).
+
+        Channel-first: write a 'reject' decision bound to the exact
+        permission_id — the host plugin replies via
+        client.permission(response: 'reject'), no bare keystroke on the live
+        dialog (issue #57 full closure, same pattern as channel_approve). When
+        no fresh channel event exists, fall back to an `escape` dismiss (the
+        permission-dialog footer keybinding 'esc cancel'), mirroring the legacy
+        reject_escalation semantics so behavior is preserved.
+
+        Returns (rejected: bool, reason: str). rejected=False with a
+        non-'not implemented' reason means the caller must defer (fail-closed):
+        the dialog trampolined to a different request (INJECT_SKIP_CHANGED). An
+        escape-fallback subprocess failure propagates as an exception, which
+        the caller defers (legacy reject_escalation parity).
+        """
+        event = read_channel_event(pane_id)
+        if event and event.get("permission_id"):
+            # Normalized comparison (issue #23/#1910): only a REAL command
+            # mismatch (a different permission request) must abort the reject.
+            if _norm_req_cmd(channel_event_to_req_cmd(event)) != _norm_req_cmd(req_cmd):
+                return False, INJECT_SKIP_CHANGED
+            write_decision(pane_id, event["permission_id"], "reject")
+            return True, "permission.reply reject decision written (permission_id bound)"
+        # No structured channel event: escape dismiss ('esc cancel' footer),
+        # preserving the legacy reject_escalation keystroke path. Fire-and-forget
+        # subprocess.run (NO check=True) mirrors reject_escalation exactly — a
+        # nonzero herdr CLI exit does not raise, and the caller records CANCELLED
+        # best-effort; only a raised exception (pane gone / timeout) defers.
+        subprocess.run(["herdr", "agent", "send-keys", pane_id, "escape"], capture_output=True, timeout=5.0)
+        return True, "rejected (escape dismiss)"
 
     def inject_approval(self, pane_id, req_cmd):
         """Inject 'enter' via the Q3 fail-safe ladder with bounded re-poll and retry.
