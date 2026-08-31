@@ -13,6 +13,7 @@
 2. **Python Runtime**: `python3` (>= 3.9) with standard `venv` and `sqlite3` modules.
 3. **Herdr Multiplexer**: `herdr` CLI installed and active session (`HERDR_ENV=1`).
 4. **ShellCheck**: `shellcheck` binary in `$PATH` (for SAST fast-track evaluation).
+5. **Semgrep** (required): `semgrep` CLI in `$PATH` — declared dependency (`pyproject.toml`, `semgrep>=1.70.0`). Install into the TUI venv below (`pip install 'semgrep>=1.70.0'`) or via `brew install semgrep`. The daemon's host-runtime gate **hard-fails** at startup if `semgrep` is missing (INV-2 fail-closed).
 
 ---
 
@@ -28,7 +29,7 @@ python3 -m venv ~/.local/share/herdr-schengen-tui-venv
 ### Step 2: Install Required Dependencies
 ```bash
 ~/.local/share/herdr-schengen-tui-venv/bin/pip install --upgrade pip
-~/.local/share/herdr-schengen-tui-venv/bin/pip install textual rich httpx
+~/.local/share/herdr-schengen-tui-venv/bin/pip install textual rich httpx 'semgrep>=1.70.0'
 ```
 
 ### Dependency Reference Matrix
@@ -38,6 +39,7 @@ python3 -m venv ~/.local/share/herdr-schengen-tui-venv
 | `textual` | `>= 0.80.0` | TUI | Reactive terminal user interface, layout containers, widgets, command palette |
 | `rich` | `>= 13.0.0` | TUI / Logging | Styled markup rendering, ANSI escaping, text formatting |
 | `httpx` | `>= 0.27.0` | Dual-Model Agent | Async HTTP client for Inspector and Judge OpenAI-compatible LLM endpoints |
+| `semgrep` | `>= 1.70.0` | SAST (required) | SAST pre-filter core (declared dependency). Missing binary hard-fails daemon startup (INV-2) |
 
 ---
 

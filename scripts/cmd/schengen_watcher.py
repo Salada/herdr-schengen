@@ -940,9 +940,25 @@ def verify_host_runtime_environment():
     # SAST availability telemetry — printed ONLY after the host-runtime gate
     # passes, so a rejected/non-Herdr invocation does not emit a misleading
     # "SAST READY" line before the fatal exit (issue #45).
-    _missing = [b for b in ("shellcheck", "semgrep") if shutil.which(b) is None]
-    if _missing:
-        print(f"⚠️  [SAST] DEGRADED — missing binaries: {', '.join(_missing)}", flush=True)
+    #
+    # DECISION (INV-2 fail-closed, TODO_phase3 "[Task/Dependency]"): semgrep is a
+    # DECLARED required dependency (pyproject.toml `semgrep>=1.70.0`) and the
+    # SAST pre-filter core. A missing semgrep hard-fails startup with an
+    # actionable install guide — degraded SAST must not silently auto-allow.
+    # shellcheck keeps the pre-existing DEGRADED warning (non-fatal), matching
+    # its legacy evaluator fallback path and test-skip behavior.
+    if shutil.which("semgrep") is None:
+        sys.stderr.write(
+            "❌ [SCHENGEN_FATAL] Required SAST dependency 'semgrep' not found on PATH.\n"
+            "   semgrep is a declared required dependency of herdr-schengen (SAST pre-filter core).\n"
+            "   Install it, then restart the daemon from the TUI (Ctrl+T):\n"
+            "     - Python venv : ~/.local/share/herdr-schengen-tui-venv/bin/pip install 'semgrep>=1.70.0'\n"
+            "     - Homebrew    : brew install semgrep\n"
+            "   Refusing to start: degraded SAST must not silently auto-allow (INV-2 fail-closed).\n"
+        )
+        sys.exit(1)
+    if shutil.which("shellcheck") is None:
+        print("⚠️  [SAST] DEGRADED — missing binary: shellcheck", flush=True)
     else:
         print("✅ [SAST] READY (shellcheck + semgrep)", flush=True)
 
