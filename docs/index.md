@@ -21,6 +21,7 @@ source-code path(s) under `scripts/`.
 | [ADR-011](adr/adr-011-default-llm-provider-openai-deepseek-removal.md) | Active | Default LLM provider: OpenAI (gpt-5.6-luna), DeepSeek opt-in only. | `scripts/core/cloud_judge.py`, `scripts/tools/schengen_agent_llm.py` |
 | [ADR-012](adr/adr-012-high-contrast-text-selection.md) | Active | High-contrast text-selection visibility in the TUI. | `scripts/cmd/schengen_tui.py` |
 | [ADR-013](adr/adr-013-opencode-structured-permission-channel.md) | Active | OpenCode structured permission channel & programmatic approval. | `opencode/plugins/schengen-host.js`, `scripts/adapters/agent_adapters/` |
+| [ADR-014](adr/adr-014-escalation-phase-model-and-ephemeral-ipc.md) | Active | Escalation phase model (in-flight / judging / human-required) & ephemeral cross-process IPC. | `scripts/core/security_evaluator.py` (`_emit_phase`), `scripts/cmd/schengen_watcher.py`, `scripts/cmd/schengen_tui.py` |
 
 ## 2. Guides (`docs/guides/`)
 
