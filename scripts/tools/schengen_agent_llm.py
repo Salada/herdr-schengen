@@ -416,12 +416,13 @@ def approve_batch_escalations(feedback: str = "Approved in batch via TUI") -> Di
                         approver="other", resolution="SUPERSEDED",
                     )
                 if aa.outcome == "advanced_safe":
-                    resolve_escalation(pane_id=pane, approver="machine")
-                    record_adjudication(
-                        0, pane, kind, "APPROVE",
-                        f"auto-advanced (batch, dialog trampoline): {aa.reason}",
-                        approver="machine",
-                    )
+                    # B was already injected by run_auto_advance (verified-inject).
+                    # B has NO escalation row, so there is nothing to resolve here;
+                    # record_audit_log below (mechanism="auto-advance") is the sole
+                    # provenance capture. Do NOT resolve_escalation(pane_id=...) —
+                    # it would over-broadly machine-resolve unrelated stale
+                    # escalations for this pane — and do NOT record_adjudication(0, ...)
+                    # (a dangling escalation_id=0 reference).
                     try:
                         record_audit_log(
                             pane_id=pane, raw_command=aa.new_req_cmd,
@@ -647,14 +648,10 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                         )
                     if aa.outcome == "advanced_safe":
                         # The run loop already injected B (verified-inject path).
-                        # Record B with approver="machine" provenance; B is NEVER
-                        # seeded into session memory / workspace rules (INV-AA-6).
-                        resolve_escalation(pane_id=target_pane, approver="machine")
-                        record_adjudication(
-                            0, target_pane, agent_kind, "APPROVE",
-                            f"auto-advanced (dialog trampoline): {aa.reason}",
-                            approver="machine",
-                        )
+                        # B has NO escalation row; record_audit_log below
+                        # (mechanism="auto-advance") is the sole provenance capture.
+                        # Do NOT resolve_escalation(pane_id=...) (over-broad) or
+                        # record_adjudication(0, ...) (dangling escalation_id=0).
                         try:
                             record_audit_log(
                                 pane_id=target_pane, raw_command=aa.new_req_cmd,
