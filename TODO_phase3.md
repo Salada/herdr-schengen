@@ -36,11 +36,24 @@
   - 임시 Workaround 조치 (2026-08-31 완료):
     • 블로킹 긴급 해소를 위해 Escalation #2800 레코드를 SQLite에서 `status='RESOLVED', resolution='ANSWERED', approver='human-pane'`로 수동 업데이트하여 TUI 배너 클리어 완료. (코드 수준 근본 해결 필요)
   - 해결 방향 (최저 난이도 / 최소 변경):
-    • **Watcher 및 TUI의 단순 Liveness 소멸 감지 & Auto-Evict (가장 낮은 난이도 적용)**:
       1) `schengen_watcher.py`: `decision_layer == "QUESTION"` 에스컬레이션에 대해 어댑터의 질문 다이얼로그(header/footer)가 소멸되었거나 에이전트가 `blocked`를 벗어난 경우 즉시 큐에서 해소/제거(`resolve_escalation` 또는 `status=RESOLVED, approver="pane-direct"` / `resolution="ANSWERED"`).
       2) `schengen_tui.py`: `pre-render slot validation`에서 `is_question` 예외를 제거하고, `adapter.dialog_is_live(pane_text) == False`일 때 즉시 큐에서 자동 퇴출(Silent Eviction)하여 상단 배너 고착 해소.
 
+
+[] [Bug/OpenCode] OpenCode 장문 커밋/Heredoc 승인 시 뷰포트 절단으로 인한 `_norm_req_cmd` 불일치 및 키 주입 실패 (사례: #3143):
+  - 현상 및 원인 (사례: Escalation #3143 OpenCode `w1D:p1` Git 커밋 명령):
+    • Gatekeeper LLM이 타당성 검토 후 `APPROVE` 판정을 내렸고 DB 상에는 `status='RESOLVED', resolution='APPROVED', approver='gatekeeper'`로 기록되었으나, 실제 OpenCode 터미널은 `Permission required` 모달 상태로 계속 멈춰 있어 승인이 해소되지 않는 현상 발생.
+    • 근본 원인:
+      1) `opencode.py`의 `inject_approval`은 키 주입 직전 TOCTOU 안전을 위해 `_norm_req_cmd(live_req) == _norm_req_cmd(req_cmd)`를 검증함.
+      2) 에스컬레이션 원문 `req_cmd`는 다줄 Heredoc 전체(~800자)를 포함하지만, OpenCode TUI 뷰포트에서는 화면 크기 한계로 커밋 본문 중간이 잘린 채 렌더링되어 `live_req`가 절단된 문자열로 추출됨.
+      3) 이로 인해 `_norm_req_cmd` 비교가 실패하여 `inject_approval`이 `(False, INJECT_SKIP_CHANGED)`를 반환하고 실제 `enter` 키를 전송하지 못함.
+  - 해결 방안:
+    1) Prefix/포괄 매칭 허용: `live_req`가 `req_cmd`의 선행 Prefix와 일치하고 다이얼로그 헤더/옵션이 유효하면 동일 명령으로 인정.
+    2) `ctrl+f` 풀스크린 전개 연동 (PR #152 `expand_dialog` 활용): 절단 의심 시 `ctrl+f`로 전개 후 재비교.
+    3) 주입 실패 시 DB 상태 불일치 방어 (`INV-INJ-1`): 키 주입이 실패했을 때는 `RESOLVED`로 성급히 전이되지 않도록 방어.
+
 [] [Idea/Architecture] Question 분리 처리: 커맨드 에스컬레이션 큐 비차단(Non-blocking) & 사이드바/힌트 버튼 기반 Pane 점프 분리
+
   - Context & Core Problem:
     • Question은 TUI에서 승인/거절할 수 없고 반드시 사용자가 해당 Pane으로 가서 텍스트를 입력해야 함.
     • 현재 구조에서는 Question이 발생하면 TUI 단일 활성 슬롯을 점유하여, 다른 에이전트들의 모든 위험 명령 에스컬레이션 및 승인 파이프라인이 전면 병목(Block)되는 심각한 비효율 발생.
