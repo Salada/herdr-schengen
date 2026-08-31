@@ -1711,6 +1711,12 @@ def resolve_escalation(
     disposition (APPROVED/REJECTED) WITHOUT overwriting an existing value when
     left None — pane-direct auto-eviction uses it to stamp APPROVED provenance
     without clobbering a prior human/gatekeeper disposition.
+
+    Sprint 1c Auto-Advance (INV-AA-7) introduces a third disposition value:
+    `resolution="SUPERSEDED"` is stamped on a trampolined escalation A whose
+    enter was NEVER delivered (the dialog advanced to a new request B mid-
+    evaluation). It is reconciled as CANCELLED with approver="other" — the row
+    is NEVER marked APPROVED, and the value is free-text (no schema change).
     """
     init_db()
     now_iso = datetime.now(timezone.utc).isoformat()

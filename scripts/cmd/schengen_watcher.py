@@ -1061,6 +1061,110 @@ def find_blocked_panes(agent_filter=frozenset(), exclude_panes=None):
     return list(set(blocked))
 
 
+def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False):
+    """Apply completed silent-inspection results for one poll cycle.
+
+    Completed inspections are applied only after the live dialog is re-read
+    (INV-CONC-4); worker threads never touch panes, SQLite, or UI.
+
+    INV-AA-8 (audit-truth): an AUTO_APPROVED audit row is written ONLY after a
+    VERIFIED inject success (or dry-run simulation). When the dialog changed
+    mid-evaluation (INJECT_SKIP_CHANGED), the approval was NOT delivered, so
+    the audit records an honest AUTO_DEFERRED entry instead — never
+    AUTO_APPROVED. MANUAL_DELEGATED rows (unsafe -> human queue) are unchanged.
+    """
+    for pane_id, request, result in inspector.completed():
+        req_cmd, state_seq, agent_status, pane_info, visible_text = request
+        live_info = get_pane_info(pane_id)
+        adapter = get_adapter(live_info.get("agent", "")) if live_info else None
+        live_cmd = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) if adapter else None
+        if not live_info or live_cmd != req_cmd:
+            inspector.release(pane_id, request)
+            continue
+        is_safe, reason, layer, tax = result
+        if not is_safe:
+            # Unsafe -> delegated to the human queue. The audit row documents the
+            # delegation (unchanged behavior).
+            record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision="MANUAL_DELEGATED",
+                safety_reason=reason or "", agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
+                origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
+                mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
+                shadow_mode=tax.get("shadow_mode", False))
+            inspector.human_queue.append((pane_id, live_info, req_cmd, reason, layer, visible_text, state_seq, agent_status))
+            inspector.set_state(pane_id, request, "queued")
+            continue
+        # Safe -> verified-inject path. The AUTO_APPROVED audit row is written
+        # ONLY after the inject is verified (INV-AA-8).
+        deferred = False
+        approval_failed_reason = None
+        if not dry_run:
+            # Channel approval is an explicit OpenCode opt-in.  Keep
+            # its verified permission.reply path ahead of the
+            # keystroke fallback used by every other adapter.
+            if guard_db.get_channel_approve_config():
+                ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
+                if ch_approved:
+                    deadline = time.monotonic() + 2.5
+                    while time.monotonic() < deadline:
+                        time.sleep(0.5)
+                        if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                            break
+                    else:
+                        print(
+                            f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
+                            flush=True,
+                        )
+                    if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                        print(f"🚀 Auto-approving {live_info.get('agent', 'unknown')} via permission.reply for {pane_id}...", flush=True)
+                if ch_reason == INJECT_SKIP_CHANGED:
+                    deferred = True
+                    print(f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.", flush=True)
+            if not deferred:
+                current_req = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80))
+                if current_req == req_cmd:
+                    approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
+                    if not approved and inject_reason == INJECT_SKIP_CHANGED:
+                        deferred = True
+                        print(f"⏭️  [SKIP] Pane {pane_id} dialog changed during evaluation; deferring to next poll.", flush=True)
+                    elif not approved:
+                        approval_failed_reason = inject_reason
+                        print(f"🚨 [{live_info.get('agent', 'unknown')}] {inject_reason} on {pane_id}", flush=True)
+                elif current_req is not None:
+                    deferred = True
+                    print(f"⏭️  [SKIP] Pane {pane_id} prompt changed during evaluation; deferring to next poll.", flush=True)
+        if deferred:
+            # INV-AA-8: the approval was NOT delivered — write an honest
+            # AUTO_DEFERRED entry, never AUTO_APPROVED.
+            record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision="AUTO_DEFERRED",
+                safety_reason=f"dialog changed mid-evaluation; approval not delivered: {reason or ''}".strip(),
+                agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
+                origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
+                mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
+                shadow_mode=tax.get("shadow_mode", False))
+            inspector.release(pane_id, request)
+            continue
+        if approval_failed_reason:
+            # Real inject failure (not a dialog change): escalate; NO
+            # AUTO_APPROVED row is written (the approval was not delivered).
+            escalate_request(
+                pane_id, live_info, req_cmd, approval_failed_reason,
+                "OPENCODE_FAILSAFE", live_info.get("agent", "unknown"), visible_text=visible_text,
+            )
+            last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
+            inspector.release(pane_id, request)
+            continue
+        # VERIFIED inject success (or dry-run simulation): AUTO_APPROVED audit
+        # row written ONLY now (INV-AA-8).
+        record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision="AUTO_APPROVED",
+            safety_reason=reason or "", agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
+            origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
+            mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
+            shadow_mode=tax.get("shadow_mode", False))
+        last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": True, "last_alert_time": time.time()}
+        resolve_escalation(pane_id=pane_id, approver="machine")
+        inspector.release(pane_id, request)
+
+
 def main():
     global _RELOAD_REQUESTED
     config = load_watcher_config()
@@ -1233,76 +1337,7 @@ def main():
         while True:
             # Completed inspections are applied only after the live dialog is
             # re-read (INV-CONC-4); worker threads never touch panes, SQLite, or UI.
-            for pane_id, request, result in inspector.completed():
-                req_cmd, state_seq, agent_status, pane_info, visible_text = request
-                live_info = get_pane_info(pane_id)
-                adapter = get_adapter(live_info.get("agent", "")) if live_info else None
-                live_cmd = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) if adapter else None
-                if not live_info or live_cmd != req_cmd:
-                    inspector.release(pane_id, request)
-                    continue
-                is_safe, reason, layer, tax = result
-                decision = "AUTO_APPROVED" if is_safe else "MANUAL_DELEGATED"
-                record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision=decision,
-                    safety_reason=reason or "", agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
-                    origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
-                    mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
-                    shadow_mode=tax.get("shadow_mode", False))
-                if is_safe:
-                    deferred = False
-                    approval_failed_reason = None
-                    if not args.dry_run:
-                        # Channel approval is an explicit OpenCode opt-in.  Keep
-                        # its verified permission.reply path ahead of the
-                        # keystroke fallback used by every other adapter.
-                        if guard_db.get_channel_approve_config():
-                            ch_approved, ch_reason = adapter.channel_approve(pane_id, req_cmd)
-                            if ch_approved:
-                                deadline = time.monotonic() + 2.5
-                                while time.monotonic() < deadline:
-                                    time.sleep(0.5)
-                                    if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
-                                        break
-                                else:
-                                    print(
-                                        f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
-                                        flush=True,
-                                    )
-                                if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
-                                    print(f"🚀 Auto-approving {live_info.get('agent', 'unknown')} via permission.reply for {pane_id}...", flush=True)
-                            if ch_reason == INJECT_SKIP_CHANGED:
-                                deferred = True
-                                print(f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.", flush=True)
-                        if not deferred:
-                            current_req = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80))
-                            if current_req == req_cmd:
-                                approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
-                                if not approved and inject_reason == INJECT_SKIP_CHANGED:
-                                    deferred = True
-                                    print(f"⏭️  [SKIP] Pane {pane_id} dialog changed during evaluation; deferring to next poll.", flush=True)
-                                elif not approved:
-                                    approval_failed_reason = inject_reason
-                                    print(f"🚨 [{live_info.get('agent', 'unknown')}] {inject_reason} on {pane_id}", flush=True)
-                            elif current_req is not None:
-                                deferred = True
-                                print(f"⏭️  [SKIP] Pane {pane_id} prompt changed during evaluation; deferring to next poll.", flush=True)
-                    if deferred:
-                        inspector.release(pane_id, request)
-                        continue
-                    if approval_failed_reason:
-                        escalate_request(
-                            pane_id, live_info, req_cmd, approval_failed_reason,
-                            "OPENCODE_FAILSAFE", live_info.get("agent", "unknown"), visible_text=visible_text,
-                        )
-                        last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
-                        inspector.release(pane_id, request)
-                        continue
-                    last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": True, "last_alert_time": time.time()}
-                    resolve_escalation(pane_id=pane_id, approver="machine")
-                    inspector.release(pane_id, request)
-                else:
-                    inspector.human_queue.append((pane_id, live_info, req_cmd, reason, layer, visible_text, state_seq, agent_status))
-                    inspector.set_state(pane_id, request, "queued")
+            drain_completed_inspections(inspector, last_processed_prompt, dry_run=args.dry_run)
 
             # INV-CONC-3: publish exactly one unsafe result at a time. The rest
             # remain silent in memory until its dialog clears.

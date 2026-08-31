@@ -42,6 +42,7 @@ from core.guard_db import (
     set_batch_approval_config,
 )
 from tools.schengen_agent_llm import approve_batch_escalations
+from adapters.auto_advance import AutoAdvanceResult
 
 GIT_A = "git commit -m 'feat: a'"
 GIT_B = "git commit -m 'feat: b'"
@@ -168,7 +169,14 @@ class TestAntiFatigue(unittest.TestCase):
             "tools.schengen_agent_llm._inject_approval",
             return_value=(False, "INJECT_SKIP_CHANGED"),
         )
-        with fail_patch:
+        # Sprint 1c Auto-Advance: on INJECT_SKIP_CHANGED the batch path consults
+        # the auto-advance coordinator; a not_trampolined result (no new dialog)
+        # defers the item, keeping it PENDING (unchanged fail-closed contract).
+        aa_patch = patch(
+            "tools.schengen_agent_llm.run_auto_advance",
+            return_value=AutoAdvanceResult(outcome="not_trampolined", is_safe=False, reason="no new dialog"),
+        )
+        with fail_patch, aa_patch:
             result = approve_batch_escalations("batch ok")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["resolved"], [])

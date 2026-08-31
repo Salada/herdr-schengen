@@ -51,6 +51,7 @@ from core.feature_db import (
     search_similar_feature_requests,
 )
 from core.guard_db import (
+    enqueue_pending_escalation,
     get_answer_language,
     get_db_connection,
     get_instruction_delivery_config,
@@ -59,11 +60,14 @@ from core.guard_db import (
     get_recent_audit_logs,
     group_pending_escalations,
     record_adjudication,
+    record_audit_log,
     resolve_escalation,
 )
 from adapters.herdr_client import get_pane_text
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter
 from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
+from adapters.auto_advance import run_auto_advance
+from core.cloud_judge import DEFAULT_REASONING_EFFORT
 from core.redaction import redact_for_cloud
 
 # ── Shared fallback config ──────────────────────────────────────────
@@ -395,6 +399,62 @@ def approve_batch_escalations(feedback: str = "Approved in batch via TUI") -> Di
         req = item["raw_command"]
         injected, inject_reason = _inject_approval(pane, kind, req, safe_feedback, send_instruction)
         if not injected:
+            if inject_reason == INJECT_SKIP_CHANGED:
+                # Sprint 1c Auto-Advance (P0): the dialog trampolined to a NEW
+                # request B while we were evaluating A. Same contract as
+                # approve_escalation: reconcile A SUPERSEDED (never APPROVED,
+                # INV-AA-7), auto-advance B through the FULL evaluator, or
+                # enqueue B fresh (do NOT stall).
+                aa = run_auto_advance(
+                    pane, kind, req,
+                    cwd=item.get("cwd") or "", scope=pane, agent_id=kind,
+                    use_llm_judge=False, reasoning_effort=DEFAULT_REASONING_EFFORT,
+                )
+                if aa.outcome != "not_trampolined" and aa.new_req_cmd:
+                    resolve_escalation(
+                        pane_id="", escalation_id=esc_id, resolution_status="CANCELLED",
+                        approver="other", resolution="SUPERSEDED",
+                    )
+                if aa.outcome == "advanced_safe":
+                    resolve_escalation(pane_id=pane, approver="machine")
+                    record_adjudication(
+                        0, pane, kind, "APPROVE",
+                        f"auto-advanced (batch, dialog trampoline): {aa.reason}",
+                        approver="machine",
+                    )
+                    try:
+                        record_audit_log(
+                            pane_id=pane, raw_command=aa.new_req_cmd,
+                            decision="AUTO_APPROVED", safety_reason=aa.reason or "",
+                            agent_kind=kind,
+                            decision_layer=aa.layer.value if aa.layer else "FAST_TRACK_AST",
+                            origin="A",
+                            consequence=(aa.taxonomy or {}).get("consequence", "NONE"),
+                            mechanism="auto-advance",
+                            gate_state=(aa.taxonomy or {}).get("gate_state", "ENFORCE"),
+                            shadow_mode=(aa.taxonomy or {}).get("shadow_mode", False),
+                        )
+                    except Exception:
+                        pass
+                    resolved.append(esc_id)
+                    continue
+                if aa.outcome in ("advanced_unsafe", "parse_failed", "budget_exhausted") and aa.new_req_cmd:
+                    enqueue_pending_escalation(
+                        pane_id=pane,
+                        raw_command=aa.new_req_cmd,
+                        safety_reason=aa.reason or f"auto-advance blocked ({aa.outcome})",
+                        decision_layer=aa.layer.value if aa.layer else "NOT_ALLOWLISTED",
+                        agent_kind=kind,
+                        cwd=item.get("cwd") or "",
+                        origin="A",
+                    )
+                    # A was SUPERSEDED (never approved); B is enqueued fresh for
+                    # human review — count A's slot as deferred (not approved).
+                    deferred.append(esc_id)
+                    continue
+                # not_trampolined / no new command -> A stays PENDING (defer).
+                deferred.append(esc_id)
+                continue
             deferred.append(esc_id)
             continue
         resolve_escalation(
@@ -565,6 +625,82 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                 # hard delivery failure from a dialog-changed deferral so the
                 # gatekeeper can act appropriately.
                 if inject_reason == INJECT_SKIP_CHANGED:
+                    # Sprint 1c Auto-Advance (P0, Refs #3689): the live dialog
+                    # trampolined to a NEW request B while we were evaluating A.
+                    # A's enter was never delivered — reconcile A SUPERSEDED
+                    # (INV-AA-7, NEVER APPROVED), then re-parse + re-evaluate B
+                    # through the FULL evaluator and inject it if safe (INV-AA-1/2).
+                    # Prior-approval inheritance is FORBIDDEN: B gets a fresh
+                    # verdict; B inherits A's cwd/scope/agent_id but re-derives
+                    # origin (Origin.AGENT).
+                    aa = run_auto_advance(
+                        target_pane, agent_kind, req_cmd,
+                        cwd=(esc_row or {}).get("cwd") or "", scope=target_pane, agent_id=agent_kind,
+                        use_llm_judge=False, reasoning_effort=DEFAULT_REASONING_EFFORT,
+                    )
+                    if aa.outcome != "not_trampolined" and aa.new_req_cmd:
+                        # A's enter was never delivered — reconcile as
+                        # CANCELLED/SUPERSEDED (approver="other"), NEVER APPROVED.
+                        resolve_escalation(
+                            pane_id="", escalation_id=esc_id, resolution_status="CANCELLED",
+                            approver="other", resolution="SUPERSEDED",
+                        )
+                    if aa.outcome == "advanced_safe":
+                        # The run loop already injected B (verified-inject path).
+                        # Record B with approver="machine" provenance; B is NEVER
+                        # seeded into session memory / workspace rules (INV-AA-6).
+                        resolve_escalation(pane_id=target_pane, approver="machine")
+                        record_adjudication(
+                            0, target_pane, agent_kind, "APPROVE",
+                            f"auto-advanced (dialog trampoline): {aa.reason}",
+                            approver="machine",
+                        )
+                        try:
+                            record_audit_log(
+                                pane_id=target_pane, raw_command=aa.new_req_cmd,
+                                decision="AUTO_APPROVED", safety_reason=aa.reason or "",
+                                agent_kind=agent_kind,
+                                decision_layer=aa.layer.value if aa.layer else "FAST_TRACK_AST",
+                                origin="A",
+                                consequence=(aa.taxonomy or {}).get("consequence", "NONE"),
+                                mechanism="auto-advance",
+                                gate_state=(aa.taxonomy or {}).get("gate_state", "ENFORCE"),
+                                shadow_mode=(aa.taxonomy or {}).get("shadow_mode", False),
+                            )
+                        except Exception:
+                            pass
+                        return json.dumps({
+                            "status": "success",
+                            "action": "AUTO_ADVANCED",
+                            "escalation_id": esc_id,
+                            "target_pane": target_pane,
+                            "new_escalation": aa.new_req_cmd,
+                            "reason": aa.reason,
+                        }, ensure_ascii=False)
+                    if aa.outcome in ("advanced_unsafe", "parse_failed", "budget_exhausted") and aa.new_req_cmd:
+                        # INV-AA-5/3: B is unsafe or unverifiable (fail-closed) —
+                        # enqueue B FRESH for human review (do NOT stall). A was
+                        # reconciled SUPERSEDED above.
+                        enqueue_pending_escalation(
+                            pane_id=target_pane,
+                            raw_command=aa.new_req_cmd,
+                            safety_reason=aa.reason or f"auto-advance blocked ({aa.outcome})",
+                            decision_layer=aa.layer.value if aa.layer else "NOT_ALLOWLISTED",
+                            agent_kind=agent_kind,
+                            cwd=(esc_row or {}).get("cwd") or "",
+                            origin="A",
+                        )
+                        return json.dumps({
+                            "status": "advanced_unsafe",
+                            "action": "AUTO_ADVANCE_BLOCKED",
+                            "escalation_id": esc_id,
+                            "target_pane": target_pane,
+                            "new_escalation": aa.new_req_cmd,
+                            "reason": aa.reason,
+                        }, ensure_ascii=False)
+                    # not_trampolined (or no new command found): fall through to
+                    # the existing re-polling deferral — A stays PENDING so the
+                    # next poll re-parses and re-evaluates it normally.
                     return json.dumps({
                         "status": "error",
                         "error": f"approval deferred ({agent_kind}): dialog changed mid-evaluation; re-polling",
