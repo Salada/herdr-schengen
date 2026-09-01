@@ -320,18 +320,22 @@
 
 
 
-[x] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅, 사전 복잡도 설명 및 동반자적 심의(Disagree & Commit) 프롬프팅 혁신 (사례: #3864, PR #178 & PR #179 완료):
-   - 해결 및 검증 (PR #178 + PR #179):
-     1) **2a (#3864, PR #179)**: 질문 전 복잡도 유발 요인 사전 분해 및 브리핑, 단순 질문에 성급한 승인 굴복 방지, 대등한 전문 조언자 스탠스 확립 (`INV-GK-1..8`, 단위테스트 8개 추가).
-     2) **2b (PR #178)**: Top Banner(붉은 점멸) + Radar 3-tier 상태 카드(LIVE ESCALATION / GATEKEEPER / BACKGROUND RADAR) + TUI 실시간 연동 (총 653 tests OK).
+[x] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅, 사전 복잡도 설명 및 동반자적 심의(Disagree & Commit) 프롬프팅 혁신 (사례: #3864, PR #178, PR #179, PR #180 완료):
+   - 해결 및 검증 (PR #178 + PR #179 + PR #180):
+     1) **2a (#3864, PR #179 & PR #180)**:
+        - 질문 전 복잡도 유발 요인 사전 분해 및 브리핑 (`STEP 0` 무조건 실행).
+        - `guard_config.approve_advisory` 옵션화 (default: `false`, human-only write):
+          • `false`(기본값): `STEP 3 HUMAN DIRECTIVE` (인간 `/approve` 즉시 집행, direct mandate).
+          • `true`: `STEP 3 DISAGREE & COMMIT` (인간 `/approve` 조언적 수용, Gatekeeper 소신 거절 권고 가능).
+        - 불변식 `INV-GK-1..8` 및 `set_approve_advisory_config` API 구축.
+     2) **2b (PR #178 & 486832d)**:
+        - Top Banner(붉은 점멸) + Radar 3-tier 상태 카드(LIVE ESCALATION / GATEKEEPER / BACKGROUND RADAR).
+        - 맥락별 라벨 정밀화: tier-1 `Inspecting Pane` (PR #178), tier-2 `Judging Pane` (commit 486832d).
+     3) **거버넌스 & 아키텍처 문서화**: 승인 시맨틱스(/approve vs /approve-batch) 및 session-pattern 제거 fail-closed 의도 문서화 완료.
 
-[] [Deferred/TUI] Radar tier-1 카드의 "Blocked Pane" 라벨 맥락별 정밀화 (PR #178 후속):
-   - Context: 자율 검사(`autonomous inspection in progress`) 중에는 프로세스가 완전히 차단된 것이 아니므로 "Blocked Pane" 대신 "Inspecting Pane" 등으로 동적 표기 전환 검토.
+[] [Deferred/TUI] `SettingsModal` (Automation 카테고리) 내 `approve_advisory` 토글 스위치 연동 (PR #180 후속):
+   - Context: PR #180에서 `set_approve_advisory_config` 백엔드 API 및 DB 저장이 완료되었으나, TUI `SettingsModal` Automation 섹션에 UI 토글 스위치 미연결 상태.
+   - Solution: SettingsModal Automation 카테고리에 `Approve Advisory Mode` On/Off 토글 추가.
 
-[] [Deferred/Governance] Disagree & Commit 도입에 따른 `/approve` vs `/approve-batch` 승인 권능 정책 문서화 (PR #179 후속):
-   - Context: Gatekeeper 프롬프트 개편으로 TUI `/approve`는 조언적(advisory, Gatekeeper가 거절 권고 가능) 성격을 띠는 반면, `/approve-batch`는 즉시 인간 직접 승인(direct `human-tui`)으로 주입됨. 인간 지휘관의 "무조건 강제 승인" 커맨드 경로 명확화 및 사용자 가이드 문서화.
-
-[] [Deferred/Governance] Session-Pattern Auto-Approve 제거에 따른 Fail-Closed 재평가 비용 및 의도 명문화 (PR #179 후속):
-   - Context: 과거 세션 내 동일 패턴 자동 승인 로직 제거로 인해 반복 명령도 매번 전체 재평가 파이프라인(AST/denylist/SAST)을 통과함. 이는 보안상의 의도된 Fail-Closed 설계임을 아키텍처 문서에 명확히 기록.
 
 
