@@ -91,6 +91,7 @@ from core.guard_db import (
     group_pending_escalations,
     list_allowlist_rules,
     read_in_flight_state,
+    record_human_opinion,
     resolve_escalation,
     revoke_allowlist_rule,
     set_answer_language,
@@ -969,7 +970,7 @@ class AuditDetailModal(ModalCloseMixin, ModalScreen):
                 yield Static(id="detail-fields")
                 yield Label("Full Command Line", classes="detail-section")
                 yield Static(id="detail-command")
-                yield Label("Past Gatekeeper Opinions (adjudication_log)", classes="detail-section")
+                yield Label("Adjudication Exchange (human opinion → gatekeeper decision)", classes="detail-section")
                 yield Static(id="detail-opinions")
             yield Label("[dim]Press [bold yellow]ESC[/] to return to the ledger[/]", id="detail-help")
 
@@ -1001,9 +1002,16 @@ class AuditDetailModal(ModalCloseMixin, ModalScreen):
             return
         lines = []
         for a in adjudications:
+            if a.get("action") == "HUMAN_OPINION":
+                lines.append(
+                    f"[bold cyan]👤 [Human Opinion][/]  [dim]{format_local_time(a.get('created_at', ''))}[/]  —  "
+                    f"{rich_escape(str(a.get('human_note', '')))}"
+                )
+                continue
             action_badge = "[green]APPROVE[/]" if a["action"] == "APPROVE" else "[red]REJECT[/]"
             lines.append(
-                f"{action_badge}  [dim]{format_local_time(a.get('created_at', ''))}[/]  "
+                f"{action_badge}  [by {format_approver_badge(a.get('approver'), '')}]  "
+                f"[dim]{format_local_time(a.get('created_at', ''))}[/]  —  "
                 f"{rich_escape(str(a.get('feedback', '')))}"
             )
         self.query_one("#detail-opinions", Static).update("\n".join(lines))
@@ -2593,6 +2601,14 @@ class SchengenTUIApp(App):
                 parts = user_msg.split(maxsplit=2)
                 esc_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 reason = parts[2] if len(parts) > 2 else "Approved via TUI"
+                # Provenance split (INV-HO-1): persist the human's raw opinion
+                # BEFORE the gatekeeper LLM call so it survives an LLM outage.
+                # Non-fatal — an opinion write failure must not block the flow.
+                try:
+                    if esc_id:
+                        record_human_opinion(esc_id, reason)
+                except Exception:
+                    pass
                 resp = await self.agent.send_message(f"Approve escalation #{esc_id} with English note: '{reason}'")
                 self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper[/]:")
                 self._write_markdown(resp)
@@ -2603,6 +2619,14 @@ class SchengenTUIApp(App):
                 parts = user_msg.split(maxsplit=2)
                 esc_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                 reason = parts[2] if len(parts) > 2 else "Rejected via TUI"
+                # Provenance split (INV-HO-1): persist the human's raw opinion
+                # BEFORE the gatekeeper LLM call so it survives an LLM outage.
+                # Non-fatal — an opinion write failure must not block the flow.
+                try:
+                    if esc_id:
+                        record_human_opinion(esc_id, reason)
+                except Exception:
+                    pass
                 resp = await self.agent.send_message(f"Reject escalation #{esc_id} with English reason: '{reason}'")
                 self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper[/]:")
                 self._write_markdown(resp)

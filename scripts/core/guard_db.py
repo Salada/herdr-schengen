@@ -179,8 +179,10 @@ def init_db():
             escalation_id INTEGER,
             pane_id TEXT,
             agent_kind TEXT,
-            action TEXT NOT NULL, -- 'APPROVE' | 'REJECT'
+            action TEXT NOT NULL, -- 'APPROVE' | 'REJECT' | 'HUMAN_OPINION' (provenance split, INV-HO-1)
             feedback TEXT,
+            approver TEXT, -- WHO adjudicated: 'gatekeeper' | 'human-tui' (INV-HO-2)
+            human_note TEXT, -- human's raw opinion text, independent of feedback (INV-HO-2)
             created_at TEXT NOT NULL
         );
 
@@ -240,6 +242,17 @@ def init_db():
             cursor.execute("ALTER TABLE user_allowlist ADD COLUMN revoked_at TEXT")
         if "revoked_by" not in ua_columns:
             cursor.execute("ALTER TABLE user_allowlist ADD COLUMN revoked_by TEXT")
+
+        # Migration: adjudication_log provenance columns (provenance split,
+        # INV-HO-5 additive + idempotent). Legacy rows keep NULL approver /
+        # human_note; no backfill. Mirrors the audit_logs.origin /
+        # pending_escalations.origin migration style above.
+        cursor.execute("PRAGMA table_info(adjudication_log)")
+        adj_columns = [c[1] for c in cursor.fetchall()]
+        if "approver" not in adj_columns:
+            cursor.execute("ALTER TABLE adjudication_log ADD COLUMN approver TEXT")
+        if "human_note" not in adj_columns:
+            cursor.execute("ALTER TABLE adjudication_log ADD COLUMN human_note TEXT")
 
         # Create indices after ensuring columns exist
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_audit_layer ON audit_logs(decision_layer);")
@@ -897,7 +910,8 @@ def get_adjudications_for_audit(
     """
     init_db()
     query = """
-        SELECT al.id, al.escalation_id, al.pane_id, al.agent_kind, al.action, al.feedback, al.created_at
+        SELECT al.id, al.escalation_id, al.pane_id, al.agent_kind, al.action,
+               al.approver, al.feedback, al.human_note, al.created_at
         FROM adjudication_log al
         JOIN pending_escalations pe ON pe.id = al.escalation_id
         WHERE pe.pane_id = ? AND pe.raw_command = ?
@@ -1316,6 +1330,7 @@ def record_adjudication(
     feedback: str,
     origin: str = "A",
     approver: str = "gatekeeper",
+    human_note: Optional[str] = None,
 ) -> None:
     """Persist an approve/deny adjudication and its instruction for auditability.
 
@@ -1327,6 +1342,10 @@ def record_adjudication(
     adjudication passes ``approver="human-tui"``, which seeds the novelty gate
     (INV-3) and may auto-promote (issue #7207, human/gatekeeper + AGENT/HUMAN
     origin only). REJECT never seeds the gate regardless of approver.
+
+    ``human_note`` (optional) carries the human's raw opinion text (provenance
+    split, INV-HO-2) — it is independent of ``feedback`` (the author decision
+    text) and is only set on the batch human paths, never on gatekeeper rows.
     """
     init_db()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1338,10 +1357,10 @@ def record_adjudication(
     with get_db_connection() as conn:
         conn.execute(
             """
-            INSERT INTO adjudication_log (escalation_id, pane_id, agent_kind, action, feedback, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO adjudication_log (escalation_id, pane_id, agent_kind, action, feedback, approver, human_note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (escalation_id, pane_id, agent_kind, action, feedback, now_iso),
+            (escalation_id, pane_id, agent_kind, action, feedback, approver, human_note, now_iso),
         )
         if escalation_id:
             conn.execute(
@@ -1383,6 +1402,85 @@ def record_adjudication(
             )
         except Exception:
             pass
+
+
+def _sanitize_human_note(text: str) -> str:
+    """Sanitize a human opinion note (INV-HO-6): strip control chars/newlines,
+    collapse whitespace, truncate to ~256 chars. Local equivalent of
+    tools.schengen_agent_llm._sanitize_feedback (kept local to avoid a
+    core -> tools import cycle)."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"[\r\n\x00-\x1f\x7f]", " ", str(text))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:256]
+
+
+def record_human_opinion(escalation_id: int, note: str) -> None:
+    """Persist the HUMAN's raw opinion BEFORE the gatekeeper LLM call
+    (provenance split, INV-HO-1).
+
+    Writes an adjudication_log row with action='HUMAN_OPINION' and
+    approver='human-tui'. It MUST NOT mutate pending_escalations.resolution /
+    .approver (INV-HO-4) and NEVER seeds the novelty gate / workspace
+    promotion / session memory (INV-HO-3) — only the final disposition with
+    approver="human-tui" grants trust. Unknown escalation_id is a non-fatal
+    no-op so the TUI flow is never blocked by the opinion write.
+    """
+    init_db()
+    sanitized = _sanitize_human_note(note) if note else None
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT pane_id, agent_kind FROM pending_escalations WHERE id = ?",
+            (escalation_id,),
+        ).fetchone()
+        if row is None:
+            return  # non-fatal no-op: escalation not found
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO adjudication_log (escalation_id, pane_id, agent_kind, action, approver, feedback, human_note, created_at)
+            VALUES (?, ?, ?, 'HUMAN_OPINION', 'human-tui', NULL, ?, ?)
+            """,
+            (escalation_id, row["pane_id"], row["agent_kind"], sanitized, now_iso),
+        )
+        conn.commit()
+
+
+def has_human_opinion(escalation_id: int) -> bool:
+    """Return True if the escalation already carries a recorded human opinion
+    (HUMAN_OPINION row, or any human-tui row with a human_note)."""
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM adjudication_log
+            WHERE escalation_id = ? AND (
+                action = 'HUMAN_OPINION'
+                OR (approver = 'human-tui' AND human_note IS NOT NULL)
+            )
+            LIMIT 1
+            """,
+            (escalation_id,),
+        ).fetchone()
+    return row is not None
+
+
+def get_adjudication_exchange(escalation_id: int) -> list[dict]:
+    """Return the full provenance timeline for an escalation: every
+    HUMAN_OPINION row followed by the final gatekeeper/human adjudication
+    rows, in insertion order (INV-HO-1 timeline reconstruction)."""
+    init_db()
+    query = """
+        SELECT id, action, approver, feedback, human_note, created_at
+        FROM adjudication_log
+        WHERE escalation_id = ?
+        ORDER BY id ASC
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, (escalation_id,))
+        return [dict(row) for row in cursor.fetchall()]
 
 
 def _derive_workspace_rule(raw_command: str, decision_layer: Optional[str]) -> list[dict]:
