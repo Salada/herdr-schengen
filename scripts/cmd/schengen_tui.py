@@ -2119,11 +2119,13 @@ class SchengenTUIApp(App):
                 f"[dim]   Pane {pane_id}: {rich_escape(preview)}[/]",
             )
             # Radar status card, tier 1 (autonomous): the pane is held while the
-            # inspector evaluates; no human action due.
+            # inspector evaluates; no human action due. Label is "Inspecting"
+            # (not "Blocked") because the pane is being evaluated, not
+            # blocked-awaiting-human (2b reviewer follow-up).
             _update_static_if_changed(
                 action_card,
                 f"[bold cyan]🔍 Autonomous Inspection[/]\n"
-                f"[dim]Blocked Pane :[/] [bold white]{pane_id}[/] [dim]({agent})[/]\n"
+                f"[dim]Inspecting Pane :[/] [bold white]{pane_id}[/] [dim]({agent})[/]\n"
                 f"[dim]Awaiting     :[/] [dim]⚡ Autonomous inspection in progress...[/]",
             )
             action_card.display = True
@@ -2243,7 +2245,7 @@ class SchengenTUIApp(App):
                     _update_static_if_changed(
                         action_card,
                         f"[bold cyan]🔍 Gatekeeper Checking[/]\n"
-                        f"[dim]Blocked Pane :[/] [bold white]{active_esc['pane_id']}[/] [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                        f"[dim]Judging Pane :[/] [bold white]{active_esc['pane_id']}[/] [dim]({active_esc.get('agent_kind','agent')})[/]\n"
                         f"[dim]Awaiting     :[/] [bold cyan]🤖 Gatekeeper judging…[/]",
                     )
                     action_card.display = True

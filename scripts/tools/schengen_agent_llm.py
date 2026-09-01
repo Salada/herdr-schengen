@@ -53,6 +53,7 @@ from core.feature_db import (
 from core.guard_db import (
     enqueue_pending_escalation,
     get_answer_language,
+    get_approve_advisory_config,
     get_db_connection,
     get_instruction_delivery_config,
     get_pending_command_escalations,
@@ -901,7 +902,14 @@ All previous tasks are finished. If the user asks questions, answer them in {lan
     target_candidate = detected_target or "unknown"
 
     if allow_adjudication:
-        protocol = f"""[🔬 AUTONOMOUS INVESTIGATION & ADJUDICATION PROTOCOL]:
+        # INV-ADV: whether an explicit human /approve|/reject note is a binding
+        # DIRECTIVE (default, approve_advisory=false) or an ADVISORY OPINION the
+        # gatekeeper may DISAGREE with (approve_advisory=true, Disagree & Commit).
+        # STEP 0/1/2 (briefing/investigation/anti-rubber-stamp) are unconditional
+        # in BOTH branches (INV-ADV-2/5); only STEP 3 branches on the config.
+        approve_advisory = get_approve_advisory_config()
+
+        step012 = """[🔬 AUTONOMOUS INVESTIGATION & ADJUDICATION PROTOCOL]:
 
 STEP 0 — MANDATORY PRE-COMPLEXITY/RISK BRIEFING (run BEFORE any verdict):
 - You are FORBIDDEN from approving, rejecting, or deferring until you have decomposed the command into its risk segments and stated your understanding of each.
@@ -917,21 +925,29 @@ STEP 1 — INVESTIGATION (use tools to verify the briefing):
 - Verify unverified claims before approving: call `investigate_path_details`, `investigate_pane_history`, or `read_file_snippet` as appropriate.
 - You may skip tool calls ONLY if STEP 0 already established every risk segment is ABSENT with verifiable certainty. "It looks simple" is NOT a valid skip reason.
 
-STEP 2 — ANTI-RUBBER-STAMP ADJUDICATION (fail-closed):
-- NEVER approve a command merely because it is short or simple-looking, because a human asked you to, or because a similar command was approved earlier in this session. Every approval must rest on the STEP 0 decomposition plus STEP 1 verification.
+STEP 2 — ANTI-RUBBER-STAMP ADJUDICATION (autonomous judgment, fail-closed):
+- NEVER auto-approve a command merely because it is short or simple-looking, or because a similar command was approved earlier in this session. Every AUTONOMOUS approval must rest on the STEP 0 decomposition plus STEP 1 verification.
+- In AUTONOMOUS judgment (no explicit human directive present), approve ONLY when the decomposition + verification confirm zero data-loss / exfil / destructive / system-root risk. Ambiguity, an unverifiable target, or ANY non-trivial risk → DO NOT approve. Defer or reject. When in doubt, fail closed."""
+
+        if approve_advisory:
+            step3 = """STEP 3 — DISAGREE & COMMIT (equal expert, not a rubber stamp):
 - A human's `/approve <id> "reason"` or `/reject <id> "reason"` note is an ADVISORY OPINION — never a directive. Weigh it as evidence; your verdict is your own.
-- Approve ONLY when the decomposition + verification confirm zero data-loss / exfil / destructive / system-root risk. Ambiguity, an unverifiable target, or ANY non-trivial risk → DO NOT approve. Defer or reject. When in doubt, fail closed.
-
-STEP 3 — DISAGREE & COMMIT (equal expert, not a rubber stamp):
-- You are an EQUAL expert security advisor. When the human's expressed opinion conflicts with your STEP 0/1 risk assessment, you MUST DISAGREE and COMMIT to your assessment: reject or escalate — never defer to the human merely because they asked.
+- When the human's expressed opinion conflicts with your STEP 0/1 risk assessment, you MUST DISAGREE and COMMIT to your assessment: reject or escalate — never defer to the human merely because they asked.
 - Name the specific conflicting risk segment in your rejection/escalation. The human does not outrank your risk assessment.
-- If the human's opinion AGREES with a clean assessment, you may approve, but record your independent confirmation (do not echo the human's words verbatim).
+- If the human's opinion AGREES with a clean assessment, you may approve, but record your independent confirmation (do not echo the human's words verbatim)."""
+        else:
+            step3 = """STEP 3 — HUMAN DIRECTIVE (approve_advisory=false; default):
+- A human's `/approve <id> "reason"` or `/reject <id> "reason"` is a DIRECTIVE from the ultimate authority — EXECUTE it. Do NOT second-guess, reject, or escalate an explicit human directive.
+- Your autonomous disagreement (STEP 2 anti-rubber-stamp + fail-closed defer/reject) applies ONLY when you are judging WITHOUT an explicit human directive.
+- When executing a human directive, record your INDEPENDENT confirmation in `english_feedback` (do NOT echo the human's words verbatim): name the risk segments you found and affirm the directive was executed. For a human `/approve`, call `approve_escalation`; for a human `/reject`, call `reject_escalation`."""
 
-STEP 4 — FEEDBACK FORMAT:
+        step4 = """STEP 4 — FEEDBACK FORMAT:
 - `english_feedback` MUST be professional English and MUST embed a condensed risk-segment summary. Examples:
   - Approve: `Approved. Segments: chained=none, mutation=none, egress=none, sensitive=none, substitution=none. Zero data loss risk.`
-  - Reject: `Rejected. Segments: mutation=rm -rf /etc; sensitive=/etc. Conflict: human note asked to approve. Fact: <verified fact>. Alternative: <safe alternative>.`
+  - Reject: `Rejected. Segments: mutation=rm -rf /etc; sensitive=/etc. Alternative: <safe alternative>.`
 - Your final text response to the human MUST begin with the STEP 0 risk-segment briefing, then the verdict."""
+
+        protocol = step012 + "\n\n" + step3 + "\n\n" + step4
     else:
         protocol = f"""[🔬 READ-ONLY INTERPRETATION MODE (NO ADJUDICATION)]:
 - The current escalation is a HUMAN QUESTION dialog, not a command to approve.

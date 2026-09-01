@@ -1064,6 +1064,39 @@ def set_channel_approve_config(enabled: bool) -> bool:
     return bool(enabled)
 
 
+_APPROVE_ADVISORY_DEFAULT = False
+
+
+def get_approve_advisory_config() -> bool:
+    """Return whether the gatekeeper may DISAGREE with an explicit human
+    /approve or /reject directive (advisory mode), or must treat it as a
+    binding directive (default False)."""
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM guard_config WHERE key = 'approve_advisory'"
+        ).fetchone()
+    if row is not None:
+        return _parse_bool(row["value"])
+    return _APPROVE_ADVISORY_DEFAULT
+
+
+def set_approve_advisory_config(enabled: bool) -> bool:
+    """Persist the approve_advisory (Disagree & Commit) opt-in. Returns the new value."""
+    init_db()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            ("approve_advisory", "true" if enabled else "false", now_iso),
+        )
+        conn.commit()
+    return bool(enabled)
+
+
 _COMPLEXITY_TAX_DEFAULTS = {
     "complexity_tax_enabled": True,
     "complexity_threshold": 6,
