@@ -3,9 +3,12 @@
 > **Scope**: additive migration of the SQLite `adjudication_log` table to separate
 > the **human's opinion** from the **gatekeeper's final adjudication** (provenance
 > split, invariants INV-HO-1..6). This runbook is for **explicit** execution under
-> LLM/operator judgment. The daemon's `guard_db.init_db()` applies the same change
-> idempotently on startup — use this runbook only when you must run it explicitly
-> (production review, or running ahead of a code deploy).
+> LLM/operator judgment.
+>
+> **Note**: `guard_db.init_db()` does **not** yet migrate `adjudication_log` (its
+> current migration path only touches `pending_escalations`). Apply this migration
+> explicitly via this runbook; the provenance-split implementation will add the
+> idempotent `adjudication_log` guard to `init_db()` later.
 
 ## 1. Why
 
@@ -97,6 +100,8 @@ legacy rows simply read `NULL`.
 
 ## 8. In-code equivalent
 
-`guard_db.init_db()` performs the same migration idempotently (`PRAGMA table_info`
-+ `ALTER TABLE ... ADD COLUMN`), so a normal daemon/TUI start applies it
-automatically. Use this runbook only for **explicit** execution.
+`guard_db.init_db()` does **not** yet migrate `adjudication_log` — its current
+migration path only touches `pending_escalations`. The provenance-split
+implementation (design spec §1.1) will add the idempotent `PRAGMA table_info` +
+`ALTER TABLE ... ADD COLUMN` guard for `adjudication_log` to `init_db()`. Until
+that lands, apply this migration explicitly via this runbook.
