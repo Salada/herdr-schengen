@@ -150,9 +150,9 @@ Approved. All files verified safely."""
         self.assertIn("investigate_path_details", prompt)
         self.assertIn("investigate_pane_history", prompt)
         self.assertIn("read_file_snippet", prompt)
-        self.assertIn("approve_escalation", prompt)
-        self.assertIn("NO Autonomous Reject", prompt)
-        self.assertIn("AGY Worker Context", prompt)
+        self.assertIn("PRE-COMPLEXITY/RISK BRIEFING", prompt)
+        self.assertIn("DISAGREE & COMMIT", prompt)
+        self.assertNotIn("NO Autonomous Reject", prompt)
 
     @patch("tools.schengen_agent_llm.get_current_command_escalation")
     def test_build_system_prompt_language_directive(self, mock_get_active):
