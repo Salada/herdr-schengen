@@ -82,12 +82,25 @@
 
 
 
+[x] [Provenance] human opinion vs gatekeeper adjudication 분리 (PR #177 완료, 857965b):
+  - 대원칙 & 해결 상태:
+    • `adjudication_log` 테이블에 `approver` 및 `human_note` 컬럼 가법 마이그레이션 적용.
+    • `record_human_opinion`, `has_human_opinion`, `get_adjudication_exchange` 신규 API 추가.
+    • `/approve`, `/reject` 시 인간 의견(opinion-first) 분리 기록 및 배치 승인 시 `human_note` 보존.
+    • `AuditFullscreenModal` 내 인간 의견-Gatekeeper 판정 교환(Exchange) 표시 연동.
+    • `INV-HO-1..6` 불변식 확립 및 12개 단위테스트 추가 (총 646 tests OK, 3 skipped).
+
+[] [Deferred/Provenance] `get_adjudication_exchange` / `has_human_opinion` 프로덕션 모달 전면 연동 (PR #177 후속):
+  - Context: PR #177에서 정의·테스트된 신규 exchange 조회 헬퍼가 현재 프로덕션 모달의 `get_adjudications_for_audit`와 부분 분리되어 있음.
+  - Solution: future-facing 주석 처리 또는 프로덕션 감사 모달 전체를 exchange 뷰로 일원화 전환 검토. (Non-blocking Deferred)
+
 [x] [Bug/DB] `enqueue_pending_escalation` ON CONFLICT 시 `resolution` 및 `approver` 미초기화 버그 (사례: #3159, PR #175 완료):
   - 현상 및 원인 (사례: Escalation #3159 Codex `w1N:p1` 빌드 명령):
     • 동일 Pane에서 과거에 승인된 동일 명령이 재실행되어 에스컬레이션될 때, DB 레코드가 `status='PENDING'`으로 갱신되면서도 이전 승인 이력인 `resolution='APPROVED', approver='pane-direct'`가 `NULL`로 리셋되지 않고 그대로 잔류.
   - 해결 및 검증 (PR #175):
     • `enqueue_pending_escalation`의 `ON CONFLICT(pane_id, command_hash) DO UPDATE SET` 구문에 `resolution = NULL, approver = NULL, delivered_at = NULL` 명시적 초기화 추가.
     • 회귀 단위테스트 `test_re_enqueue_resets_resolution_approver` 추가 (총 634 tests OK, 3 skipped).
+
 
 
 [x] [Idea/Architecture] Question 분리 처리: 커맨드 에스컬레이션 큐 비차단(Non-blocking) & 사이드바/힌트 버튼 기반 Pane 점프 분리 (기구현 검증 완료):
