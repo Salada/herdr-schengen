@@ -34,7 +34,7 @@ try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
-    from cmd.schengen_tui import SchengenTUIApp, AuditFullscreenModal
+    from cmd.schengen_tui import SchengenTUIApp, AuditFullscreenModal, format_approver_badge
     HAS_TEXTUAL = True
 except ImportError:
     SchengenTUIApp = None  # type: ignore
@@ -858,6 +858,17 @@ class TestTUIBadgesAndDeepLinks(unittest.TestCase):
     (status, decision_layer, resolution, approver, FIFO position) and deep-links
     reuse the existing AuditDetailModal open path.
     """
+
+    def test_adjudication_exchange_line_plain_by_prefix(self):
+        # Regression: the "by {approver}" prefix in the adjudication exchange line
+        # must be PLAIN text, not wrapped in Rich tag brackets — "[by [magenta]
+        # gatekeeper[/]]" is malformed markup (MarkupError in Textual Static.update).
+        from rich.text import Text
+
+        badge = format_approver_badge("gatekeeper", "")
+        line = f"[green]APPROVE[/]  by {badge}  [dim]02:03[/]  —  ok"
+        self.assertNotIn("[by [", line)
+        Text.from_markup(line)  # must render without MarkupError
 
     def test_pending_queue_badge_taxonomy(self):
         from cmd.schengen_tui import format_pending_queue_badge
