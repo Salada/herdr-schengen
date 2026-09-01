@@ -1277,7 +1277,7 @@ class TestTUIActionRequiredPanel(unittest.TestCase):
         from cmd.schengen_tui import _chat_plain_text
 
         plain = _chat_plain_text(
-            "[bold red]🚨 ▶ ACTION REQUIRED: Escalation [#7494] Awaiting Human Decision[/]\n"
+            "[bold red blink]🚨 ▶ ACTION REQUIRED: Escalation [#7494] Awaiting Commander Decision[/]\n"
             "[dim]   [✔ Approve] /approve 7494 · [✖ Reject] /reject 7494 [reason] · [🔒 Always Allow] /allow-last[/]\n"
             "╭── [ESCALATION #7494] ──╮"
         )
@@ -1308,6 +1308,7 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
             patch("cmd.schengen_tui.get_pane_info", return_value={"agent_status": "blocked"}),
             patch("cmd.schengen_tui.get_pane_direct_config", return_value={}),
             patch("cmd.schengen_tui.get_batch_approval_config", return_value={"batch_approval_enabled": False}),
+            patch("cmd.schengen_tui.read_in_flight_state", return_value=[]),
             patch("cmd.schengen_tui.subprocess.Popen", return_value=MagicMock()),
         ]
 
@@ -1339,9 +1340,14 @@ class TestTUIActionRequiredPanelAsync(unittest.IsolatedAsyncioTestCase):
                 banner = app.query_one("#active-target-banner", Static)
                 # judge in flight -> checking state, never the red card
                 self.assertIn("Gatekeeper Checking", banner.content)
+                self.assertIn("Autonomous inspection in progress", banner.content)
                 self.assertNotIn("ACTION REQUIRED", banner.content)
+                # radar card tier 2 (gatekeeper judging): visible but NOT
+                # claiming human intervention yet (INV-HR-1/2)
                 card = app.query_one("#action-card", Static)
-                self.assertFalse(card.display)
+                self.assertTrue(card.display)
+                self.assertIn("Gatekeeper", card.content)
+                self.assertNotIn("HUMAN INTERVENTION REQUIRED", card.content)
                 # judge round-trip completes (finally clears state)
                 app._judging_escalation_id = None
                 app._processing_chat = False
@@ -1968,8 +1974,11 @@ class TestTUIPhase2JudgeGatingAsync(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Gatekeeper Checking", banner.content)
                 self.assertNotIn("ACTION REQUIRED", banner.content)
                 self.assertNotIn("Human Authorization", banner.content)
+                # radar card tier 2: gatekeeper phase visible, human NOT required
                 card = app.query_one("#action-card", Static)
-                self.assertFalse(card.display)
+                self.assertTrue(card.display)
+                self.assertIn("Gatekeeper judging", card.content)
+                self.assertNotIn("HUMAN INTERVENTION REQUIRED", card.content)
                 chat_plain = "\n".join(app._chat_plain)
                 self.assertNotIn("Human Authorization Required", chat_plain)
                 # judge was invoked exactly once, authored by the inspector

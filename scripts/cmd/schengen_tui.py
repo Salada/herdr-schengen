@@ -1606,16 +1606,20 @@ class SchengenTUIApp(App):
         margin-bottom: 1;
         content-align: left middle;
     }
-    /* Radar "Action Required" live state card: shown only while a PENDING/
-       DELIVERED escalation is awaiting human intervention (Phase 2). */
+    /* Radar "Action Required" live status card (Sprint 2b, 3-tier):
+       tier 1 = autonomous inspection in progress (Phase-1 in-flight),
+       tier 2 = gatekeeper judging (INV-HR-1/2 — not yet human-required),
+       tier 3 = PENDING/DELIVERED command escalation awaiting the commander.
+       Amber border signals "attention" at all tiers; the red alarm is carried
+       by the tier-3 content so the autonomous/checking tiers stay calm. */
     #action-card {
         display: none;
         height: auto;
         min-height: 4;
         max-height: 7;
         background: $surface-darken-1;
-        border: tall $error;
-        border-left: heavy $error;
+        border: tall $warning;
+        border-left: heavy $warning;
         padding: 0 1;
         margin-bottom: 1;
         content-align: left middle;
@@ -2102,14 +2106,27 @@ class SchengenTUIApp(App):
         if in_flight and not active_esc:
             oldest = min(in_flight, key=lambda e: e.get("started_at", 0))
             pane_id = oldest.get("pane_id", "?")
+            agent = oldest.get("agent_kind") or "agent"
             preview = (oldest.get("command_preview") or "")[:60]
+            # Top banner, autonomous tier: calm dim line — NO red alarm, because
+            # no escalation awaits the commander yet (INV-PH1-4: a PENDING
+            # command escalation ALWAYS outranks this informational state).
             _update_static_if_changed(
                 banner,
-                f"\n[bold cyan]⏳ Phase-1 In-Flight (pre-escalation)[/]\n"
+                f"\n[dim]⚡ Autonomous inspection in progress...[/]\n"
+                f"[bold cyan]⏳ Phase-1 In-Flight (pre-escalation)[/]\n"
                 f"[dim]   {format_inflight_phase_badge(oldest.get('phase', 'inspector'))}[/]\n"
                 f"[dim]   Pane {pane_id}: {rich_escape(preview)}[/]",
             )
-            action_card.display = False
+            # Radar status card, tier 1 (autonomous): the pane is held while the
+            # inspector evaluates; no human action due.
+            _update_static_if_changed(
+                action_card,
+                f"[bold cyan]🔍 Autonomous Inspection[/]\n"
+                f"[dim]Blocked Pane :[/] [bold white]{pane_id}[/] [dim]({agent})[/]\n"
+                f"[dim]Awaiting     :[/] [dim]⚡ Autonomous inspection in progress...[/]",
+            )
+            action_card.display = True
             self._set_action_state_ui(None)
         elif active_esc:
             active_id = active_esc["id"]
@@ -2217,10 +2234,19 @@ class SchengenTUIApp(App):
                     _update_static_if_changed(
                         banner,
                         f"\n[bold cyan]🔍 Gatekeeper Checking…[/]\n"
+                        f"[dim]⚡ Autonomous inspection in progress...[/]\n"
                         f"[dim]   Escalation [#{active_id}] · {active_esc['pane_id']} ({active_esc.get('agent_kind','agent')})[/]\n"
                         f"[dim]   Judge evaluating command safety — no action required yet.[/]",
                     )
-                    action_card.display = False
+                    # Radar status card, tier 2 (gatekeeper): the judge LLM is
+                    # still investigating (INV-HR-1/2) — NOT yet human-required.
+                    _update_static_if_changed(
+                        action_card,
+                        f"[bold cyan]🔍 Gatekeeper Checking[/]\n"
+                        f"[dim]Blocked Pane :[/] [bold white]{active_esc['pane_id']}[/] [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                        f"[dim]Awaiting     :[/] [bold cyan]🤖 Gatekeeper judging…[/]",
+                    )
+                    action_card.display = True
                     self._set_action_state_ui(None)
                 else:
                     # ── Phase 2b: judge finished (or no judge) and the
@@ -2270,7 +2296,7 @@ class SchengenTUIApp(App):
                         except Exception:
                             batch_note = ""
                         banner_text = (
-                            f"[bold red]🚨 ▶ ACTION REQUIRED: Escalation #{active_id} Awaiting Human Decision[/]\n"
+                            f"[bold red blink]🚨 ▶ ACTION REQUIRED: Escalation #{active_id} Awaiting Commander Decision[/]\n"
                             f"[bold white]Cmd:[/] {rich_escape(alarm_cmd)}\n"
                             f"{batch_note}"
                             f"[bold yellow]Reason:[/] {rich_escape(reason_short)}\n"
@@ -2308,7 +2334,8 @@ class SchengenTUIApp(App):
             self._set_action_state_ui(None)
             _update_static_if_changed(
                 banner,
-                "\n[bold green]✔ No active escalations  —  Queue clear[/]\n"
+                "\n[dim]⚡ Autonomous inspection in progress...[/]\n"
+                "[bold green]✔ No active escalations  —  Queue clear[/]\n"
                 "[dim]🛡️  Autonomous border control active across all Herdr workspaces[/]\n"
                 "[dim]   Listening for Gray-Zone mutations and critical AST denylists[/]",
             )
