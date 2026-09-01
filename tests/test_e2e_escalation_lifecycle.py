@@ -24,6 +24,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 import core.guard_db as guard_db
 from core.guard_db import (
+    enqueue_pending_escalation,
     get_pending_escalations,
     resolve_escalation,
     get_recent_audit_logs,
@@ -66,6 +67,51 @@ class TestE2EEscalationLifecycle(unittest.TestCase):
         conn.commit()
         conn.close()
         return esc_id
+
+    def test_re_enqueue_resets_resolution_approver(self):
+        """#3159: re-enqueuing the SAME command for the SAME pane (ON CONFLICT)
+        must reset the prior resolution/approver/delivered_at to NULL — a
+        re-escalated row must never show "PENDING but already APPROVED"."""
+        pane_id = "w1D:p3159"
+        cmd = "rm -rf /tmp/reconflict"
+        esc_id = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=cmd, safety_reason="test",
+            decision_layer="GRAY_ZONE", agent_kind="agy",
+        )
+        resolve_escalation(
+            pane_id=pane_id, escalation_id=esc_id,
+            resolution_status="RESOLVED", is_approval=True,
+            approver="pane-direct", resolution="APPROVED",
+        )
+        conn = guard_db.get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT resolution, approver FROM pending_escalations WHERE id = ?", (esc_id,)
+            ).fetchone()
+            self.assertEqual(row["resolution"], "APPROVED")
+            self.assertEqual(row["approver"], "pane-direct")
+        finally:
+            conn.close()
+
+        # Re-enqueue the SAME command -> ON CONFLICT must reset the disposition.
+        esc_id2 = enqueue_pending_escalation(
+            pane_id=pane_id, raw_command=cmd, safety_reason="test2",
+            decision_layer="GRAY_ZONE", agent_kind="agy",
+        )
+        self.assertEqual(esc_id2, esc_id)  # same row reused via ON CONFLICT
+
+        conn = guard_db.get_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT status, resolution, approver, delivered_at FROM pending_escalations WHERE id = ?",
+                (esc_id,),
+            ).fetchone()
+            self.assertEqual(row["status"], "PENDING")
+            self.assertIsNone(row["resolution"])
+            self.assertIsNone(row["approver"])
+            self.assertIsNone(row["delivered_at"])
+        finally:
+            conn.close()
 
     def test_multi_escalation_fifo_progression(self):
         # 1. Insert 3 escalations from different panes
