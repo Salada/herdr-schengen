@@ -37,7 +37,16 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from rich.cells import cell_len
 from rich.markdown import Markdown
-from rich.markup import escape as rich_escape
+def rich_escape(text) -> str:
+    """Escape arbitrary text so it renders literally inside Rich markup.
+
+    rich.markup.escape only escapes ``[`` when it begins a tag (``[a-z#/@]...``),
+    leaving bare brackets in shell commands (e.g. ``[by ``, stray ``]``, heredoc
+    contents) unescaped, which crashes Text.from_markup with MarkupError. Escape
+    ALL backslashes and ``[`` instead; a lone ``]`` is literal in Rich markup and
+    needs no escape.
+    """
+    return str(text).replace("\\", "\\\\").replace("[", "\\[")
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
