@@ -1010,7 +1010,7 @@ class AuditDetailModal(ModalCloseMixin, ModalScreen):
                 continue
             action_badge = "[green]APPROVE[/]" if a["action"] == "APPROVE" else "[red]REJECT[/]"
             lines.append(
-                f"{action_badge}  [by {format_approver_badge(a.get('approver'), '')}]  "
+                f"{action_badge}  by {format_approver_badge(a.get('approver'), '')}  "
                 f"[dim]{format_local_time(a.get('created_at', ''))}[/]  —  "
                 f"{rich_escape(str(a.get('feedback', '')))}"
             )
