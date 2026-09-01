@@ -81,12 +81,13 @@
 
 
 
-[] [Bug/DB] `enqueue_pending_escalation` ON CONFLICT 시 `resolution` 및 `approver` 미초기화 버그 (사례: #3159):
+[x] [Bug/DB] `enqueue_pending_escalation` ON CONFLICT 시 `resolution` 및 `approver` 미초기화 버그 (사례: #3159, PR #175 완료):
   - 현상 및 원인 (사례: Escalation #3159 Codex `w1N:p1` 빌드 명령):
     • 동일 Pane에서 과거에 승인된 동일 명령이 재실행되어 에스컬레이션될 때, DB 레코드가 `status='PENDING'`으로 갱신되면서도 이전 승인 이력인 `resolution='APPROVED', approver='pane-direct'`가 `NULL`로 리셋되지 않고 그대로 잔류.
-    • 이로 인해 TUI와 DB 상에서 "Pending 대기 상태인데 Resolution은 이미 Approved로 표기"되는 기괴한 데이터 불일치 및 관측 혼란 발생.
-  - 해결 방안:
+  - 해결 및 검증 (PR #175):
     • `enqueue_pending_escalation`의 `ON CONFLICT(pane_id, command_hash) DO UPDATE SET` 구문에 `resolution = NULL, approver = NULL, delivered_at = NULL` 명시적 초기화 추가.
+    • 회귀 단위테스트 `test_re_enqueue_resets_resolution_approver` 추가 (총 634 tests OK, 3 skipped).
+
 
 [x] [Idea/Architecture] Question 분리 처리: 커맨드 에스컬레이션 큐 비차단(Non-blocking) & 사이드바/힌트 버튼 기반 Pane 점프 분리 (기구현 검증 완료):
   - 대원칙 & 해결 상태:
