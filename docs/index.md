@@ -31,6 +31,7 @@ source-code path(s) under `scripts/`.
 | [setup-from-scratch.md](guides/setup-from-scratch.md) | Clean-machine bootstrap with portable `$SCHENGEN_HOME/.venv`. | `scripts/cmd/schengen_tui.py`, `scripts/cmd/schengen_watcher.py` |
 | [configuration.md](guides/configuration.md) | Environment variables, `config/schengen_watcher.json`, runtime state. | `scripts/core/guard_db.py`, `scripts/tools/schengen_agent_llm.py`, `config/schengen_watcher.json` |
 | [github-mirror.md](guides/github-mirror.md) | GitHub one-way distribution mirror policy. | `README.github.md` |
+| [db-migration.md](guides/db-migration.md) | SQLite schema migration runbook (`adjudication_log` provenance columns). | `scripts/core/guard_db.py` (`init_db`) |
 
 ## 3. TODO (`docs/todo/`)
 
