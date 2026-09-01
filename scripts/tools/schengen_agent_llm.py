@@ -465,7 +465,7 @@ def approve_batch_escalations(feedback: str = "Approved in batch via TUI") -> Di
             is_approval=True,
             approver="human-tui",
         )
-        record_adjudication(esc_id, pane, kind, "APPROVE", safe_feedback, approver="human-tui")
+        record_adjudication(esc_id, pane, kind, "APPROVE", safe_feedback, approver="human-tui", human_note=safe_feedback)
         resolved.append(esc_id)
     return {"status": "ok", "resolved": resolved, "deferred": deferred}
 
@@ -521,7 +521,7 @@ def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dic
             resolve_escalation(
                 pane_id=pane, escalation_id=esc_id, resolution_status="CANCELLED", approver="human-tui"
             )
-            record_adjudication(esc_id, pane, kind, "REJECT", safe_feedback, approver="human-tui")
+            record_adjudication(esc_id, pane, kind, "REJECT", safe_feedback, approver="human-tui", human_note=safe_feedback)
             resolved.append(esc_id)
         except Exception:
             deferred.append(esc_id)
