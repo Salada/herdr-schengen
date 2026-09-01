@@ -83,13 +83,18 @@
 
 
 
-[x] [Provenance] human opinion vs gatekeeper adjudication 분리 (PR #177 완료, 857965b):
+[x] [Provenance] human opinion vs gatekeeper adjudication 분리 (PR #177 완료, 857965b; TUI 표시 회귀 핫픽스 PR #181, PR #182 완료):
   - 대원칙 & 해결 상태:
     • `adjudication_log` 테이블에 `approver` 및 `human_note` 컬럼 가법 마이그레이션 적용.
     • `record_human_opinion`, `has_human_opinion`, `get_adjudication_exchange` 신규 API 추가.
     • `/approve`, `/reject` 시 인간 의견(opinion-first) 분리 기록 및 배치 승인 시 `human_note` 보존.
     • `AuditFullscreenModal` 내 인간 의견-Gatekeeper 판정 교환(Exchange) 표시 연동.
     • `INV-HO-1..6` 불변식 확립 및 12개 단위테스트 추가 (총 646 tests OK, 3 skipped).
+    • **TUI 표시 회귀 2건 핫픽스 완료 (#181, #182)**:
+      1) `#181`: `AuditDetailModal` 결재 내역 `[by {...}]` malformed Rich markup (`MarkupError`)을 plain `"by "`로 수정.
+      2) `#182`: `rich_escape`의 bare 대괄호/백슬래시 파싱 결함 수정 (전체 `[` 이스케이프 + 백슬래시 이중화 제거).
+      3) 회귀 단위테스트 3종 추가 검증 완료 (`test_adjudication_exchange_line_plain_by_prefix`, `test_rich_escape_escapes_bare_brackets`, `test_rich_escape_preserves_backslashes`).
+
 
 [] [Deferred/Provenance] `get_adjudication_exchange` / `has_human_opinion` 프로덕션 모달 전면 연동 (PR #177 후속):
   - Context: PR #177에서 정의·테스트된 신규 exchange 조회 헬퍼가 현재 프로덕션 모달의 `get_adjudications_for_audit`와 부분 분리되어 있음.
