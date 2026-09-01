@@ -34,7 +34,12 @@ try:
         asyncio.get_event_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
-    from cmd.schengen_tui import SchengenTUIApp, AuditFullscreenModal, format_approver_badge
+    from cmd.schengen_tui import (
+        SchengenTUIApp,
+        AuditFullscreenModal,
+        format_approver_badge,
+        rich_escape,
+    )
     HAS_TEXTUAL = True
 except ImportError:
     SchengenTUIApp = None  # type: ignore
@@ -858,6 +863,29 @@ class TestTUIBadgesAndDeepLinks(unittest.TestCase):
     (status, decision_layer, resolution, approver, FIFO position) and deep-links
     reuse the existing AuditDetailModal open path.
     """
+
+    def test_rich_escape_escapes_bare_brackets(self):
+        # Regression: rich.markup.escape left bare brackets in shell commands
+        # unescaped (e.g. `[by [`, stray `]`, heredoc contents), crashing
+        # Text.from_markup with MarkupError. The local rich_escape must escape
+        # ALL `[` so arbitrary command text renders literally.
+        from rich.text import Text
+
+        cmd = "cat > /tmp/x <<'EOF'\n[by [magenta]gatekeeper[/]]\nEOF\n"
+        escaped = rich_escape(cmd)
+        self.assertNotIn("[by [", escaped)
+        Text.from_markup(escaped)  # must render without MarkupError
+
+    def test_rich_escape_preserves_backslashes(self):
+        # Regression: rich_escape must NOT double backslashes — Rich renders a
+        # standalone `\` literally (only `\[` is an escape). A command like
+        # `sed -E 's/\//_/g'` must round-trip with its backslash intact (INV-HR-6).
+        from rich.text import Text
+
+        cmd = "sed -E 's/\\//_/g'"
+        escaped = rich_escape(cmd)
+        self.assertEqual(escaped, cmd)  # no backslash doubling
+        self.assertEqual(Text.from_markup(escaped).plain, cmd)  # round-trips
 
     def test_adjudication_exchange_line_plain_by_prefix(self):
         # Regression: the "by {approver}" prefix in the adjudication exchange line
