@@ -69,3 +69,35 @@ environment variables to spawned processes (ADR-008) and reads:
 | `SCHENGEN_OPENCODE_CHANNEL_TTL` | TTL for structured permission-channel decisions (ADR-013). |
 | `SCHENGEN_OPENCODE_MAX_INJECT` | Max injection attempts for a permission dialog. |
 | `SCHENGEN_OPENCODE_REPOLL_SECONDS` | Repoll interval for permission decisions. |
+
+## 6. Approval Semantics & `approve_advisory`
+
+Which command grants **unconditional** approval vs **gatekeeper-mediated**
+approval:
+
+| Command | Semantics | Provenance |
+| :--- | :--- | :--- |
+| `/approve <id> [reason]` / `/reject <id> [reason]` (single) | **Gatekeeper-mediated**. The gatekeeper LLM evaluates the command first; with `approve_advisory=false` (default) your note is a binding **DIRECTIVE** that it executes (approver stays `"gatekeeper"`). With `approve_advisory=true` the gatekeeper may **disagree** (Disagree & Commit) — the note is an advisory opinion, not a directive. | `approver="gatekeeper"` |
+| `/approve-batch` / `/reject-batch` | **Deterministic, unconditional**. Resolves the FIFO head batch directly (verified-inject path, no LLM gate) and seeds the human-approval trust window. | `approver="human-tui"` |
+| `/allow <pattern> [description]` (and `/allow-last`) | **Persistent allowlist**. A full-match regex rule reviewed by the human; applies from then on (revocable, never deleted). | `created_by="human-tui"` |
+
+### `approve_advisory` config key (guard_config)
+
+- **Default**: `false` — an explicit human `/approve`/`/reject` note is a binding
+  directive; the gatekeeper executes it without second-guessing (recorded with
+  `approver="gatekeeper"`). Its STEP 2 anti-rubber-stamp/fail-closed rules still
+  apply to *autonomous* judgment (no explicit human directive present).
+- **`true`** — opt-in "Disagree & Commit": the human note becomes an *advisory
+  opinion*; the gatekeeper must weigh it as evidence and may reject/escalate
+  when it conflicts with the STEP 0/1 risk assessment.
+- **How to set**: `scripts/core/guard_db.py`
+  (`set_approve_advisory_config(True|False)`, persisted in the `guard_config`
+  table; read via `get_approve_advisory_config()`). A TUI toggle is planned.
+
+### Session-pattern removal (INTENTIONAL)
+
+The 2a gatekeeper-prompt rework removed the "Session Pattern Memory"
+auto-approve: repetitive commands are **re-evaluated on every interception**
+(fail-closed at the cost of latency). This is deliberate — no command
+auto-approves merely because a similar one was approved earlier in the session
+(STEP 2 anti-rubber-stamp), so patterns can never bypass the evaluator. |

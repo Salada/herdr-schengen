@@ -136,8 +136,9 @@ Approved. All files verified safely."""
         s5 = format_tool_call_beautified("reject_escalation", {"escalation_id": 42, "english_feedback": "Critical risk."})
         self.assertIn("🛑 **[Action Reject]**", s5)
 
+    @patch("tools.schengen_agent_llm.get_approve_advisory_config", return_value=True)
     @patch("tools.schengen_agent_llm.get_current_command_escalation")
-    def test_build_system_prompt_structure(self, mock_get_active):
+    def test_build_system_prompt_structure(self, mock_get_active, mock_approve_advisory):
         mock_get_active.return_value = {
             "id": 123,
             "pane_id": "w1D:p1",
