@@ -876,6 +876,17 @@ class TestTUIBadgesAndDeepLinks(unittest.TestCase):
         self.assertNotIn("[by [", escaped)
         Text.from_markup(escaped)  # must render without MarkupError
 
+    def test_rich_escape_preserves_backslashes(self):
+        # Regression: rich_escape must NOT double backslashes — Rich renders a
+        # standalone `\` literally (only `\[` is an escape). A command like
+        # `sed -E 's/\//_/g'` must round-trip with its backslash intact (INV-HR-6).
+        from rich.text import Text
+
+        cmd = "sed -E 's/\\//_/g'"
+        escaped = rich_escape(cmd)
+        self.assertEqual(escaped, cmd)  # no backslash doubling
+        self.assertEqual(Text.from_markup(escaped).plain, cmd)  # round-trips
+
     def test_adjudication_exchange_line_plain_by_prefix(self):
         # Regression: the "by {approver}" prefix in the adjudication exchange line
         # must be PLAIN text, not wrapped in Rich tag brackets — "[by [magenta]

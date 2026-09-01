@@ -43,10 +43,12 @@ def rich_escape(text) -> str:
     rich.markup.escape only escapes ``[`` when it begins a tag (``[a-z#/@]...``),
     leaving bare brackets in shell commands (e.g. ``[by ``, stray ``]``, heredoc
     contents) unescaped, which crashes Text.from_markup with MarkupError. Escape
-    ALL backslashes and ``[`` instead; a lone ``]`` is literal in Rich markup and
-    needs no escape.
+    ALL ``[`` (a lone ``]`` is literal in Rich markup and needs no escape), and
+    leave backslashes untouched — Rich renders a standalone ``\\`` literally
+    (only ``\\[`` is an escape sequence), so doubling them would corrupt
+    copy-paste fidelity (INV-HR-6).
     """
-    return str(text).replace("\\", "\\\\").replace("[", "\\[")
+    return str(text).replace("[", "\\[")
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
