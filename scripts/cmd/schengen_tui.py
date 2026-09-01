@@ -2245,7 +2245,7 @@ class SchengenTUIApp(App):
                     _update_static_if_changed(
                         action_card,
                         f"[bold cyan]🔍 Gatekeeper Checking[/]\n"
-                        f"[dim]Blocked Pane :[/] [bold white]{active_esc['pane_id']}[/] [dim]({active_esc.get('agent_kind','agent')})[/]\n"
+                        f"[dim]Judging Pane :[/] [bold white]{active_esc['pane_id']}[/] [dim]({active_esc.get('agent_kind','agent')})[/]\n"
                         f"[dim]Awaiting     :[/] [bold cyan]🤖 Gatekeeper judging…[/]",
                     )
                     action_card.display = True
