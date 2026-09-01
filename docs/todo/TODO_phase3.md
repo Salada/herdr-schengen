@@ -5,8 +5,8 @@
 ## Handoff — Next Pick (맥락 보존 우선순위)
 > 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
 > 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
-> **🎉 Sprint 1 (P0 버그 일괄), Sprint 3 (코드베이스 위생/테스트 수렴) 전면 완료**
-> **👉 [Next Active Pick — 최우선 착수] Sprint 2: Gatekeeper 사전 복잡도 브리핑, 동반자적 심의(Disagree & Commit) 프롬프팅 & Action Required 3단 패널 (Refs #3864)**
+> **🎉 Sprint 1 (P0 버그 일괄), Sprint 2 (관측성 & 인터랙션 극대화), Sprint 3 (코드베이스 위생/테스트 수렴) 전면 완료**
+> **👉 [Next Active Pick — 최우선 착수] #3670 Read-Only 체인 진단 명령 Fast-Track 확장 (Narrow Carve-out) / Sprint 4 (대형 동시성 엔진)**
 
 ### 🎯 확정된 4-Sprint 진행 로드맵
 
@@ -15,14 +15,15 @@
    - [x] 1b) `#2800` (블로킹 해소, 완료): TUI pre-render `is_question` 예외 제거 + Watcher QUESTION 소멸 시 auto-evict (`resolution="ANSWERED"`, `sweep_answered_questions` / `test_question_eviction` 10종 검증 완료).
    - [x] 1c) `#3689, #3615, #3623, #3636~#3638` (OpenCode 블로커, PR #172 완료): Dialog Trampoline / TOCTOU 불일치 해소를 위한 Auto-Advance 엔진(`scripts/adapters/auto_advance.py`, `INV-AA-1..9`) 구현 완료 (비동기 지침 큐/디바운스/배치 디퍼 안내 등 보조 UX는 Deferred 백로그로 분리).
 
-2. 🎨 **[Sprint 2 — 관측성 & 인터랙션 극대화 (👉 현재 최우선 착수 대상)]** Gatekeeper 사전 브리핑·동반자적 심의(Disagree & Commit) + Action Required 3단 패널 + Queue Taxonomy + Universal Deep-Link (Refs #3864)
-   - 2a) **Gatekeeper 사전 복잡도/위험 세그먼트 브리핑 & Disagree & Commit 프롬프팅 (#3864 최우선)**: 질문 전 복잡도 유발 요인 사전 분해, 단순 질문에 성급한 승인 굴복 방지, 대등한 전문 조언자 스탠스 확립.
-   - 2b) **Action Required 3단 패널**: Top Banner(붉은 점멸) + Radar 상태 카드 + 채팅창 결재 카드(ANSI Card) + 큐 4단계 배지 + `[#ID]` 원클릭 Audit 점프.
+2. 🎉 **[Sprint 2 — 관측성 & 인터랙션 극대화]** Gatekeeper 사전 브리핑·동반자적 심의(Disagree & Commit) + Action Required 3단 패널 (PR #178 + PR #179 완료 — 653 tests OK)
+   - [x] 2a) **Gatekeeper 사전 복잡도/위험 세그먼트 브리핑 & Disagree & Commit 프롬프팅 (#3864, PR #179 완료)**: 질문 전 복잡도 유발 요인 사전 분해, 단순 질문에 성급한 승인 굴복 방지, 대등한 전문 조언자 스탠스 확립 (`INV-GK-1..8`, 단위테스트 8개 추가).
+   - [x] 2b) **Action Required 3단 패널 (PR #178 완료)**: Top Banner(붉은 점멸) + Radar 3-tier 상태 카드(LIVE ESCALATION / GATEKEEPER / BACKGROUND RADAR) + TUI 실시간 연동.
 
 3. 🎉 **[Sprint 3 — 코드베이스 위생 & 테스트 수렴]** 피어리뷰 후속 일괄 수렴 (PR #171 완료 — 606 ran, 3 skipped (미커밋 트리 무결성 게이트 1건은 커밋 후 해소))
    - #139 Complexity / #2555 TestRunner / M6 CloudJudge / #33 Eviction / #45 SAST / #146 Adapter / M7 AntiFatigue / #7207 WorkspacePolicy 전면 완료.
 4. ⚙️ **[Sprint 4 — 대형 동시성 엔진]** [EPIC] Parallel Silent Inspection & Single-Slot Deferred UI
    - M1(WAL/Lock) ➔ M2(ThreadPool 10) ➔ M3(DeferredHumanQueue) ➔ M4(Pre-Display Purge).
+
 
 ---
 
@@ -319,44 +320,18 @@
 
 
 
-[] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅, 사전 복잡도 설명 및 동반자적 심의(Disagree & Commit) 프롬프팅 혁신 (사례: #3864, Designer & Marketer Persona 협업):
-   - Context & Core Problem (사례: Escalation #3864 복잡도 과다 체인 명령):
-     • 에스컬레이션 발생 시 Gatekeeper가 복잡도의 구체적 원인(복합 파이프라인, worktree 삭제, rsync 미러링 등)을 사전에 충분히 브리핑하지 않은 채 단순히 인간 개입 카드를 띄움.
-     • 인간이 "왜 복잡한지 설명해달라"고 질문하자, Gatekeeper가 인간의 단순 질문을 강압/승인 압박으로 오인하여 주체적 설명 없이 덜컥 승인(`APPROVE`)해버리는 '눈치보기/수동적 굴복' 패턴 노출.
-     • **근본 문제 (순서와 태도의 결함)**:
-       1) **설명의 선행성 부재**: 질문을 받기 전에 이미 어떤 세그먼트들이 누적되어 복잡도(`complexity=19 > threshold=6`)를 초과했는지 먼저 구조적으로 설명했어야 함.
-       2) **동반자적 심의(Disagree & Commit) 태도 결여**: 최종 승인 권한과 책임이 인간에게 있더라도, AI는 질문에 위축되지 않고 전문 보안 동반자로서 대등하게 "어떤 리스크가 있고 무엇이 안전한지" 소신 있는 분석을 먼저 제시한 뒤 인간의 최종 판단에 위임해야 함.
-   - Designer & Governance Persona 통합 개선 방안:
-     1. 💡 [사전 복잡도/위험 세그먼트 브리핑 (Proactive Risk Breakdown)]:
-        - 복잡도 초과(`COMPLEXITY_TAX`)나 Gray-zone 에스컬레이션 시, Gatekeeper Assessment 영역에 체인의 구체적 분해 내역을 질문 전에 사전 명시:
-          • 총 복잡도 점수 및 기여 요인: 체인 연결자(`&&` 4회), 리다이렉션(`2>&1 | tail` 3회), for-loop 서브쉘(`for dst in ...`), 파일시스템 변이(`worktree remove`, `rsync -a`).
-          • 1줄 안전 진단: "VCS 및 대상 디렉터리가 clean하여 데이터 유실 위험은 낮으나, 연쇄 파이프라인 단계별 실패 전파 가능성 존재."
-     2. 🤝 [동반자적 심의 프롬프팅 (Peer-Level Disagree & Commit Guidance)]:
-        - `scripts/tools/schengen_agent_llm.py`의 Gatekeeper 시스템 프롬프트 개편:
-          • 인간의 질문/의견 제시를 즉각적인 승인/거절 강압으로 해석하지 말 것.
-          • 인간이 설명을 요구하거나 의문을 제기할 때, 성급하게 승인 결재를 실행하지 말고 **먼저 자신의 분석과 근거를 차분히 설명(Briefing)**할 것.
-          • AI의 소신 분석을 명확히 전달하되, 최종 결재 책임은 인간 지휘관에게 있음을 존중하는 성숙한 대등 관계(Peer Advisor) 확립.
-     3. 🚩 [Top Global Banner & Radar Live State 동기화]
-        - 자율 조사 중: `[dim]⚡ Autonomous inspection in progress...[/]`
-        - 인간 개입 필수 확정 시: `🚨 [bold red blink]▶ ACTION REQUIRED: Escalation #<id> Awaiting Commander Decision[/]` (붉은색 강조)
-     4. 💬 [Main Chat Area: 구조화된 결재 카드 (Decision Card)]:
-        ```text
-        ╭── 🚨 ACTION REQUIRED ────────────────── Escalation #3864 ──╮
-        │ 🌐 Target   : w1D:p1 (opencode)                             │
-        │ 💻 Command  : cd /repo && git checkout ... && rsync ...     │
-        │ ⚠️ Reason   : COMPLEXITY_TAX (complexity=19 > threshold=6)  │
-        ├─────────────────────────────────────────────────────────────┤
-        │ 💡 Gatekeeper Assessment & Risk Breakdown:                  │
-        │   • Complexity Drivers: 4x '&&' chains, 3x subshell pipes,  │
-        │     1x for-loop (rsync), 1x VCS worktree removal.           │
-        │   • Safety Evaluation: Target worktree & VCS are clean;     │
-        │     zero raw data loss risk, but chained pipe failure risk. │
-        │   • Recommendation: Safe to approve if mirror sync intended.│
-        ├─────────────────────────────────────────────────────────────┤
-        │ 👉 MANDATORY ACTION (Type to execute):                      │
-        │   [✔ Approve]       : /approve 3864                         │
-        │   [✖ Reject]        : /reject 3864 [reason]                 │
-        │   [🔒 Always Allow] : /allow 3864                           │
-        ╰─────────────────────────────────────────────────────────────╯
-        ```
+[x] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅, 사전 복잡도 설명 및 동반자적 심의(Disagree & Commit) 프롬프팅 혁신 (사례: #3864, PR #178 & PR #179 완료):
+   - 해결 및 검증 (PR #178 + PR #179):
+     1) **2a (#3864, PR #179)**: 질문 전 복잡도 유발 요인 사전 분해 및 브리핑, 단순 질문에 성급한 승인 굴복 방지, 대등한 전문 조언자 스탠스 확립 (`INV-GK-1..8`, 단위테스트 8개 추가).
+     2) **2b (PR #178)**: Top Banner(붉은 점멸) + Radar 3-tier 상태 카드(LIVE ESCALATION / GATEKEEPER / BACKGROUND RADAR) + TUI 실시간 연동 (총 653 tests OK).
+
+[] [Deferred/TUI] Radar tier-1 카드의 "Blocked Pane" 라벨 맥락별 정밀화 (PR #178 후속):
+   - Context: 자율 검사(`autonomous inspection in progress`) 중에는 프로세스가 완전히 차단된 것이 아니므로 "Blocked Pane" 대신 "Inspecting Pane" 등으로 동적 표기 전환 검토.
+
+[] [Deferred/Governance] Disagree & Commit 도입에 따른 `/approve` vs `/approve-batch` 승인 권능 정책 문서화 (PR #179 후속):
+   - Context: Gatekeeper 프롬프트 개편으로 TUI `/approve`는 조언적(advisory, Gatekeeper가 거절 권고 가능) 성격을 띠는 반면, `/approve-batch`는 즉시 인간 직접 승인(direct `human-tui`)으로 주입됨. 인간 지휘관의 "무조건 강제 승인" 커맨드 경로 명확화 및 사용자 가이드 문서화.
+
+[] [Deferred/Governance] Session-Pattern Auto-Approve 제거에 따른 Fail-Closed 재평가 비용 및 의도 명문화 (PR #179 후속):
+   - Context: 과거 세션 내 동일 패턴 자동 승인 로직 제거로 인해 반복 명령도 매번 전체 재평가 파이프라인(AST/denylist/SAST)을 통과함. 이는 보안상의 의도된 Fail-Closed 설계임을 아키텍처 문서에 명확히 기록.
+
 
