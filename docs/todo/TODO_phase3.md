@@ -5,8 +5,8 @@
 ## Handoff — Next Pick (맥락 보존 우선순위)
 > 세션이 길어 handoff가 필요하므로, 맥락(불변식·@oracle verdict·어댑터 세부)이 보존되어야 더 잘
 > 진행되는 이슈를 아래 순서로 picking. 각 항목에 필요한 맥락을 요약해두었다.
-> **🎉 Epic Fail-closed 편향 전환 M1~M7 전면 완료 (PR #126~PR #144)**
-> **🎉 핵심 아키텍처 4종 완료: Approver Provenance(PR #147) / Persistent CUD(PR #150) / Codex edit_file(PR #151) / AGY·OpenCode 전개(PR #152)**
+> **🎉 Sprint 1 (P0 버그 일괄), Sprint 3 (코드베이스 위생/테스트 수렴) 전면 완료**
+> **👉 [Next Active Pick — 최우선 착수] Sprint 2: Gatekeeper 사전 복잡도 브리핑, 동반자적 심의(Disagree & Commit) 프롬프팅 & Action Required 3단 패널 (Refs #3864)**
 
 ### 🎯 확정된 4-Sprint 진행 로드맵
 
@@ -15,9 +15,10 @@
    - [x] 1b) `#2800` (블로킹 해소, 완료): TUI pre-render `is_question` 예외 제거 + Watcher QUESTION 소멸 시 auto-evict (`resolution="ANSWERED"`, `sweep_answered_questions` / `test_question_eviction` 10종 검증 완료).
    - [x] 1c) `#3689, #3615, #3623, #3636~#3638` (OpenCode 블로커, PR #172 완료): Dialog Trampoline / TOCTOU 불일치 해소를 위한 Auto-Advance 엔진(`scripts/adapters/auto_advance.py`, `INV-AA-1..9`) 구현 완료 (비동기 지침 큐/디바운스/배치 디퍼 안내 등 보조 UX는 Deferred 백로그로 분리).
 
-2. 🎨 **[Sprint 2 — 관측성 & 인터랙션 극대화]** Action Required 3단 패널 + Queue Taxonomy + Universal Deep-Link
+2. 🎨 **[Sprint 2 — 관측성 & 인터랙션 극대화 (👉 현재 최우선 착수 대상)]** Gatekeeper 사전 브리핑·동반자적 심의(Disagree & Commit) + Action Required 3단 패널 + Queue Taxonomy + Universal Deep-Link (Refs #3864)
+   - 2a) **Gatekeeper 사전 복잡도/위험 세그먼트 브리핑 & Disagree & Commit 프롬프팅 (#3864 최우선)**: 질문 전 복잡도 유발 요인 사전 분해, 단순 질문에 성급한 승인 굴복 방지, 대등한 전문 조언자 스탠스 확립.
+   - 2b) **Action Required 3단 패널**: Top Banner(붉은 점멸) + Radar 상태 카드 + 채팅창 결재 카드(ANSI Card) + 큐 4단계 배지 + `[#ID]` 원클릭 Audit 점프.
 
-   - Top Banner(붉은 점멸) + Radar 상태 카드 + 채팅창 결재 카드 + 큐 4단계 배지 + `[#ID]` 원클릭 Audit 점프.
 3. 🎉 **[Sprint 3 — 코드베이스 위생 & 테스트 수렴]** 피어리뷰 후속 일괄 수렴 (PR #171 완료 — 606 ran, 3 skipped (미커밋 트리 무결성 게이트 1건은 커밋 후 해소))
    - #139 Complexity / #2555 TestRunner / M6 CloudJudge / #33 Eviction / #45 SAST / #146 Adapter / M7 AntiFatigue / #7207 WorkspacePolicy 전면 완료.
 4. ⚙️ **[Sprint 4 — 대형 동시성 엔진]** [EPIC] Parallel Silent Inspection & Single-Slot Deferred UI
