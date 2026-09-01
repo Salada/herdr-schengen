@@ -1559,7 +1559,10 @@ def enqueue_pending_escalation(
                 dialog_snapshot = excluded.dialog_snapshot,
                 cwd = excluded.cwd,
                 origin = excluded.origin,
-                last_transitioned_at = excluded.last_transitioned_at
+                last_transitioned_at = excluded.last_transitioned_at,
+                resolution = NULL,
+                approver = NULL,
+                delivered_at = NULL
         """,
             (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, dialog_snapshot, now_iso, now_iso, cwd, origin),
         )
