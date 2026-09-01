@@ -305,44 +305,44 @@
 
 
 
-[] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅 및 카피라이팅 혁신 (Designer & Marketer Persona 협업)
-   - Context & Problem (사례: OpenCode 대기 중 TUI 모호성 방치 등):
-     - 동일 탭 내에서 대상 Pane(OpenCode w1D:p1)은 permission 대기 상태로 멈춰 있는데, TUI는 명시적으로 인간의 승인을 구하지 않고 모호하게 대기하여 인간 지휘관이 "지금 내가 개입해야 하는지, AI가 계속 조사 중인지" 전혀 알 수 없는 심각한 UX 마찰 발생.
-   - Designer & Marketer Persona 통합 3단 패널 시각적 연동 설계:
-     1. 🚩 [Top Global Banner: 긴급도 즉시 전달]
+[] [Task/UX] Gatekeeper 인간 승인 요청 메시지 포매팅, 사전 복잡도 설명 및 동반자적 심의(Disagree & Commit) 프롬프팅 혁신 (사례: #3864, Designer & Marketer Persona 협업):
+   - Context & Core Problem (사례: Escalation #3864 복잡도 과다 체인 명령):
+     • 에스컬레이션 발생 시 Gatekeeper가 복잡도의 구체적 원인(복합 파이프라인, worktree 삭제, rsync 미러링 등)을 사전에 충분히 브리핑하지 않은 채 단순히 인간 개입 카드를 띄움.
+     • 인간이 "왜 복잡한지 설명해달라"고 질문하자, Gatekeeper가 인간의 단순 질문을 강압/승인 압박으로 오인하여 주체적 설명 없이 덜컥 승인(`APPROVE`)해버리는 '눈치보기/수동적 굴복' 패턴 노출.
+     • **근본 문제 (순서와 태도의 결함)**:
+       1) **설명의 선행성 부재**: 질문을 받기 전에 이미 어떤 세그먼트들이 누적되어 복잡도(`complexity=19 > threshold=6`)를 초과했는지 먼저 구조적으로 설명했어야 함.
+       2) **동반자적 심의(Disagree & Commit) 태도 결여**: 최종 승인 권한과 책임이 인간에게 있더라도, AI는 질문에 위축되지 않고 전문 보안 동반자로서 대등하게 "어떤 리스크가 있고 무엇이 안전한지" 소신 있는 분석을 먼저 제시한 뒤 인간의 최종 판단에 위임해야 함.
+   - Designer & Governance Persona 통합 개선 방안:
+     1. 💡 [사전 복잡도/위험 세그먼트 브리핑 (Proactive Risk Breakdown)]:
+        - 복잡도 초과(`COMPLEXITY_TAX`)나 Gray-zone 에스컬레이션 시, Gatekeeper Assessment 영역에 체인의 구체적 분해 내역을 질문 전에 사전 명시:
+          • 총 복잡도 점수 및 기여 요인: 체인 연결자(`&&` 4회), 리다이렉션(`2>&1 | tail` 3회), for-loop 서브쉘(`for dst in ...`), 파일시스템 변이(`worktree remove`, `rsync -a`).
+          • 1줄 안전 진단: "VCS 및 대상 디렉터리가 clean하여 데이터 유실 위험은 낮으나, 연쇄 파이프라인 단계별 실패 전파 가능성 존재."
+     2. 🤝 [동반자적 심의 프롬프팅 (Peer-Level Disagree & Commit Guidance)]:
+        - `scripts/tools/schengen_agent_llm.py`의 Gatekeeper 시스템 프롬프트 개편:
+          • 인간의 질문/의견 제시를 즉각적인 승인/거절 강압으로 해석하지 말 것.
+          • 인간이 설명을 요구하거나 의문을 제기할 때, 성급하게 승인 결재를 실행하지 말고 **먼저 자신의 분석과 근거를 차분히 설명(Briefing)**할 것.
+          • AI의 소신 분석을 명확히 전달하되, 최종 결재 책임은 인간 지휘관에게 있음을 존중하는 성숙한 대등 관계(Peer Advisor) 확립.
+     3. 🚩 [Top Global Banner & Radar Live State 동기화]
         - 자율 조사 중: `[dim]⚡ Autonomous inspection in progress...[/]`
         - 인간 개입 필수 확정 시: `🚨 [bold red blink]▶ ACTION REQUIRED: Escalation #<id> Awaiting Commander Decision[/]` (붉은색 강조)
-     2. 📡 [Radar Side Panel (Live State Card)]
-        - 우측 상단 상태 카드에 실시간 차단 상태 및 대기 주체 명확 표기:
-          `Blocked Pane : w1D:p1 (opencode)`
-          `Awaiting     : 👤 HUMAN INTERVENTION REQUIRED`
-     3. 💬 [Main Chat Area: 구조화된 결재 카드 (Decision Card)]
-        - 터미널 채팅 영역 내 명확한 시각적 구분을 위한 박스형 카드 프레임(`╭─`, `│`, `╰─`) 적용.
-        - 정보 3단계 청킹(Chunking):
-          • 헤더: `🚨 [ESCALATION #<id>] Commander Authorization Required` (경고색/강조 배지)
-          • 본문: 타겟 Pane/Agent + 정돈된 실행 명령 스니펫 + 1줄 판정 유보 사유(Gray-zone/Denylist 근거)
-          • 액션 바: 승인(Green) vs 거절(Rose) vs 영속허용(Cyan)의 시각적 분리
-     4. ⌨️ [Prompt Bar & Quick Action 연동 (Zero-Friction CTA)]
-        - 인간 개입 상태 진입 시 TUI 하단 입력창 플레이스홀더 또는 프롬프트에 `/approve <id>` 자동 완성 유도.
-        - 지휘관의 결정을 명확히 촉구하는 능동적 카피:
-          *"Commander, autonomous inspection cannot guarantee safety. Your authorization is mandatory to resume w1D:p1."*
-     5. 📐 [최종 출력 렌더링 목업 (Rich Markdown / ANSI Card)]:
+     4. 💬 [Main Chat Area: 구조화된 결재 카드 (Decision Card)]:
         ```text
-        ╭── 🚨 ACTION REQUIRED ────────────────── Escalation #7494 ──╮
+        ╭── 🚨 ACTION REQUIRED ────────────────── Escalation #3864 ──╮
         │ 🌐 Target   : w1D:p1 (opencode)                             │
-        │ 💻 Command  : git show --stat HEAD | head -12 && ...        │
-        │ ⚠️ Reason   : Not in fast-track allowlist (Fail-Closed)     │
+        │ 💻 Command  : cd /repo && git checkout ... && rsync ...     │
+        │ ⚠️ Reason   : COMPLEXITY_TAX (complexity=19 > threshold=6)  │
         ├─────────────────────────────────────────────────────────────┤
-        │ 💡 Gatekeeper Assessment:                                   │
-        │   - Complex compound pipeline with mutation risk.           │
-        │   - Autonomous clearance impossible; human decision needed. │
+        │ 💡 Gatekeeper Assessment & Risk Breakdown:                  │
+        │   • Complexity Drivers: 4x '&&' chains, 3x subshell pipes,  │
+        │     1x for-loop (rsync), 1x VCS worktree removal.           │
+        │   • Safety Evaluation: Target worktree & VCS are clean;     │
+        │     zero raw data loss risk, but chained pipe failure risk. │
+        │   • Recommendation: Safe to approve if mirror sync intended.│
         ├─────────────────────────────────────────────────────────────┤
         │ 👉 MANDATORY ACTION (Type to execute):                      │
-        │   [✔ Approve]       : /approve 7494                         │
-        │   [✖ Reject]        : /reject 7494 [reason]                 │
-        │   [🔒 Always Allow] : /allow 7494                           │
+        │   [✔ Approve]       : /approve 3864                         │
+        │   [✖ Reject]        : /reject 3864 [reason]                 │
+        │   [🔒 Always Allow] : /allow 3864                           │
         ╰─────────────────────────────────────────────────────────────╯
         ```
-     6. Implementation Points:
-        - `scripts/tools/schengen_agent_llm.py` 시스템 프롬프트에 위임 시 위 카드 포맷 생성 강제.
-        - TUI 채팅 렌더러(`_write_markdown`), 상단 배너 및 사이드 패널의 상태 머신 실시간 동기화.
+
