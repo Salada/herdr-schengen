@@ -644,14 +644,19 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
     """Test Recent Audits scroll disabling and Fullscreen Modal scroll configuration."""
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
-    async def test_audit_table_scroll_disabled(self):
+    async def test_audit_table_paging_scroll_config(self):
+        # Infinite-scroll sidebar table (Sprint: audit ledger UI): the compact
+        # table must NOT steal horizontal scroll, must stay click-to-open
+        # (no visible cursor), and must allow VERTICAL scrolling once paged
+        # rows overflow (CSS overflow-y: auto + Textual auto scrollbar).
         from cmd.schengen_tui import SchengenTUIApp, AuditDataTable
         app = SchengenTUIApp()
         async with app.run_test() as pilot:
             table = app.query_one("#audit-table", AuditDataTable)
-            self.assertFalse(table.show_vertical_scrollbar)
-            self.assertFalse(table.show_horizontal_scrollbar)
             self.assertFalse(table.show_cursor)
+            self.assertFalse(table.show_horizontal_scrollbar)
+            css = SchengenTUIApp.CSS
+            self.assertIn("overflow-y: auto;", css)
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
 
@@ -801,6 +806,198 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
         finally:
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
+
+
+def _audit_page_rows(count: int, newest_id: int = 0) -> list:
+    """Synthetic audit rows ordered newest-first (id DESC) for paging tests."""
+    start = newest_id or count
+    return [
+        {
+            "id": start - i,
+            "timestamp": f"2026-09-03T09:{i % 60:02d}:00Z",
+            "pane_id": "wAUDIT:t",
+            "agent_kind": "opencode",
+            "raw_command": f"echo probe-{i} " + "x" * 120,
+            "decision": "ESCALATED",
+            "safety_reason": "paging probe",
+            "decision_layer": "SHELL_AST",
+            "resolution": None,
+            "approver": None,
+        }
+        for i in range(count)
+    ]
+
+
+class TestAuditLedgerTruncationAndPaging(unittest.IsolatedAsyncioTestCase):
+    """Sprint: audit-ledger UI — command-cell truncation + infinite scroll."""
+
+    # ---- display truncation helpers (pure) -------------------------------
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_truncate_cmd_display_short_command_untouched(self):
+        from cmd.schengen_tui import truncate_cmd_display
+        self.assertEqual(truncate_cmd_display("ls -la"), "ls -la")
+        # newlines collapse to a single space; outer whitespace trims
+        self.assertEqual(truncate_cmd_display("  rm -rf\n/tmp/x  "), "rm -rf /tmp/x")
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_truncate_cmd_display_long_command_capped_with_ellipsis(self):
+        from rich.cells import cell_len
+        from cmd.schengen_tui import AUDIT_CMD_MAX_CELLS, truncate_cmd_display
+
+        long = "curl -sS https://example.com/api/v1/items?page=1&limit=500 " + "A" * 400
+        out = truncate_cmd_display(long)  # default 90-cell cap
+        self.assertLessEqual(cell_len(out), AUDIT_CMD_MAX_CELLS)
+        self.assertTrue(out.endswith("…"))
+        # the FULL command is never lost by the helper — only the display form
+        self.assertGreater(len(long), len(out))
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_truncate_cmd_display_respects_wide_cells(self):
+        from cmd.schengen_tui import truncate_cmd_display
+        # 50 two-cell CJK glyphs = 100 cells > 90 cap -> truncated, no split glyph
+        cjk = "가" * 50
+        out = truncate_cmd_display(cjk, max_cells=90)
+        self.assertTrue(out.endswith("…"))
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_modal_cells_truncate_command_and_escape_markup(self):
+        from cmd.schengen_tui import modal_audit_cells
+
+        log = {
+            "id": 42, "timestamp": "2026-09-03T09:30:00Z", "pane_id": "w1D:p1",
+            "agent_kind": "opencode", "raw_command": "echo [probe] " + "B" * 200,
+            "decision": "ESCALATED", "safety_reason": "reason [x]", "decision_layer": "SHELL_AST",
+            "resolution": "APPROVED", "approver": "human-tui",
+        }
+        cells = modal_audit_cells(log)
+        self.assertEqual(cells[0], "#42")
+        self.assertEqual(len(cells), 9)  # existing column layout preserved
+        # command cell: markup-escaped (renders literally) and truncated
+        self.assertIn("…", cells[8])
+        self.assertIn(r"\[probe]", cells[8])  # [ escaped so it can't break markup
+        self.assertNotIn("B" * 200, cells[8])  # full command NOT in the table cell
+        self.assertEqual(cells[7], r"reason \[x]")  # reason escaped too
+
+    # ---- guard_db offset pagination --------------------------------------
+
+    def test_get_recent_audit_logs_offset_pagination(self):
+        from core.guard_db import get_db_connection, get_recent_audit_logs, init_db, record_audit_log
+        init_db()
+        pane = f"wPAGEPROBE:{os.getpid()}"
+        cmds = [f"echo page-probe-{i}" for i in range(6)]
+        try:
+            for i, c in enumerate(cmds):
+                record_audit_log(
+                    pane_id=pane, raw_command=c, decision="AUTO_APPROVED",
+                    safety_reason="offset pagination unit probe", agent_kind="agy",
+                    decision_layer="FAST_TRACK_AST",
+                )
+            page1 = get_recent_audit_logs(limit=4, offset=0, pane_id=pane)
+            page2 = get_recent_audit_logs(limit=4, offset=4, pane_id=pane)
+            self.assertEqual(len(page1), 4)
+            self.assertEqual(len(page2), 2)  # short tail page
+            # newest-first ordering + disjoint windows over the same query
+            ids1 = [r["id"] for r in page1]
+            ids2 = [r["id"] for r in page2]
+            self.assertEqual(ids1, sorted(ids1, reverse=True))
+            self.assertTrue(all(a > b for a in ids1 for b in ids2))
+            # offset beyond the ledger -> empty page (end of infinite scroll)
+            self.assertEqual(get_recent_audit_logs(limit=4, offset=20, pane_id=pane), [])
+        finally:
+            with get_db_connection() as conn:
+                conn.execute("DELETE FROM audit_logs WHERE pane_id = ?", (pane,))
+
+    # ---- live paging (mounted widgets) -----------------------------------
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_fullscreen_modal_pages_older_rows_on_scroll_bottom(self):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        from cmd.schengen_tui import (
+            AUDIT_MODAL_HEAD,
+            AUDIT_PAGE_SIZE,
+            AuditFullscreenModal,
+            PagedAuditDataTable,
+            SchengenTUIApp,
+        )
+
+        rows = _audit_page_rows(250)
+        fake = lambda limit=10, decision=None, pane_id=None, layer=None, offset=0: rows[offset:offset + limit]
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            stack.enter_context(patch("cmd.schengen_tui.get_recent_audit_logs", side_effect=fake))
+            async with app.run_test(size=(140, 50)) as pilot:
+                app.push_screen(AuditFullscreenModal())
+                await pilot.pause(0.6)
+                modal = app.screen
+                table = modal.query_one("#audit-modal-table", PagedAuditDataTable)
+                self.assertEqual(table.row_count, AUDIT_MODAL_HEAD)          # initial batch
+                self.assertEqual(len(table.audit_records), table.row_count)  # detail mapping
+                self.assertEqual(table.audit_records[0]["id"], 250)          # newest first
+
+                # web-style: each scroll-to-bottom appends the NEXT batch
+                table.scroll_end(animate=False, immediate=True)
+                await pilot.pause(0.4)
+                self.assertEqual(table.row_count, AUDIT_MODAL_HEAD + AUDIT_PAGE_SIZE)
+
+                table.scroll_end(animate=False, immediate=True)
+                await pilot.pause(0.4)
+                self.assertEqual(table.row_count, AUDIT_MODAL_HEAD + 2 * AUDIT_PAGE_SIZE)
+
+                # exhausted: a further scroll-to-bottom loads nothing
+                table.scroll_end(animate=False, immediate=True)
+                await pilot.pause(0.4)
+                table.scroll_end(animate=False, immediate=True)
+                await pilot.pause(0.4)
+                self.assertEqual(table.row_count, 250)
+                self.assertTrue(table._audit_all_loaded)
+                self.assertEqual(len(table.audit_records), 250)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_sidebar_audit_table_pages_older_rows(self):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        from cmd.schengen_tui import (
+            AUDIT_PAGE_SIZE,
+            AUDIT_SIDEBAR_HEAD,
+            AuditDataTable,
+            SchengenTUIApp,
+        )
+
+        rows = _audit_page_rows(120, newest_id=120)
+        fake = lambda limit=10, decision=None, pane_id=None, layer=None, offset=0: rows[offset:offset + limit]
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            stack.enter_context(patch("cmd.schengen_tui.get_recent_audit_logs", side_effect=fake))
+            stack.enter_context(patch("cmd.schengen_tui.get_current_command_escalation", return_value=None))
+            stack.enter_context(patch("cmd.schengen_tui.get_oldest_question_escalation", return_value=None))
+            stack.enter_context(patch("cmd.schengen_tui.get_pending_escalations", return_value=[]))
+            stack.enter_context(patch("cmd.schengen_tui.list_active_guard_locks", return_value=[]))
+            stack.enter_context(patch("cmd.schengen_tui.read_in_flight_state", return_value=[]))
+            stack.enter_context(patch("cmd.schengen_tui.get_pane_info", return_value={"agent_status": "idle"}))
+            stack.enter_context(patch("cmd.schengen_tui.get_batch_approval_config", return_value={"batch_approval_enabled": False}))
+            stack.enter_context(patch("cmd.schengen_tui.get_pane_direct_config", return_value={}))
+            stack.enter_context(patch("cmd.schengen_tui.subprocess.Popen", return_value=MagicMock()))
+            async with app.run_test(size=(140, 50)) as pilot:
+                await pilot.pause(0.8)  # radar tick fills the live head page
+                table = app.query_one("#audit-table", AuditDataTable)
+                self.assertEqual(table.row_count, AUDIT_SIDEBAR_HEAD)
+                self.assertEqual(len(table.audit_records), AUDIT_SIDEBAR_HEAD)
+                self.assertEqual(table.audit_records[0]["id"], 120)  # newest first
+
+                # Scroll to the bottom of the loaded rows -> AuditPageMixin
+                # appends the NEXT batch (web-style infinite scroll).
+                table.scroll_end(animate=False, immediate=True)
+                await pilot.pause(0.4)
+                self.assertEqual(table.row_count, AUDIT_SIDEBAR_HEAD + AUDIT_PAGE_SIZE)
+                self.assertEqual(len(table.audit_records), table.row_count)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
 
 
 class TestTUIInputExpansionAndObserverDisabled(unittest.IsolatedAsyncioTestCase):
