@@ -37,9 +37,11 @@ source-code path(s) under `scripts/`.
 
 | Doc | Summary | Related source |
 | :--- | :--- | :--- |
-| [TODO_phase1.md](todo/TODO_phase1.md) | Phase-1 backlog (core gate, allowlist, audit). | `scripts/core/security_evaluator.py` |
-| [TODO_phase2.md](todo/TODO_phase2.md) | Phase-2 backlog (adapters, escalation, codex support). | `scripts/adapters/`, `scripts/cmd/schengen_tui.py` |
-| [TODO_phase3.md](todo/TODO_phase3.md) | Phase-3 backlog (TUI queue status taxonomy, doc restructure #166). | `scripts/cmd/schengen_tui.py` |
+| [TODO_phase1.md](todo/TODO_phase1.md) | Phase-1 backlog (core gate, allowlist, audit) — Completed. | `scripts/core/security_evaluator.py` |
+| [TODO_phase2.md](todo/TODO_phase2.md) | Phase-2 backlog (adapters, escalation, codex support) — Completed. | `scripts/adapters/`, `scripts/cmd/schengen_tui.py` |
+| [TODO_phase3.md](todo/TODO_phase3.md) | Phase-3 backlog (Sprint 1/2/3, provenance split, settings modal) — Completed. | `scripts/cmd/schengen_tui.py`, `scripts/tools/` |
+| [TODO_phase4.md](todo/TODO_phase4.md) | Phase-4 active backlog (Sprint 4 parallel concurrency, #3670 fast-track, #4027 heredoc). | `scripts/core/`, `scripts/cmd/`, `scripts/tools/` |
+
 
 ## 4. Issues & Archive
 
