@@ -382,15 +382,16 @@ class AuditPageMixin:
             pass
 
     def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        # Wheel at the very bottom cannot scroll further — load the next page.
-        # (A mid-list wheel is left to the base DataTable scroll handler; the
-        # stop() keeps the event from bubbling to ancestor containers.)
+        # Preserve the base vertical scroll (mid-list wheel-down scrolls via
+        # `_on_mouse_scroll_down`), then page more when the wheel lands at the
+        # bottom. The base handler stops the event only when it actually scrolls,
+        # so we must NOT stop here unconditionally.
+        self._on_mouse_scroll_down(event)
         if self._at_scroll_bottom():
             self._maybe_load_next_page()
-        event.stop()
 
     def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        event.stop()
+        self._on_mouse_scroll_up(event)
 
 # --- Phase3 queue status taxonomy + universal deep-link (Sprint 2) ----------
 #
