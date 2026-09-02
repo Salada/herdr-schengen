@@ -751,12 +751,18 @@ def get_recent_audit_logs(
     decision: Optional[str] = None,
     pane_id: Optional[str] = None,
     layer: Optional[str] = None,
+    offset: int = 0,
 ) -> list[dict]:
     """Retrieve recent audit events from SQLite3 database with flexible filtering.
 
     Each row also carries the escalation ``resolution`` (APPROVED / REJECTED /
     UNANSWERED / None) via a LEFT JOIN on pending_escalations (pane_id + raw_command),
     so the TUI can display the post-escalation processing status for ESCALATED records.
+
+    ``offset`` enables keyset-free pagination (``ORDER BY a.id DESC LIMIT ? OFFSET ?``):
+    the TUI audit tables fetch an initial batch and append the NEXT batch (web-style
+    infinite scroll) by calling with ``offset=<rows already fetched>``. Defaults to 0
+    so existing callers keep the newest ``limit`` rows.
     """
     init_db()
     query = """
@@ -780,8 +786,9 @@ def get_recent_audit_logs(
         query += " AND UPPER(a.decision_layer) = ?"
         params.append(layer.upper())
 
-    query += " ORDER BY a.id DESC LIMIT ?"
-    params.append(max(1, limit))
+    query += " ORDER BY a.id DESC LIMIT ? OFFSET ?"
+    params.append(max(1, int(limit)))
+    params.append(max(0, int(offset)))
 
     with get_db_connection() as conn:
         cursor = conn.cursor()

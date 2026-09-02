@@ -177,6 +177,222 @@ def format_approver_badge(approver: Optional[str], decision: str = "") -> str:
     return "[dim]—[/]"
 
 
+# --- Audit-ledger display helpers (user-requested table UX) -----------------
+#
+# Two table concerns shared by the sidebar #audit-table and the fullscreen
+# #audit-modal-table:
+#   1. The command cell is DISPLAY-truncated to ~AUDIT_CMD_MAX_CELLS cells with a
+#      trailing "…" so long raw_commands no longer force deep horizontal scroll.
+#      Presentation-only: the FULL command stays in the audit record and remains
+#      reachable via AuditDetailModal (only the table cell is shortened).
+#   2. Both tables page through history (offset/limit pagination): an initial
+#      batch loads, and the next batch APPENDS when the user scrolls to the
+#      bottom (AuditPageMixin below — see class for the trigger model).
+
+AUDIT_CMD_MAX_CELLS = 90      # display cap for the "Full Command Line" cell (~90 chars)
+AUDIT_SIDEBAR_HEAD = 10       # sidebar initial batch (live "recent" head)
+AUDIT_MODAL_HEAD = 100        # fullscreen initial batch
+AUDIT_PAGE_SIZE = 50          # rows appended per load-more batch
+
+
+def truncate_cmd_display(raw_cmd: Any, max_cells: int = AUDIT_CMD_MAX_CELLS) -> str:
+    """Single-line DISPLAY form of a raw command for a table cell.
+
+    Newlines collapse to single spaces and outer whitespace is trimmed. When the
+    result is wider than ``max_cells`` terminal cells it is hard-truncated at a
+    cell boundary with a trailing ``…`` (wide CJK/emoji glyphs count as 2 cells).
+    This is presentation-only: the full command remains in the audit record and
+    is reachable through the detail modal.
+    """
+    text = " ".join(str(raw_cmd or "").split())
+    if cell_len(text) <= max_cells:
+        return text
+    budget = max(0, int(max_cells) - 1)  # reserve 1 cell for the ellipsis
+    out: List[str] = []
+    used = 0
+    for ch in text:
+        w = cell_len(ch)
+        if used + w > budget:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out) + "…"
+
+
+def audit_verdict_badge(decision: Any, resolution: Any, approver: Any) -> str:
+    """Sidebar "V" verdict cell from existing stored fields (presentation only)."""
+    dec = str(decision or "")
+    if "APPROVE" in dec:
+        return "[green]OK[/]"
+    if resolution == "APPROVED":
+        if approver == "human-tui":
+            return "[green]AP·👤[/]"
+        if approver == "gatekeeper":
+            return "[green]AP·🤖[/]"
+        if approver == "pane-direct":
+            return "[green]AP·⌨️[/]"
+        return "[green]AP·❓[/]"
+    if resolution == "REJECTED":
+        if approver == "human-tui":
+            return "[red]RJ·👤[/]"
+        if approver == "gatekeeper":
+            return "[red]RJ·🤖[/]"
+        if approver == "pane-direct":
+            return "[red]RJ·⌨️[/]"
+        return "[red]RJ·❓[/]"
+    if resolution == "UNANSWERED":
+        return "[yellow]UA[/]"
+    if resolution == "ANSWERED":
+        return "[cyan]ANS[/]"
+    return "[red]ES[/]"
+
+
+def sidebar_audit_cells(log: dict, cmd_max_cells: int = AUDIT_CMD_MAX_CELLS) -> Tuple[str, str, str, str]:
+    """The 4 sidebar cells (Time, P, V, Cmd) for one audit row."""
+    ts = str(log.get("timestamp") or "")
+    time_str = ts[11:19] if len(ts) >= 19 else ts
+    return (
+        time_str,
+        str(log.get("pane_id") or ""),
+        audit_verdict_badge(log.get("decision"), log.get("resolution"), log.get("approver")),
+        rich_escape(truncate_cmd_display(log.get("raw_command"), max_cells=cmd_max_cells)),
+    )
+
+
+def modal_audit_cells(log: dict) -> Tuple[str, ...]:
+    """The 9 fullscreen-ledger cells for one audit row.
+
+    The command + reason cells are escaped so shell text (``[``, ``]``, …)
+    renders literally (rich_escape, #181/#182) and the command cell is capped at
+    AUDIT_CMD_MAX_CELLS — the FULL command stays in the record / detail modal.
+    """
+    dec = str(log.get("decision") or "")
+    badge = "[green]APPROVED[/]" if "APPROVE" in dec else "[red]ESCALATED[/]"
+    full_cmd = truncate_cmd_display(log.get("raw_command"), max_cells=AUDIT_CMD_MAX_CELLS)
+    reason = " ".join(str(log.get("safety_reason") or "").split())[:45]
+    return (
+        f"#{log.get('id')}",
+        format_local_time(str(log.get("timestamp") or "")),
+        str(log.get("pane_id") or ""),
+        str(log.get("agent_kind") or "agy"),
+        badge,
+        format_resolution_badge(log.get("resolution"), short=True),
+        str(log.get("decision_layer") or "SHELL_AST"),
+        rich_escape(reason),
+        rich_escape(full_cmd),
+    )
+
+
+class AuditPageMixin:
+    """Web-style infinite scroll for audit DataTables.
+
+    Trigger model: the NEXT page (``audit_page_size`` rows at the current
+    ``offset``) is appended whenever the user reaches the bottom of the loaded
+    rows —
+      * ``watch_scroll_y`` fires while scrolling down toward the bottom
+        (``scroll_y`` increases and lands at/below the max scroll), and
+      * an explicit wheel-down at the bottom (where nothing can scroll further)
+        fires the same load via ``on_mouse_scroll_down``.
+    Appending grows ``max_scroll_y`` below the viewport, so the user keeps
+    scrolling to pull in further pages; the viewport never jumps. A short page
+    (fewer than ``audit_page_size`` rows) or an empty page marks the end of the
+    ledger (``_audit_all_loaded``). Rows are id-deduplicated so a live insert
+    between page loads can never render a duplicate. ``audit_records`` keeps the
+    records in ROW ORDER, so ``row_index`` always maps to the record that
+    rendered it (used by the detail-modal openers).
+
+    Subclasses provide ``_audit_fetch_page(offset, limit)`` and
+    ``_audit_row_cells(log)`` and must call ``_init_audit_paging()`` from their
+    ``__init__`` (or ``on_mount``).
+    """
+
+    audit_page_size = AUDIT_PAGE_SIZE
+
+    def _init_audit_paging(self) -> None:
+        self.audit_records: List[dict] = []           # loaded records, row order
+        self._audit_displayed_ids: Set[int] = set()   # id dedupe across pages
+        self._audit_fetched: int = 0                  # DB rows consumed (next offset)
+        self._audit_all_loaded: bool = False
+        self._audit_loading: bool = False
+        self._audit_cmd_max_cells: int = AUDIT_CMD_MAX_CELLS
+
+    # -- subclass hooks -----------------------------------------------------
+    def _audit_fetch_page(self, offset: int, limit: int) -> List[dict]:
+        raise NotImplementedError
+
+    def _audit_row_cells(self, log: dict) -> Tuple[Any, ...]:
+        raise NotImplementedError
+
+    # -- state helpers ------------------------------------------------------
+    def _audit_prime(self, head_logs: List[dict], initial_batch: int) -> None:
+        """Clear the table and re-baseline on the newest head page (live refresh)."""
+        self.clear()
+        self.audit_records.clear()
+        self._audit_displayed_ids.clear()
+        self._audit_fetched = len(head_logs)
+        self._audit_all_loaded = len(head_logs) < max(1, int(initial_batch))
+        self._audit_loading = False
+        self._audit_append_rows(head_logs)
+
+    def _audit_append_rows(self, logs: List[dict]) -> int:
+        n = 0
+        for log in logs:
+            if log.get("id") in self._audit_displayed_ids:
+                continue
+            self.add_row(*self._audit_row_cells(log))
+            self.audit_records.append(log)
+            self._audit_displayed_ids.add(log["id"])
+            n += 1
+        return n
+
+    def _at_scroll_bottom(self) -> bool:
+        try:
+            return float(self.scroll_y) >= float(self.max_scroll_y) - 0.5
+        except Exception:
+            return False
+
+    def _maybe_load_next_page(self) -> None:
+        if self._audit_loading or self._audit_all_loaded:
+            return
+        if not self._at_scroll_bottom():
+            return
+        self._audit_loading = True
+        try:
+            page = self._audit_fetch_page(self._audit_fetched, self.audit_page_size)
+            if not page:
+                self._audit_all_loaded = True
+                return
+            self._audit_fetched += len(page)
+            self._audit_append_rows(page)
+            if len(page) < self.audit_page_size:
+                self._audit_all_loaded = True
+        except Exception:
+            self._audit_all_loaded = True  # fail-stop: never loop on an error
+        finally:
+            self._audit_loading = False
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_y(old_value, new_value)
+        try:
+            # Only a DOWNWARD scroll that lands at the bottom pages more; a
+            # programmatic clamp back to the top (head refresh) never triggers.
+            if float(new_value) > float(old_value) and self._at_scroll_bottom():
+                self._maybe_load_next_page()
+        except Exception:
+            pass
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        # Preserve the base vertical scroll (mid-list wheel-down scrolls via
+        # `_on_mouse_scroll_down`), then page more when the wheel lands at the
+        # bottom. The base handler stops the event only when it actually scrolls,
+        # so we must NOT stop here unconditionally.
+        self._on_mouse_scroll_down(event)
+        if self._at_scroll_bottom():
+            self._maybe_load_next_page()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        self._on_mouse_scroll_up(event)
+
 # --- Phase3 queue status taxonomy + universal deep-link (Sprint 2) ----------
 #
 # Presentation-only helpers: every badge is derived from EXISTING stored fields
@@ -857,39 +1073,27 @@ class AuditFullscreenModal(ModalCloseMixin, ModalScreen):
             with Horizontal(id="modal-title-bar"):
                 yield Label("[bold cyan]📜 Schengen Security Audit Ledger (Fullscreen Maximize)[/]")
                 yield Button("✕", id="modal-close", classes="modal-close")
-            yield DataTable(id="audit-modal-table")
-            yield Label("[dim]Press [bold yellow]ESC[/] to return · ↑/↓ navigate · [bold yellow]Enter[/] or [bold yellow]click[/] a row for detail[/]", id="audit-modal-help")
+            yield PagedAuditDataTable(id="audit-modal-table")
+            yield Label("[dim]Press [bold yellow]ESC[/] to return · ↑/↓ navigate · [bold yellow]Enter[/] or [bold yellow]click[/] a row for detail · scroll to bottom to load more[/]", id="audit-modal-help")
 
     def on_mount(self) -> None:
-        table = self.query_one("#audit-modal-table", DataTable)
+        table = self.query_one("#audit-modal-table", PagedAuditDataTable)
+        self._audit_table = table
         table.clear(columns=True)
         table.add_columns("ID", "Time", "Pane", "Agent", "Verdict", "Res", "Layer", "Reason", "Full Command Line")
         table.cursor_type = "row"
-        self._logs = get_recent_audit_logs(limit=100)
-        for log in self._logs:
-            dec = log['decision']
-            badge = f"[green]APPROVED[/]" if "APPROVE" in dec else f"[red]ESCALATED[/]"
-            full_cmd = log['raw_command'].replace("\n", " ").strip()
-            time_str = format_local_time(log['timestamp'])
-            table.add_row(
-                f"#{log['id']}",
-                time_str,
-                log['pane_id'],
-                log.get('agent_kind', 'agy'),
-                badge,
-                format_resolution_badge(log.get('resolution'), short=True),
-                log.get('decision_layer', 'SHELL_AST'),
-                log.get('safety_reason', '')[:45],
-                rich_escape(full_cmd)
-            )
+        # Initial batch (newest AUDIT_MODAL_HEAD); older rows page in on scroll.
+        head = get_recent_audit_logs(limit=AUDIT_MODAL_HEAD)
+        table._audit_prime(head, AUDIT_MODAL_HEAD)
         table.focus()
 
     def _open_detail(self, row_index: int) -> None:
         if len(self.app.screen_stack) != 2:
             return
-        if not (0 <= row_index < len(self._logs)):
+        records = getattr(getattr(self, "_audit_table", None), "audit_records", None) or []
+        if not (0 <= row_index < len(records)):
             return
-        audit_id = self._logs[row_index]["id"]
+        audit_id = records[row_index]["id"]
         self.app.push_screen(AuditDetailModal(audit_id))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -1300,16 +1504,37 @@ class UnselectableLabel(Label):
     ALLOW_SELECT = False
 
 
-class AuditDataTable(DataTable):
-    """Compact Recent Audits table with scrolling disabled; opens fullscreen modal on click or selection."""
+class AuditDataTable(AuditPageMixin, DataTable):
+    """Compact Recent Audits table; opens fullscreen modal on click or selection.
+
+    Live widget: ``update_radar_data`` re-baselines the newest page via
+    ``refresh_head``; the user can then scroll down past it and older batches
+    append web-style (AuditPageMixin). Rows beyond the viewport scroll with a
+    slim vertical scrollbar; horizontal scrolling stays off (the command cell is
+    display-truncated, so it never forces deep horizontal scroll).
+    """
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(
             show_cursor=False,
             **kwargs,
         )
-        self.show_vertical_scrollbar = False
+        # Do NOT force show_vertical_scrollbar here: Textual auto-shows it once
+        # the content overflows (CSS overflow-y: auto). show_cursor stays False
+        # so click always opens the fullscreen ledger, never a cell cursor.
         self.show_horizontal_scrollbar = False
+        self._init_audit_paging()
+
+    def _audit_fetch_page(self, offset: int, limit: int) -> List[dict]:
+        return get_recent_audit_logs(limit=limit, offset=offset)
+
+    def _audit_row_cells(self, log: dict) -> Tuple[str, str, str, str]:
+        return sidebar_audit_cells(log, cmd_max_cells=self._audit_cmd_max_cells)
+
+    def refresh_head(self, head_logs: List[dict], cmd_max_cells: Optional[int] = None) -> None:
+        """Re-baseline on the newest head page (live refresh / first fill)."""
+        self._audit_cmd_max_cells = cmd_max_cells or AUDIT_CMD_MAX_CELLS
+        self._audit_prime(head_logs, AUDIT_SIDEBAR_HEAD)
 
     def _open_modal(self) -> None:
         # Prevent opening modal multiple times if already present
@@ -1335,11 +1560,24 @@ class AuditDataTable(DataTable):
         event.stop()
         self._open_modal()
 
-    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        event.stop()
 
-    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        event.stop()
+class PagedAuditDataTable(AuditPageMixin, DataTable):
+    """Fullscreen-ledger DataTable that appends OLDER audit rows on scroll.
+
+    The modal owns the initial fill (``_audit_prime`` in on_mount); every
+    subsequent batch is fetched by the mixin when the user scrolls to the
+    bottom of the loaded rows.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._init_audit_paging()
+
+    def _audit_fetch_page(self, offset: int, limit: int) -> List[dict]:
+        return get_recent_audit_logs(limit=limit, offset=offset)
+
+    def _audit_row_cells(self, log: dict) -> Tuple[Any, ...]:
+        return modal_audit_cells(log)
 
 
 class AuditSectionHeader(Label):
@@ -1649,7 +1887,14 @@ class SchengenTUIApp(App):
         border: solid $surface-lighten-1;
         margin-bottom: 1;
         overflow-x: hidden;
-        overflow-y: hidden;
+        /* auto: Textual shows the slim vertical scrollbar only once appended
+           (infinite-scroll) rows overflow the 10-row viewport. */
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $surface-lighten-2;
+        scrollbar-color-hover: $accent;
+        scrollbar-color-active: $accent-lighten-1;
+        scrollbar-background: transparent;
     }
     DataTable {
         height: 11;
@@ -2377,50 +2622,17 @@ class SchengenTUIApp(App):
         radar_width = radar_col.size.width if radar_col.size.width > 0 else 36
         cmd_allowed_len = max(6, radar_width - 24)
 
-        # 4. Update 10 Audit Table
-        audit_table = self.query_one("#audit-table", DataTable)
-        recent_audits = get_recent_audit_logs(limit=10)
+        # 4. Update Audit Table (live newest-page head; older rows page in on
+        #    scroll-to-bottom via AuditDataTable/AuditPageMixin). The hash covers
+        #    only the head page so appended history survives unchanged ticks and
+        #    re-baselines (clear + newest page) only when new audits arrive.
+        audit_table = self.query_one("#audit-table", AuditDataTable)
+        recent_audits = get_recent_audit_logs(limit=AUDIT_SIDEBAR_HEAD)
         current_audit_hash = str([(a["id"], a["decision"], a.get("resolution")) for a in recent_audits])
-        
+
         if current_audit_hash != self._last_audit_hash:
             self._last_audit_hash = current_audit_hash
-            audit_table.clear()
-            for log in recent_audits:
-                short_cmd = log['raw_command'].replace("\n", " ").strip()
-                if len(short_cmd) > cmd_allowed_len:
-                    short_cmd = short_cmd[:cmd_allowed_len] + "…"
-                time_str = log['timestamp'][11:19] if len(log['timestamp']) >= 19 else log['timestamp']
-                
-                dec = log['decision']
-                resolution = log.get('resolution')
-                approver = log.get('approver')
-                if "APPROVE" in dec:
-                    badge = "[green]OK[/]"
-                elif resolution == "APPROVED":
-                    if approver == "human-tui":
-                        badge = "[green]AP·👤[/]"
-                    elif approver == "gatekeeper":
-                        badge = "[green]AP·🤖[/]"
-                    elif approver == "pane-direct":
-                        badge = "[green]AP·⌨️[/]"
-                    else:
-                        badge = "[green]AP·❓[/]"
-                elif resolution == "REJECTED":
-                    if approver == "human-tui":
-                        badge = "[red]RJ·👤[/]"
-                    elif approver == "gatekeeper":
-                        badge = "[red]RJ·🤖[/]"
-                    elif approver == "pane-direct":
-                        badge = "[red]RJ·⌨️[/]"
-                    else:
-                        badge = "[red]RJ·❓[/]"
-                elif resolution == "UNANSWERED":
-                    badge = "[yellow]UA[/]"
-                elif resolution == "ANSWERED":
-                    badge = "[cyan]ANS[/]"
-                else:
-                    badge = "[red]ES[/]"
-                audit_table.add_row(time_str, log['pane_id'], badge, short_cmd)
+            audit_table.refresh_head(recent_audits, cmd_max_cells=cmd_allowed_len)
 
         # 5. Update Recent Escalations List (FIFO head first, then deferred)
         esc_list = self.query_one("#escalation-list", ListView)
