@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -283,12 +284,88 @@ def modal_audit_cells(log: dict) -> Tuple[str, ...]:
     )
 
 
-class AuditPageMixin:
-    """Web-style infinite scroll for audit DataTables.
+# --- Audit-ledger fuzzy search (fullscreen ledger, client-side) -------------
+#
+# Search is a pure display filter over the ALREADY-PAGED records
+# (``audit_records``): the query + tolerance only decide which loaded rows are
+# shown — the offset/append (infinite-scroll) model is untouched. No new
+# dependency: similarity is stdlib ``difflib.SequenceMatcher``.
 
-    Trigger model: the NEXT page (``audit_page_size`` rows at the current
-    ``offset``) is appended whenever the user reaches the bottom of the loaded
-    rows —
+# Searchable text per record. Command + reason are the core fields; pane /
+# agent / layer / id are cheap, useful extras.
+AUDIT_SEARCH_FIELDS = ("raw_command", "safety_reason", "pane_id", "agent_kind", "decision_layer", "id")
+
+# 5 tolerance levels -> SequenceMatcher ratio thresholds (spec mapping).
+AUDIT_SEARCH_TOLERANCE_THRESHOLDS = {
+    "exact": 1.0,
+    "high": 0.8,
+    "medium": 0.6,
+    "low": 0.4,
+    "loose": 0.2,
+}
+AUDIT_SEARCH_TOLERANCE_LABELS = {
+    "exact": "Exact", "high": "High", "medium": "Medium",
+    "low": "Low", "loose": "Loose",
+}
+AUDIT_SEARCH_TOL_ORDER = ("exact", "high", "medium", "low", "loose")
+AUDIT_SEARCH_TOL_BUTTON_IDS = {tol: f"audit-search-tol-{tol}" for tol in AUDIT_SEARCH_TOL_ORDER}
+AUDIT_SEARCH_DEFAULT_TOLERANCE = "medium"
+
+
+def _normalize_query(query: Any) -> str:
+    """Collapse whitespace + lowercase — the canonical search query form."""
+    return " ".join(str(query or "").lower().split())
+
+
+def audit_field_score(query: str, haystack: str) -> float:
+    """Similarity of one searchable field against the (normalized) query.
+
+    A substring match counts as a perfect 1.0 (containment is a strong exact
+    signal regardless of length). Otherwise the stdlib SequenceMatcher ratio is
+    taken against BOTH the whole field and each whitespace token of the field —
+    a whole-command ratio is diluted by the command length (``"git psh"`` vs a
+    40-char command scores ~0.28), so the token pass lets tolerance levels
+    meaningfully catch single-word typos (``"psh"`` vs ``"push"`` ≈ 0.86).
+    """
+    if not query:
+        return 1.0
+    h = str(haystack or "").lower()
+    if not h:
+        return 0.0
+    if query in h:
+        return 1.0
+    best = SequenceMatcher(None, query, h).ratio()
+    for token in h.split():
+        best = max(best, SequenceMatcher(None, query, token).ratio())
+    return best
+
+
+def audit_record_fuzzy_score(log: dict, query: Any) -> float:
+    """Best per-field similarity of a record against the query (0..1)."""
+    q = _normalize_query(query)
+    if not q:
+        return 1.0
+    return max(
+        (audit_field_score(q, log.get(field)) for field in AUDIT_SEARCH_FIELDS),
+        default=0.0,
+    )
+
+
+def audit_record_matches(log: dict, query: Any, tolerance: str = AUDIT_SEARCH_DEFAULT_TOLERANCE) -> bool:
+    """True when a record passes the query at the chosen tolerance level."""
+    q = _normalize_query(query)
+    if not q:
+        return True
+    threshold = AUDIT_SEARCH_TOLERANCE_THRESHOLDS.get(tolerance, AUDIT_SEARCH_TOLERANCE_THRESHOLDS[AUDIT_SEARCH_DEFAULT_TOLERANCE])
+    return audit_record_fuzzy_score(log, q) >= threshold
+
+
+class AuditPageMixin:
+    """Web-style infinite scroll + client-side search filter for audit DataTables.
+
+    Infinite-scroll trigger model: the NEXT page (``audit_page_size`` rows at
+    the current ``offset``) is appended whenever the user reaches the bottom of
+    the loaded rows —
       * ``watch_scroll_y`` fires while scrolling down toward the bottom
         (``scroll_y`` increases and lands at/below the max scroll), and
       * an explicit wheel-down at the bottom (where nothing can scroll further)
@@ -297,9 +374,15 @@ class AuditPageMixin:
     scrolling to pull in further pages; the viewport never jumps. A short page
     (fewer than ``audit_page_size`` rows) or an empty page marks the end of the
     ledger (``_audit_all_loaded``). Rows are id-deduplicated so a live insert
-    between page loads can never render a duplicate. ``audit_records`` keeps the
-    records in ROW ORDER, so ``row_index`` always maps to the record that
-    rendered it (used by the detail-modal openers).
+    between page loads can never render a duplicate.
+
+    ``audit_records`` keeps ALL LOADED records in DB order (row order when no
+    filter is active). A client-side search filter (``set_search_filter``) shows
+    only the matching subset — the table rows then map to records through
+    ``_filtered_indices`` and ``record_at_row(row_index)`` keeps the
+    row_index → record mapping intact for the detail-modal openers. New pages
+    fetched while a filter is active only render rows that pass the filter, so
+    scrolling can search deeper through history.
 
     Subclasses provide ``_audit_fetch_page(offset, limit)`` and
     ``_audit_row_cells(log)`` and must call ``_init_audit_paging()`` from their
@@ -309,12 +392,16 @@ class AuditPageMixin:
     audit_page_size = AUDIT_PAGE_SIZE
 
     def _init_audit_paging(self) -> None:
-        self.audit_records: List[dict] = []           # loaded records, row order
+        self.audit_records: List[dict] = []           # ALL loaded records, DB order
         self._audit_displayed_ids: Set[int] = set()   # id dedupe across pages
         self._audit_fetched: int = 0                  # DB rows consumed (next offset)
         self._audit_all_loaded: bool = False
         self._audit_loading: bool = False
         self._audit_cmd_max_cells: int = AUDIT_CMD_MAX_CELLS
+        # client-side search filter (empty query = show everything)
+        self._audit_query: str = ""
+        self._audit_tolerance: str = AUDIT_SEARCH_DEFAULT_TOLERANCE
+        self._filtered_indices: Optional[List[int]] = None  # None = identity (all rows)
 
     # -- subclass hooks -----------------------------------------------------
     def _audit_fetch_page(self, offset: int, limit: int) -> List[dict]:
@@ -323,33 +410,51 @@ class AuditPageMixin:
     def _audit_row_cells(self, log: dict) -> Tuple[Any, ...]:
         raise NotImplementedError
 
-    # -- state helpers ------------------------------------------------------
+    # -- loading (records accumulate in audit_records) ----------------------
     def _audit_prime(self, head_logs: List[dict], initial_batch: int) -> None:
-        """Clear the table and re-baseline on the newest head page (live refresh)."""
+        """Clear and re-baseline on the newest head page (live refresh / open)."""
         self.clear()
         self.audit_records.clear()
         self._audit_displayed_ids.clear()
         self._audit_fetched = len(head_logs)
         self._audit_all_loaded = len(head_logs) < max(1, int(initial_batch))
         self._audit_loading = False
-        self._audit_append_rows(head_logs)
+        for log in head_logs:
+            if log.get("id") in self._audit_displayed_ids:
+                continue
+            self.audit_records.append(log)
+            self._audit_displayed_ids.add(log["id"])
+        self._render_display()
 
-    def _audit_append_rows(self, logs: List[dict]) -> int:
-        n = 0
+    def _audit_append_page_records(self, logs: List[dict]) -> int:
+        """Append a fetched page to ``audit_records`` and render matching rows.
+
+        Unfiltered: every new record gets a row (fast append, identity map).
+        Filtered: only records passing the active query/tolerance are added as
+        rows; their ``audit_records`` indices extend ``_filtered_indices``.
+        """
+        added: List[Tuple[int, dict]] = []  # (index in audit_records, log)
         for log in logs:
             if log.get("id") in self._audit_displayed_ids:
                 continue
-            self.add_row(*self._audit_row_cells(log))
+            idx = len(self.audit_records)
             self.audit_records.append(log)
             self._audit_displayed_ids.add(log["id"])
-            n += 1
-        return n
-
-    def _at_scroll_bottom(self) -> bool:
-        try:
-            return float(self.scroll_y) >= float(self.max_scroll_y) - 0.5
-        except Exception:
-            return False
+            added.append((idx, log))
+        if not added:
+            return 0
+        if self._audit_query:
+            for idx, log in added:
+                if audit_record_matches(log, self._audit_query, self._audit_tolerance):
+                    self.add_row(*self._audit_row_cells(log))
+                    if self._filtered_indices is None:
+                        self._filtered_indices = []
+                    self._filtered_indices.append(idx)
+        else:
+            self._filtered_indices = None
+            for _idx, log in added:
+                self.add_row(*self._audit_row_cells(log))
+        return len(added)
 
     def _maybe_load_next_page(self) -> None:
         if self._audit_loading or self._audit_all_loaded:
@@ -363,13 +468,64 @@ class AuditPageMixin:
                 self._audit_all_loaded = True
                 return
             self._audit_fetched += len(page)
-            self._audit_append_rows(page)
+            self._audit_append_page_records(page)
             if len(page) < self.audit_page_size:
                 self._audit_all_loaded = True
         except Exception:
             self._audit_all_loaded = True  # fail-stop: never loop on an error
         finally:
             self._audit_loading = False
+
+    # -- client-side search filter -----------------------------------------
+    def set_search_filter(self, query: Any, tolerance: str = AUDIT_SEARCH_DEFAULT_TOLERANCE) -> None:
+        """Re-render the table showing only records matching ``query``.
+
+        Empty query restores the full (identity) view. Only the loaded records
+        are searched — paging while a filter is active searches deeper.
+        """
+        self._audit_query = _normalize_query(query)
+        if tolerance in AUDIT_SEARCH_TOLERANCE_THRESHOLDS:
+            self._audit_tolerance = tolerance
+        self._render_display()
+
+    def _render_display(self) -> None:
+        """Rebuild the table rows from ``audit_records`` honoring the filter."""
+        if self._audit_query:
+            keep = [
+                (i, log) for i, log in enumerate(self.audit_records)
+                if audit_record_matches(log, self._audit_query, self._audit_tolerance)
+            ]
+            self._filtered_indices = [i for i, _log in keep]
+            self.clear()
+            for _i, log in keep:
+                self.add_row(*self._audit_row_cells(log))
+        else:
+            self._filtered_indices = None
+            self.clear()
+            for log in self.audit_records:
+                self.add_row(*self._audit_row_cells(log))
+
+    def record_at_row(self, row_index: int) -> Optional[dict]:
+        """Map a VISUAL table row index to its audit record (filter-aware)."""
+        try:
+            if self._filtered_indices is not None:
+                if not (0 <= row_index < len(self._filtered_indices)):
+                    return None
+                idx = self._filtered_indices[row_index]
+            else:
+                if not (0 <= row_index < len(self.audit_records)):
+                    return None
+                idx = row_index
+            return self.audit_records[idx]
+        except Exception:
+            return None
+
+    # -- scroll plumbing ----------------------------------------------------
+    def _at_scroll_bottom(self) -> bool:
+        try:
+            return float(self.scroll_y) >= float(self.max_scroll_y) - 0.5
+        except Exception:
+            return False
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
@@ -1055,6 +1211,37 @@ class AuditFullscreenModal(ModalCloseMixin, ModalScreen):
         scrollbar-color-active: $accent-lighten-1;
         scrollbar-background: transparent;
     }
+    #audit-search-input {
+        width: 100%;
+        height: 3;
+        margin-top: 1;
+        margin-bottom: 0;
+        border: tall $surface-lighten-2;
+        background: $surface-darken-1;
+    }
+    #audit-search-input:focus {
+        border-bottom: tall $accent;
+    }
+    #audit-search-tolerance-row {
+        height: 1;
+        layout: horizontal;
+        margin-top: 1;
+    }
+    #audit-search-tolerance-row > Label {
+        width: auto;
+        height: 1;
+        content-align: left middle;
+        color: $text-muted;
+    }
+    #audit-search-tolerance {
+        margin-left: 1;
+    }
+    #audit-search-status {
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+        content-align: left middle;
+    }
     #audit-modal-help {
         dock: bottom;
         color: $text-muted;
@@ -1066,6 +1253,7 @@ class AuditFullscreenModal(ModalCloseMixin, ModalScreen):
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back (ESC)", show=True),
         Binding("q", "app.pop_screen", "Close (q)", show=False),
+        Binding("ctrl+f", "focus_search", "Search (^f)", show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -1073,27 +1261,98 @@ class AuditFullscreenModal(ModalCloseMixin, ModalScreen):
             with Horizontal(id="modal-title-bar"):
                 yield Label("[bold cyan]📜 Schengen Security Audit Ledger (Fullscreen Maximize)[/]")
                 yield Button("✕", id="modal-close", classes="modal-close")
+            yield Input(
+                placeholder="🔍 Search audits… (command · reason · pane · agent · layer)",
+                id="audit-search-input",
+            )
+            with Horizontal(id="audit-search-tolerance-row"):
+                yield Label("Tolerance:")
+                yield RadioSet(
+                    RadioButton("Exact", id="audit-search-tol-exact"),
+                    RadioButton("High", id="audit-search-tol-high"),
+                    RadioButton("Medium", id="audit-search-tol-medium", value=True),
+                    RadioButton("Low", id="audit-search-tol-low"),
+                    RadioButton("Loose", id="audit-search-tol-loose"),
+                    id="audit-search-tolerance",
+                    compact=True,
+                )
+            yield Label(id="audit-search-status")
             yield PagedAuditDataTable(id="audit-modal-table")
             yield Label("[dim]Press [bold yellow]ESC[/] to return · ↑/↓ navigate · [bold yellow]Enter[/] or [bold yellow]click[/] a row for detail · scroll to bottom to load more[/]", id="audit-modal-help")
 
     def on_mount(self) -> None:
         table = self.query_one("#audit-modal-table", PagedAuditDataTable)
         self._audit_table = table
+        self._search_tolerance: str = AUDIT_SEARCH_DEFAULT_TOLERANCE
         table.clear(columns=True)
         table.add_columns("ID", "Time", "Pane", "Agent", "Verdict", "Res", "Layer", "Reason", "Full Command Line")
         table.cursor_type = "row"
         # Initial batch (newest AUDIT_MODAL_HEAD); older rows page in on scroll.
         head = get_recent_audit_logs(limit=AUDIT_MODAL_HEAD)
         table._audit_prime(head, AUDIT_MODAL_HEAD)
+        self._refresh_search_status()
         table.focus()
+
+    # -- search --------------------------------------------------------------
+    def _audit_search_input(self) -> Input:
+        return self.query_one("#audit-search-input", Input)
+
+    def _apply_search(self) -> None:
+        """Re-filter the loaded rows from the current query + tolerance."""
+        table = getattr(self, "_audit_table", None)
+        if table is None:
+            return
+        table.set_search_filter(self._audit_search_input().value, self._search_tolerance)
+        self._refresh_search_status()
+
+    def _refresh_search_status(self) -> None:
+        """Update the dim result-count line under the search controls."""
+        table = getattr(self, "_audit_table", None)
+        status = self.query_one("#audit-search-status", Label)
+        if table is None:
+            status.update("")
+            return
+        total = len(table.audit_records)
+        shown = table.row_count
+        q = self._audit_search_input().value.strip()
+        if not q:
+            status.update(
+                f"[dim]⬇ {total} audits loaded — scroll to the bottom to load more[/]"
+            )
+            return
+        tol = self._search_tolerance
+        tol_label = AUDIT_SEARCH_TOLERANCE_LABELS.get(tol, tol)
+        text = (
+            f"[dim]{shown} / {total} match [bold white]\"{rich_escape(q)}\"[/] "
+            f"(tolerance: {tol_label})[/]"
+        )
+        if shown == 0 and not table._audit_all_loaded:
+            text += " [yellow]— clear the search & scroll to search deeper[/]"
+        status.update(text)
+
+    def action_focus_search(self) -> None:
+        self._audit_search_input().focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if getattr(event.input, "id", None) == "audit-search-input":
+            self._apply_search()
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        rid = getattr(event.pressed, "id", None)
+        for tol, bid in AUDIT_SEARCH_TOL_BUTTON_IDS.items():
+            if bid == rid:
+                self._search_tolerance = tol
+                self._apply_search()
+                return
 
     def _open_detail(self, row_index: int) -> None:
         if len(self.app.screen_stack) != 2:
             return
-        records = getattr(getattr(self, "_audit_table", None), "audit_records", None) or []
-        if not (0 <= row_index < len(records)):
+        table = getattr(self, "_audit_table", None)
+        record = table.record_at_row(row_index) if table is not None else None
+        if record is None:
             return
-        audit_id = records[row_index]["id"]
+        audit_id = record["id"]
         self.app.push_screen(AuditDetailModal(audit_id))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:

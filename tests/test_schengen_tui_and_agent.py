@@ -1000,6 +1000,247 @@ class TestAuditLedgerTruncationAndPaging(unittest.IsolatedAsyncioTestCase):
                     app.tui_lock_fd.close()
 
 
+def _search_probe_rows(count: int = 200) -> list:
+    """Newest-first audit rows with UNIQUE search tokens per row (id 200..1)."""
+    return [
+        {
+            "id": count - i,
+            "timestamp": f"2026-09-04T09:{i % 60:02d}:00Z",
+            "pane_id": "wSRCH:t",
+            "agent_kind": "opencode",
+            "raw_command": f"deploy service-{count - i:03d} --env prod",
+            "decision": "ESCALATED",
+            "safety_reason": f"release reason-{count - i:03d}",
+            "decision_layer": "SHELL_AST",
+            "resolution": None,
+            "approver": None,
+        }
+        for i in range(count)
+    ]
+
+
+class TestAuditLedgerFuzzySearch(unittest.IsolatedAsyncioTestCase):
+    """Sprint: fullscreen-ledger search — fuzzy match + 5 tolerance levels.
+
+    Pure predicates + live modal behavior (filter on type / tolerance change /
+    scroll-to-search-deeper), preserving row_index → record mapping.
+    """
+
+    # ---- pure match predicates -------------------------------------------
+
+    def test_tolerance_threshold_mapping(self):
+        from cmd.schengen_tui import (
+            AUDIT_SEARCH_TOL_ORDER,
+            AUDIT_SEARCH_TOLERANCE_THRESHOLDS,
+        )
+        # 5 distinct levels, spec thresholds
+        self.assertEqual(len(AUDIT_SEARCH_TOL_ORDER), 5)
+        self.assertEqual(
+            {tol: AUDIT_SEARCH_TOLERANCE_THRESHOLDS[tol] for tol in AUDIT_SEARCH_TOL_ORDER},
+            {"exact": 1.0, "high": 0.8, "medium": 0.6, "low": 0.4, "loose": 0.2},
+        )
+
+    def test_record_match_tolerance_levels(self):
+        from cmd.schengen_tui import audit_record_matches
+
+        log = {
+            "raw_command": "rm -rf /tmp/scratch && git push origin main",
+            "safety_reason": "force delete of scratch",
+            "pane_id": "w1D:p1", "agent_kind": "opencode",
+            "decision_layer": "GRAY_ZONE", "id": 42,
+        }
+        # substring passes at every level (Exact = substring / ratio == 1.0)
+        for tol in ("exact", "high", "medium", "low", "loose"):
+            self.assertTrue(audit_record_matches(log, "git push", tol), tol)
+        # typo "git psh": caught only from Medium down (token-level ratio ~0.6)
+        self.assertFalse(audit_record_matches(log, "git psh", "exact"))
+        self.assertFalse(audit_record_matches(log, "git psh", "high"))
+        self.assertTrue(audit_record_matches(log, "git psh", "medium"))
+        # empty query restores everything, on any level
+        self.assertTrue(audit_record_matches(log, "", "exact"))
+        self.assertTrue(audit_record_matches(log, "   ", "loose"))
+        # reason + extra fields are searchable
+        self.assertTrue(audit_record_matches(log, "force delete", "exact"))
+        self.assertTrue(audit_record_matches(log, "w1d:p1", "exact"))
+        self.assertTrue(audit_record_matches(log, "opencode", "exact"))
+
+    def test_record_match_monotonic_looser_is_superset(self):
+        from cmd.schengen_tui import AUDIT_SEARCH_TOL_ORDER, audit_record_matches
+
+        import random
+        rng = random.Random(7)
+        for _ in range(50):
+            log = {
+                "raw_command": " ".join(rng.choice(["deploy", "rollback", "scale", "inspect", "delete"])
+                                       for _ in range(4)),
+                "safety_reason": "reason text here",
+                "pane_id": "wT:p1", "agent_kind": "opencode",
+                "decision_layer": "SHELL_AST", "id": rng.randint(1, 9999),
+            }
+            q = rng.choice(["deploy", "rollbak", "scale", "scael", "delete", "inspec", "zzz"])
+            order = AUDIT_SEARCH_TOL_ORDER  # exact → loose (strict → permissive)
+            verdicts = [audit_record_matches(log, q, tol) for tol in order]
+            # a looser level must never match FEWER records than a stricter one
+            for strict, loose in zip(verdicts, verdicts[1:]):
+                self.assertGreaterEqual(loose, strict,
+                                        f"non-monotonic for q={q!r} order={order}")
+
+    # ---- live modal: filter on type / tolerance / restore -----------------
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_modal_search_filters_and_restores_rows(self):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        from textual.widgets import Input, Label, RadioButton
+
+        from cmd.schengen_tui import (
+            AUDIT_MODAL_HEAD,
+            AuditFullscreenModal,
+            PagedAuditDataTable,
+            SchengenTUIApp,
+        )
+
+        rows = _search_probe_rows()
+        fake = lambda limit=10, decision=None, pane_id=None, layer=None, offset=0: rows[offset:offset + limit]
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            stack.enter_context(patch("cmd.schengen_tui.get_recent_audit_logs", side_effect=fake))
+            async with app.run_test(size=(140, 50)) as pilot:
+                app.push_screen(AuditFullscreenModal())
+                await pilot.pause(0.6)
+                modal = app.screen
+                table = modal.query_one("#audit-modal-table", PagedAuditDataTable)
+                search = modal.query_one("#audit-search-input", Input)
+                self.assertEqual(table.row_count, AUDIT_MODAL_HEAD)
+
+                # Exact tolerance isolates the one row carrying the token
+                modal.query_one("#audit-search-tol-exact", RadioButton).value = True
+                await pilot.pause(0.3)
+                search.value = "service-178"
+                await pilot.pause(0.5)
+                self.assertEqual(table.row_count, 1)
+                self.assertEqual(table.record_at_row(0)["id"], 178)  # row->record intact
+                status = modal.query_one("#audit-search-status", Label).content
+                self.assertIn("1 / 100", status)
+
+                # clearing restores every loaded row
+                search.value = ""
+                await pilot.pause(0.5)
+                self.assertEqual(table.row_count, AUDIT_MODAL_HEAD)
+                self.assertEqual(len(table.audit_records), AUDIT_MODAL_HEAD)
+                self.assertIsNone(table._filtered_indices)
+
+                # searchable extra field: pane id (all 100 rows share wSRCH)
+                search.value = "wSRCH"
+                await pilot.pause(0.5)
+                self.assertEqual(table.row_count, AUDIT_MODAL_HEAD)
+                search.value = "zzz-no-such-token"
+                await pilot.pause(0.5)
+                self.assertEqual(table.row_count, 0)
+                search.value = ""
+                await pilot.pause(0.4)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_modal_search_tolerance_radio_refilters_live(self):
+        # Typo'd token "service-17x": Exact rejects it (0 rows), Loose admits
+        # every loaded row; intermediates are monotonic along exact→loose.
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        from textual.widgets import Input, RadioButton
+
+        from cmd.schengen_tui import (
+            AUDIT_SEARCH_TOL_ORDER,
+            AUDIT_SEARCH_TOL_BUTTON_IDS,
+            AuditFullscreenModal,
+            PagedAuditDataTable,
+            SchengenTUIApp,
+        )
+
+        rows = _search_probe_rows()
+        fake = lambda limit=10, decision=None, pane_id=None, layer=None, offset=0: rows[offset:offset + limit]
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            stack.enter_context(patch("cmd.schengen_tui.get_recent_audit_logs", side_effect=fake))
+            async with app.run_test(size=(140, 50)) as pilot:
+                app.push_screen(AuditFullscreenModal())
+                await pilot.pause(0.6)
+                modal = app.screen
+                table = modal.query_one("#audit-modal-table", PagedAuditDataTable)
+                search = modal.query_one("#audit-search-input", Input)
+                search.value = "service-17x"
+                await pilot.pause(0.5)
+
+                counts = []
+                for tol in AUDIT_SEARCH_TOL_ORDER:
+                    btn = modal.query_one(f"#{AUDIT_SEARCH_TOL_BUTTON_IDS[tol]}", RadioButton)
+                    btn.value = True
+                    await pilot.pause(0.4)
+                    counts.append(table.row_count)
+                    # live re-filter keeps the loaded-record count untouched
+                    self.assertEqual(len(table.audit_records), 100)
+                exact, high, medium, low, loose = counts
+                self.assertEqual(exact, 0)   # typo is NOT a substring / ratio 1.0
+                self.assertEqual(loose, 100)  # loosest admits every row
+                # strict -> loose must be non-decreasing (monotonic tolerance)
+                for stricter, looser in zip(counts, counts[1:]):
+                    self.assertGreaterEqual(looser, stricter)
+                self.assertGreaterEqual(high, 1)  # token-level typo caught from High
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_modal_search_scrolls_deeper_into_history(self):
+        # A query matching only an OLD record (beyond the initial 100) shows 0
+        # rows; paging while the filter is active searches deeper and appends
+        # just the matching rows (id-dedupe + filter-aware append).
+        from contextlib import ExitStack
+        from unittest.mock import patch
+
+        from textual.widgets import Input, RadioButton
+
+        from cmd.schengen_tui import (
+            AUDIT_MODAL_HEAD,
+            AUDIT_PAGE_SIZE,
+            AuditFullscreenModal,
+            PagedAuditDataTable,
+            SchengenTUIApp,
+        )
+
+        rows = _search_probe_rows(200)  # ids 200..1 (newest first)
+        fake = lambda limit=10, decision=None, pane_id=None, layer=None, offset=0: rows[offset:offset + limit]
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            stack.enter_context(patch("cmd.schengen_tui.get_recent_audit_logs", side_effect=fake))
+            async with app.run_test(size=(140, 50)) as pilot:
+                app.push_screen(AuditFullscreenModal())
+                await pilot.pause(0.6)
+                modal = app.screen
+                table = modal.query_one("#audit-modal-table", PagedAuditDataTable)
+                search = modal.query_one("#audit-search-input", Input)
+                modal.query_one("#audit-search-tol-exact", RadioButton).value = True
+                await pilot.pause(0.3)
+
+                # id 60 is NOT among the first 100 loaded (ids 200..101)
+                search.value = "service-060"
+                await pilot.pause(0.5)
+                self.assertEqual(table.row_count, 0)
+                self.assertEqual(len(table.audit_records), AUDIT_MODAL_HEAD)
+
+                # wheel/scroll at the bottom loads the next page; only the
+                # matching row from that page is appended (filter preserved)
+                table._maybe_load_next_page()
+                await pilot.pause(0.4)
+                self.assertEqual(len(table.audit_records), AUDIT_MODAL_HEAD + AUDIT_PAGE_SIZE)
+                self.assertEqual(table.row_count, 1)
+                self.assertEqual(table.record_at_row(0)["id"], 60)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+
 class TestTUIInputExpansionAndObserverDisabled(unittest.IsolatedAsyncioTestCase):
     """Test dynamic height expansion in CommandTextArea and observer mode input disablement."""
 
