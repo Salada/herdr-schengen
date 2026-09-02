@@ -182,26 +182,30 @@
   - Context: PR #171에서 적용된 read-once 메모리 캐시는 프로세스 단위로 동작하여, TUI에서 임계치(Threshold)를 변경하더라도 Watcher 데몬 프로세스가 SIGHUP 리로드 전까지 변경사항을 즉시 인지하지 못함.
   - Solution: 짧은 TTL (예: 5~10s) 도입, SIGHUP/인메모리 invalidate 연동 또는 동기화 문서화. (Non-blocking Deferred)
 
-[] [Idea/Complexity] 단순 체인 길이/구문 횟수 기반을 넘어선 현실적·시맨틱 복잡도(Semantic Risk & Multi-Factor Complexity) 산정 체계 연구 및 재설계:
-  - Context & Core Problem:
-    • 현재 `Complexity Tax`는 연산자 수(`&&`, `|`, `;`), 서브쉘, 리다이렉션(`2>&1`) 등의 **구문적 토큰 개수(Syntactic Count)**만 단순 합산하여 복잡도 점수(`complexity score`)를 매김.
-    • 이로 인해 실제로는 극히 안전한 진단/조회 체인(`git checkout && git pull --ff-only && git log && echo "..." && shasum ...`)이 토큰 수 누적으로 과도한 패널티(`complexity=19 > 6`)를 받아 불필요하게 에스컬레이션됨.
-    • 반면, 길이는 짧으나 시스템 변이 위험이 치명적인 명령(`sudo dd ...` 또는 `rm -rf /dir && curl ... | sh`)은 구문 점수 자체는 낮게 계산될 수 있는 구조적 맹점 상존.
-  - Reality-Based Complexity Multi-Factor Model (현실적 복잡도 다차원 모델):
-    1. **세그먼트별 시맨틱 변이 가중치 (Segment Mutation Weighting)**:
+[] [Idea/Complexity] 단순 체인 길이/구문 횟수 기반을 넘어선 현실적·시맨틱 복잡도(Semantic Risk & Multi-Factor Complexity) 산정 체계 연구 및 재설계 (사례: #3864, #4027):
+  - Context & Core Problem (사례: #3864 복합 파이프라인, #4027 Heredoc 커밋 메시지):
+    • 현재 `compute_complexity`는 연산자 수(`&&`, `|`, `;`), 서브쉘, 리다이렉션(`2>&1`) 뿐만 아니라 **개행 문자(`\n`, `\r`)를 세그먼트 분리자(`_COMPLEXITY_CONTROL_RE = re.compile(r"[|&;\n\r]+")`)로 취급**.
+    • 이로 인해 **Heredoc 본문(`cat <<'EOF' ... EOF`) 내부의 단순 줄바꿈/텍스트 내용이 각각 독립 명령 세그먼트로 오인식**되어 복잡도 점수가 폭발적으로 과계산됨 (`#4027`: 단순 16줄 커밋 메시지 작성 + git commit/push 체인인데 `complexity=26 > 6`으로 과도하게 치솟음).
+    • 실제로는 순수한 데이터 페이로드(Data Payload)인 텍스트가 제어 흐름(Control Flow) 복잡도로 둔갑하여 인간 승인 피로도를 가중시킴.
+  - Heredoc 및 복잡도 완화 기획 (Heredoc Isolation & Semantic Scoring Model):
+    1. **Heredoc 본문(Body) 복잡도 산정 제외 / 마스킹 (Heredoc Payload Stripping)**:
+       - `compute_complexity` 계산 전, `<<'EOF' ... EOF` 또는 `<<EOF ... EOF` 구간을 단일 데이터 리다이렉션(`1 redir point`)으로만 계상하고 **내부 개행 및 문자열은 제어 흐름 분리 대상에서 완전 마스킹/제외**.
+       - 주의: 따옴표 없는 Heredoc(`<<EOF`) 내의 `$()` 커맨드 치환은 보안상 실행될 수 있으므로, 내부 치환(`$()`, ``` ` ```)만 선별적으로 스캔하되 단순 개행/텍스트는 세그먼트 가산에서 배제.
+    2. **세그먼트별 시맨틱 변이 가중치 (Segment Mutation Weighting)**:
        - 단순 연결자(`&&`, `|`) 횟수 1:1 선형 가산 대신, 체인을 이루는 각 세그먼트의 본질적 행위(Verb / Action)에 따른 차등 가중치:
          • Read-Only / Diagnostic (`git status/log/diff`, `cd`, `echo`, `shasum`, `tail`): 가중치 0 ~ 0.5 (복잡도 기여 극소화).
-         • Non-destructive VCS Sync (`git checkout`, `git pull --ff-only`): 가중치 1.0.
+         • Non-destructive VCS Sync (`git checkout`, `git pull --ff-only`, `git commit`): 가중치 1.0.
          • Mutating / Destructive (`rm`, `rsync`, `worktree remove`, `kill`, `chmod`): 가중치 3.0 ~ 5.0 (위험 변이 집중 부과).
-    2. **컨텍스트 독립성 및 파이프라인 안전성 (Pipeline Safety Context)**:
+    3. **컨텍스트 독립성 및 파이프라인 안전성 (Pipeline Safety Context)**:
        - 출력 제어용 꼬리 파이프(`| tail -N`, `| head -N`, `| grep pattern`, `2>&1`)는 복잡도 가산 면제 또는 감면.
        - 반복문(`for ...; do ...; done`) 및 임의 문자열 치환(`eval`, `xargs`) 등 비결정적 흐름 제어 구문에만 고위험 복잡도 부여.
-    3. **복잡도 임계치 다단계화 (Tiered Complexity & Routing)**:
+    4. **복잡도 임계치 다단계화 (Tiered Complexity & Routing)**:
        - 단순 `score > threshold` -> 즉시 Human Escalation 대신:
          • Low-risk Read Chain (누적 점수 높아도 변이 세그먼트 0건): Cloud Judge 또는 Fast-Track 경로로 흡수.
          • High-risk Compound Chain (변이 세그먼트 포함 + 높은 구문 결합도): 인간 에스컬레이션 및 사전 브리핑 강화.
   - Action Items:
-    • `scripts/core/security_evaluator.py` 내 `calculate_complexity_score`의 가중치 테이블 및 AST 세그먼트 분류 로직 PoC/벤치마크 설계.
+    • `scripts/core/security_evaluator.py` 내 `compute_complexity`에 Heredoc 본문 마스킹 정규식/파서 도입 및 단위테스트(`tests/test_complexity_tax.py`) 추가.
+
 
 
 
