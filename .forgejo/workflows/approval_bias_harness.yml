@@ -1,0 +1,74 @@
+name: Approval-Bias Harness CI
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 0 * * 1'   # Weekly every Monday 00:15 UTC (drift canary)
+  push:
+    branches: [ main, "feat/*", "fix/*" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  approval-bias:
+    name: Run LLM Approval-Bias Regression Harness
+    runs-on: ubuntu-latest
+    env:
+      # Inspector and Judge are pinned to the SAME model/endpoint so the Judge
+      # phase is skipped in send_message (1 API call per corpus case).
+      SCHENGEN_INSPECTOR_API_KEY: ${{ secrets.SCHENGEN_INSPECTOR_API_KEY }}
+      SCHENGEN_INSPECTOR_BASE_URL: ${{ secrets.SCHENGEN_INSPECTOR_BASE_URL }}
+      SCHENGEN_INSPECTOR_MODEL: "gpt-5.6-luna"
+      SCHENGEN_JUDGE_API_KEY: ${{ secrets.SCHENGEN_INSPECTOR_API_KEY }}
+      SCHENGEN_JUDGE_BASE_URL: ${{ secrets.SCHENGEN_INSPECTOR_BASE_URL }}
+      SCHENGEN_JUDGE_MODEL: "gpt-5.6-luna"
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Verify No Residual Git Conflict Markers
+        run: |
+          if grep -rnE '^(<{7}|>{7}|={7}) ' --exclude-dir=.git .; then
+            echo "❌ Git conflict markers detected in repository!"
+            exit 1
+          fi
+
+      - name: Install Python Dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --no-cache-dir --quiet httpx
+
+      - name: Run Approval-Bias Unit & Corpus Validation Tests (no live LLM)
+        run: |
+          export PATH="$PWD/.venv/bin:$PATH"
+          .venv/bin/python3 -m unittest tests.test_schengen_bias_harness tests.test_approval_bias_corpus -v
+
+      - name: Run Live Approval-Bias Harness (gatekeeper LLM drift gate)
+        run: |
+          if [ -z "${SCHENGEN_INSPECTOR_API_KEY}" ]; then
+            echo "ℹ️  SCHENGEN_INSPECTOR_API_KEY secret not set; skipping live approval-bias harness (non-blocking)."
+            exit 0
+          fi
+          # --fail-on drift: exit 1 on any class-accuracy breach or reject->approve.
+          # exit 125 (untestable: LLM unreachable) is treated as a skip so CI
+          # reports the run but does not falsely flag the revision.
+          set +e
+          .venv/bin/python3 scripts/cmd/schengen_bias_harness.py \
+            --corpus tests/fixtures/approval_bias_corpus.json \
+            --fail-on drift \
+            --json approval-bias-report.json
+          code=$?
+          set -e
+          if [ "$code" -eq 125 ]; then
+            echo "⚠️  Approval-bias harness untestable (LLM unreachable / invalid key); not flagging this revision."
+            exit 0
+          fi
+          exit "$code"
+
+      - name: Archive Bias Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: approval-bias-report
+          path: approval-bias-report.json
+          if-no-files-found: ignore
