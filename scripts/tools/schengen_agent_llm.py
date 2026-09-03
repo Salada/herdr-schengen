@@ -53,7 +53,6 @@ from core.feature_db import (
 from core.guard_db import (
     enqueue_pending_escalation,
     get_answer_language,
-    get_approve_advisory_config,
     get_db_connection,
     get_instruction_delivery_config,
     get_pending_command_escalations,
@@ -195,6 +194,11 @@ GUARD_TOOLS = [
                         "type": "string",
                         "description": "Concise, professional English security note for the worker agent (e.g. 'Approved. Target does not exist (0B). Avoid habituated -rf flags.').",
                     },
+                    "directive": {
+                        "type": "boolean",
+                        "description": "true when executing an explicit human directive (/approve, /reject, or free-text). Records approver='human-tui'. false/omitted for autonomous obvious-safe approve or autonomous critical reject (approver='gatekeeper').",
+                        "default": False,
+                    },
                 },
                 "required": ["escalation_id", "english_feedback"],
             },
@@ -215,6 +219,11 @@ GUARD_TOOLS = [
                     "english_feedback": {
                         "type": "string",
                         "description": "Concise, professional English guidance explaining why the command was rejected and suggesting alternatives.",
+                    },
+                    "directive": {
+                        "type": "boolean",
+                        "description": "true when executing an explicit human directive (/approve, /reject, or free-text). Records approver='human-tui'. false/omitted for autonomous obvious-safe approve or autonomous critical reject (approver='gatekeeper').",
+                        "default": False,
                     },
                 },
                 "required": ["escalation_id", "english_feedback"],
@@ -709,11 +718,19 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                 }, ensure_ascii=False)
 
             # Only a VERIFIED injection success records the adjudication (FIX 1).
-            # INV-AP-1/2/3: the gatekeeper LLM's approve records provenance as
+            # INV-AP-1/2/3: an autonomous approve records provenance as
             # "gatekeeper" (least-privileged) — it never seeds the novelty gate
-            # and never auto-promotes workspace rules.
+            # and never auto-promotes workspace rules. Executing an EXPLICIT
+            # human directive (/approve, /reject, or free-text) records
+            # approver="human-tui" — the human is the final decision authority
+            # and their approval seeds the novelty gate (directive=true).
             resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="RESOLVED", is_approval=True)
-            record_adjudication(esc_id, target_pane, agent_kind, "APPROVE", feedback, approver="gatekeeper")
+            directive = bool(args.get("directive"))
+            approver = "human-tui" if directive else "gatekeeper"
+            record_adjudication(
+                esc_id, target_pane, agent_kind, "APPROVE", feedback,
+                approver=approver, human_note=(feedback if directive else None),
+            )
 
             if send_instruction and feedback:
                 subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
@@ -749,7 +766,12 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             target_pane = esc_row.get("pane_id") if esc_row else ""
 
             resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="CANCELLED")
-            record_adjudication(esc_id, target_pane, "", "REJECT", feedback, approver="gatekeeper")
+            directive = bool(args.get("directive"))
+            approver = "human-tui" if directive else "gatekeeper"
+            record_adjudication(
+                esc_id, target_pane, "", "REJECT", feedback,
+                approver=approver, human_note=(feedback if directive else None),
+            )
 
             cfg = get_instruction_delivery_config()
             send_instruction = bool(cfg.get("send_reject_instruction", True))
@@ -902,57 +924,67 @@ All previous tasks are finished. If the user asks questions, answer them in {lan
     target_candidate = detected_target or "unknown"
 
     if allow_adjudication:
-        # INV-ADV: whether an explicit human /approve|/reject note is a binding
-        # DIRECTIVE (default, approve_advisory=false) or an ADVISORY OPINION the
-        # gatekeeper may DISAGREE with (approve_advisory=true, Disagree & Commit).
-        # STEP 0/1/2 (briefing/investigation/anti-rubber-stamp) are unconditional
-        # in BOTH branches (INV-ADV-2/5); only STEP 3 branches on the config.
-        approve_advisory = get_approve_advisory_config()
+        # Advisory-only gatekeeper redesign: the gatekeeper is an ADVISOR, never
+        # the final decision authority. Autonomous approve is restricted to the
+        # closed obvious-safe (Tier B) form; autonomous reject to denylist
+        # critical (Tier A) layers. Everything else (Tier C) is deferred to the
+        # human. STEP 3 (HUMAN DIRECTIVE) is unconditional — an expressed human
+        # decision ALWAYS wins over any Tier A/B/C assessment (no Disagree &
+        # Commit branch).
+        protocol = """[🔬 ADVISORY SECURITY REVIEW PROTOCOL]:
 
-        step012 = """[🔬 AUTONOMOUS INVESTIGATION & ADJUDICATION PROTOCOL]:
-
-STEP 0 — MANDATORY PRE-COMPLEXITY/RISK BRIEFING (run BEFORE any verdict):
-- You are FORBIDDEN from approving, rejecting, or deferring until you have decomposed the command into its risk segments and stated your understanding of each.
-- Enumerate every segment that applies, marking each PRESENT or ABSENT, with its consequence (NONE | EXFIL | DEST | INT | AVAIL | PERS):
-  1. CHAINED SEGMENTS: `;` `&&` `||` `|` pipes, subshells, `xargs`, `eval`, command sequencing.
+STEP 0 — RISK BRIEFING (produce this BEFORE any action):
+- Decompose the command into risk segments and state your understanding factually. Mark each PRESENT or ABSENT with its consequence (NONE | EXFIL | DEST | INT | AVAIL | PERS):
+  1. CHAINED SEGMENTS: `;` `&&` `||` `|` pipes, subshells, `xargs`, `eval`, sequencing.
   2. MUTATIONS: writes, deletes, truncates, moves, chmod/chown, or any irreversible filesystem/state change.
-  3. NETWORK EGRESS: curl/wget/nc/ssh/scp/rsync/git-push or any outbound network/HTTP activity.
-  4. SENSITIVE PATHS: secrets (`.env`, `id_*`, tokens, keys, credentials) or system roots (`/etc`, `/System`, `/var`, `/usr`, `/dev`, `/volume*`, Keychain, TCC).
-  5. SUBSTITUTIONS: `$(...)`, backticks, `<(...)`, env-var expansion, or dynamic payload injection.
-- State your understanding FACTUALLY. Only AFTER this briefing may you proceed to a verdict.
+  3. NETWORK EGRESS: curl/wget/nc/ssh/scp/rsync/git-push or outbound network/HTTP.
+  4. SENSITIVE PATHS: secrets (`.env`, `id_*`, tokens, keys) or system roots (`/etc`, `/System`, `/var`, `/usr`, `/dev`, `/volume*`, Keychain, TCC).
+  5. SUBSTITUTIONS: `$(...)`, backticks, `<(...)`, env-var expansion, dynamic payload injection.
+- This briefing is your ADVISORY REPORT to the human. It is NOT itself a verdict and NOT a gate — do not use it to force a rejection.
 
-STEP 1 — INVESTIGATION (use tools to verify the briefing):
-- Verify unverified claims before approving: call `investigate_path_details`, `investigate_pane_history`, or `read_file_snippet` as appropriate.
-- You may skip tool calls ONLY if STEP 0 already established every risk segment is ABSENT with verifiable certainty. "It looks simple" is NOT a valid skip reason.
+STEP 1 — INVESTIGATION (optional; use tools to verify facts):
+- Verify unverified claims with `investigate_path_details`, `investigate_pane_history`, or `read_file_snippet` as appropriate.
+- You may skip tools when the command is Tier B (obvious-safe) or Tier A (unambiguous critical) with certainty. "It looks simple" alone is NOT a skip reason — the command must match the closed Tier-B form.
 
-STEP 2 — ANTI-RUBBER-STAMP ADJUDICATION (autonomous judgment, fail-closed):
-- NEVER auto-approve a command merely because it is short or simple-looking, or because a similar command was approved earlier in this session. Every AUTONOMOUS approval must rest on the STEP 0 decomposition plus STEP 1 verification.
-- In AUTONOMOUS judgment (no explicit human directive present), approve ONLY when the decomposition + verification confirm zero data-loss / exfil / destructive / system-root risk. Ambiguity, an unverifiable target, or ANY non-trivial risk → DO NOT approve. Defer or reject. When in doubt, fail closed."""
+STEP 2 — TRIAGE (choose exactly one tier, driven by the Decision Layer):
+- Tier A — UNAMBIGUOUS CRITICAL (denylist): Decision Layer is one of SHELL_CRITICAL, SECRET_GUARD, SANDBOX_GUARD, PYTHON_AST, ORIGIN_GUARD. For these ONLY you MAY autonomously call `reject_escalation`. Always include the STEP 0 briefing in your response.
+- Tier B — OBVIOUS-SAFE: Decision Layer is NOT_ALLOWLISTED AND the command matches the closed obvious-safe form (see below). For these ONLY you MAY autonomously call `approve_escalation` with a concise note; do NOT open investigation loops.
+- Tier C — GRAY-ZONE / AMBIGUOUS / COMPLEX (everything else). You MUST NOT call `approve_escalation` AND MUST NOT call `reject_escalation`. Present the STEP 0 advisory risk assessment in the answer language and STOP. Wait for explicit human instructions.
 
-        if approve_advisory:
-            step3 = """STEP 3 — DISAGREE & COMMIT (equal expert, not a rubber stamp):
-- A human's `/approve <id> "reason"` or `/reject <id> "reason"` note is an ADVISORY OPINION — never a directive. Weigh it as evidence; your verdict is your own.
-- When the human's expressed opinion conflicts with your STEP 0/1 risk assessment, you MUST DISAGREE and COMMIT to your assessment: reject or escalate — never defer to the human merely because they asked.
-- Name the specific conflicting risk segment in your rejection/escalation. The human does not outrank your risk assessment.
-- If the human's opinion AGREES with a clean assessment, you may approve, but record your independent confirmation (do not echo the human's words verbatim)."""
-        else:
-            step3 = """STEP 3 — HUMAN DIRECTIVE (approve_advisory=false; default):
-- A human's `/approve <id> "reason"` or `/reject <id> "reason"` is a DIRECTIVE from the ultimate authority — EXECUTE it. Do NOT second-guess, reject, or escalate an explicit human directive.
-- Your autonomous disagreement (STEP 2 anti-rubber-stamp + fail-closed defer/reject) applies ONLY when you are judging WITHOUT an explicit human directive.
-- When executing a human directive, record your INDEPENDENT confirmation in `english_feedback` (do NOT echo the human's words verbatim): name the risk segments you found and affirm the directive was executed. For a human `/approve`, call `approve_escalation`; for a human `/reject`, call `reject_escalation`."""
+[OBVIOUS-SAFE FORM (Tier B) — closed, never weakens the denylist]:
+- Single segment: no `|`, `&`, `;`, `&&`, `||`, no shell newline separators, no `$(...)`/backticks, no `>`/`<` redirection.
+- AND one of:
+  * a version/help query: `<interpreter> --version|-v|-V|version|--help|-h` (e.g. `node --version`, `python --version`, `git --version`, `rustc --version`);
+  * a read-only builtin/utility with no dangerous flags: `ls`, `pwd`, `echo <text>`, `which <x>`, `cat|head|tail|grep <path>` on a NON-sensitive, non-root path;
+  * a read-only git query: `git status|log|diff|show|branch|tag|remote -v`.
+- NEVER Tier B if Decision Layer is a denylist layer, or the command touches a sensitive/system path, mutates, or egresses. A denylist layer ALWAYS wins over obvious-safe.
 
-        step4 = """STEP 4 — FEEDBACK FORMAT:
-- `english_feedback` MUST be professional English and MUST embed a condensed risk-segment summary. Examples:
-  - Approve: `Approved. Segments: chained=none, mutation=none, egress=none, sensitive=none, substitution=none. Zero data loss risk.`
-  - Reject: `Rejected. Segments: mutation=rm -rf /etc; sensitive=/etc. Alternative: <safe alternative>.`
-- Your final text response to the human MUST begin with the STEP 0 risk-segment briefing, then the verdict."""
+STEP 3 — HUMAN DIRECTIVE (always binding — never override):
+- The human is the final decision authority. Their expressed decision ALWAYS wins over your Tier A/B/C assessment.
+- A directive may arrive as `/approve <id> [reason]`, `/reject <id> [reason]`, OR any free-text message expressing intent to allow/proceed/run/approve (or block/reject/stop) the current escalation.
+- When you detect a directive, EXECUTE it: call `approve_escalation` (approval) or `reject_escalation` (rejection) with `directive=true`.
+- Record your INDEPENDENT confirmation in `english_feedback` (do NOT echo the human's words verbatim): name the risk segments you found, state the residual risk if your assessment conflicts, and affirm the directive was executed. You do NOT override the human.
+- NO AUTONOMOUS REJECT (restored): do NOT call `reject_escalation` on your own judgment for any Tier-C command; report risks and wait for explicit human instructions. Autonomous reject is permitted ONLY for Tier A.
 
-        protocol = step012 + "\n\n" + step3 + "\n\n" + step4
+STEP 4 — FEEDBACK FORMAT:
+- `english_feedback` MUST be professional English and embed a condensed risk-segment summary. Examples:
+  - Approve (obvious-safe): `Approved. Segments: chained=none, mutation=none, egress=none, sensitive=none, substitution=none.`
+  - Approve (human directive): `Executed human approval. Segments: mutation=rm -rf /tmp/foo. Residual risk: none beyond /tmp/foo.`
+  - Reject (critical): `Rejected. Segments: mutation=rm -rf /; sensitive=/. Alternative: <safe alternative>.`
+- Your final text response to the human MUST begin with the STEP 0 risk-segment briefing, then the triage tier, then the verdict (or the deferral note)."""
     else:
         protocol = f"""[🔬 READ-ONLY INTERPRETATION MODE (NO ADJUDICATION)]:
 - The current escalation is a HUMAN QUESTION dialog, not a command to approve.
 - You have NO approve/reject capability this turn — do NOT attempt to adjudicate.
 - Interpret the question and its surrounding context, and suggest how the human should answer it in the agent pane, in {lang_instruction}."""
+
+    # Multi-line scripts (AGY dumps etc.) render in a fenced code block so the
+    # LLM sees the full payload unambiguously instead of a truncated inline span.
+    raw_command_text = active_esc['raw_command']
+    if "\n" in raw_command_text:
+        raw_command_line = f"- Raw Command:\n```bash\n{raw_command_text}\n```"
+    else:
+        raw_command_line = f"- Raw Command: `{raw_command_text}`"
 
     return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
 
@@ -962,9 +994,10 @@ STEP 2 — ANTI-RUBBER-STAMP ADJUDICATION (autonomous judgment, fail-closed):
 [🎯 CURRENT ACTIVE ESCALATION TARGET]:
 - Escalation ID: #{active_esc['id']}
 - Target Pane: {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})
-- Raw Command: `{active_esc['raw_command']}`
+{raw_command_line}
 - Intercepted Reason: {active_esc['safety_reason']}
 - Detected Target: `{target_candidate}`
+- Decision Layer: {active_esc.get('decision_layer', 'UNKNOWN')}
 
 {protocol}
 """

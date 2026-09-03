@@ -166,6 +166,94 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
         called = [c.args[0] for c in mock_run.call_args_list]
         self.assertTrue(any("enter" in c for c in called), f"expected legacy bare enter, got {called}")
 
+    def test_approve_directive_true_records_human_tui_provenance(self):
+        """directive=true (explicit human /approve or free-text directive)
+        records approver='human-tui' + human_note — the human is the final
+        decision authority and their approval seeds the novelty gate."""
+        esc_id = self._seed_escalation()
+        fake = _FakeAdapter(ch_ok=True, ch_reason="permission.reply decision written")
+        with patch("tools.schengen_agent_llm.resolve_escalation"), patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
+            "tools.schengen_agent_llm.get_adapter", return_value=fake
+        ):
+            res = execute_tool_call("approve_escalation", {
+                "escalation_id": esc_id,
+                "english_feedback": "Executed human approval. Segments: mutation=rm -rf /tmp/foo.",
+                "directive": True,
+            })
+        out = json.loads(res)
+        self.assertEqual(out["status"], "success")
+        mock_rec.assert_called_once()
+        kwargs = mock_rec.call_args.kwargs
+        self.assertEqual(kwargs["approver"], "human-tui")
+        self.assertEqual(kwargs["human_note"], "Executed human approval. Segments: mutation=rm -rf /tmp/foo.")
+
+    def test_approve_directive_false_records_gatekeeper_provenance(self):
+        """directive omitted/false (autonomous obvious-safe approve) records
+        approver='gatekeeper' and NO human_note — least-privileged provenance
+        that never seeds the novelty gate."""
+        esc_id = self._seed_escalation()
+        fake = _FakeAdapter(ch_ok=True, ch_reason="permission.reply decision written")
+        with patch("tools.schengen_agent_llm.resolve_escalation"), patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
+            "tools.schengen_agent_llm.get_adapter", return_value=fake
+        ):
+            res = execute_tool_call("approve_escalation", {
+                "escalation_id": esc_id,
+                "english_feedback": "Approved. Segments: chained=none, mutation=none.",
+            })
+        out = json.loads(res)
+        self.assertEqual(out["status"], "success")
+        mock_rec.assert_called_once()
+        kwargs = mock_rec.call_args.kwargs
+        self.assertEqual(kwargs["approver"], "gatekeeper")
+        self.assertIsNone(kwargs.get("human_note"))
+
+    def test_reject_directive_true_records_human_tui_provenance(self):
+        """directive=true on reject_escalation (explicit human /reject) records
+        approver='human-tui' + human_note."""
+        esc_id = self._seed_escalation()
+        with patch("tools.schengen_agent_llm.resolve_escalation"), patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
+            "subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = None
+            res = execute_tool_call("reject_escalation", {
+                "escalation_id": esc_id,
+                "english_feedback": "Executed human rejection. Segments: mutation=rm -rf /.",
+                "directive": True,
+            })
+        out = json.loads(res)
+        self.assertEqual(out["status"], "success")
+        mock_rec.assert_called_once()
+        kwargs = mock_rec.call_args.kwargs
+        self.assertEqual(kwargs["approver"], "human-tui")
+        self.assertEqual(kwargs["human_note"], "Executed human rejection. Segments: mutation=rm -rf /.")
+
+    def test_reject_directive_false_records_gatekeeper_provenance(self):
+        """directive omitted/false (autonomous Tier A critical reject) records
+        approver='gatekeeper' and NO human_note."""
+        esc_id = self._seed_escalation()
+        with patch("tools.schengen_agent_llm.resolve_escalation"), patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
+            "subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = None
+            res = execute_tool_call("reject_escalation", {
+                "escalation_id": esc_id,
+                "english_feedback": "Rejected. Segments: mutation=rm -rf /.",
+            })
+        out = json.loads(res)
+        self.assertEqual(out["status"], "success")
+        mock_rec.assert_called_once()
+        kwargs = mock_rec.call_args.kwargs
+        self.assertEqual(kwargs["approver"], "gatekeeper")
+        self.assertIsNone(kwargs.get("human_note"))
+
     def test_reject_batch_delegates_to_adapter_inject_reject(self):
         """M7 item 4: reject_batch uses the agent-aware adapter inject_reject
         (opencode permission.reply 'reject' channel / codex esc / agy esc) —
