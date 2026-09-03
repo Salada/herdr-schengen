@@ -17,6 +17,10 @@ from pathlib import Path
 from adapters.herdr_client import get_pane_text, run_cmd
 
 from adapters.agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, footer_is_live, register
+# Surgical normalization + directional same-request matcher (AGENTS.md rule 14,
+# incidents #3143/#3219). Re-exported under the legacy alias so existing imports
+# (TestNormReqCmd, gatekeeper wiring) keep resolving _norm_req_cmd unchanged.
+from adapters.request_match import norm_req_cmd as _norm_req_cmd, same_request as _same_request
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 
@@ -204,21 +208,6 @@ CHANNEL_DIR = Path.home() / ".local" / "state" / "herdr-schengen" / "opencode_pe
 # Issue #23/#1910: a gatekeeper LLM adjudication takes MINUTES, so the permission
 # event must not stale out while the dialog is still pending. Kept overridable.
 CHANNEL_TTL_SECONDS = float(os.environ.get("SCHENGEN_OPENCODE_CHANNEL_TTL", "3600"))
-
-
-def _norm_req_cmd(s) -> str:
-    """Canonicalize a request-command for equality comparison (issue #23/#1910).
-
-    A channel-sourced raw_command and a pane-text re-parse of the SAME dialog can
-    differ by a leading shell-prompt '$ ' or by whitespace (soft-wrap / extra
-    spaces). Strip a leading '$ ' prompt and collapse whitespace ONLY. Do NOT use
-    normalize_command: it collapses security-relevant fields (paths, quoted
-    payloads, hashes, versions) to placeholders, which would weaken the
-    INJECT_SKIP_CHANGED guard and approve a DIFFERENT command.
-    """
-    s = (s or "").strip()
-    s = re.sub(r"^\$\s+", "", s)
-    return re.sub(r"\s+", " ", s)
 
 
 def _sanitize_pane_id(pane_id: str) -> str:
@@ -516,10 +505,12 @@ class OpenCodeAdapter(AgentAdapter):
         event = read_channel_event(pane_id)
         if not event or not event.get("permission_id"):
             return False, "no channel permission"
-        # Normalized comparison (issue #23/#1910): the channel-sourced command and
-        # req_cmd may differ by prompt prefix / whitespace; only a REAL command
-        # mismatch (a different permission request) must yield INJECT_SKIP_CHANGED.
-        if _norm_req_cmd(channel_event_to_req_cmd(event)) != _norm_req_cmd(req_cmd):
+        # Directional same-request match (issue #23/#1910 + #3143/#3219): the
+        # channel-sourced command is the LIVE re-parse (screen); req_cmd is the
+        # gatekeeper-evaluated FULL command (approved). Viewport-truncated
+        # prefixes / access_directory path variance are the same dialog; a REAL
+        # mismatch (different or superset request) must yield INJECT_SKIP_CHANGED.
+        if not _same_request(req_cmd, channel_event_to_req_cmd(event)):
             return False, INJECT_SKIP_CHANGED
         write_decision(pane_id, event["permission_id"], "once")
         return True, "permission.reply decision written (permission_id bound)"
@@ -543,9 +534,11 @@ class OpenCodeAdapter(AgentAdapter):
         """
         event = read_channel_event(pane_id)
         if event and event.get("permission_id"):
-            # Normalized comparison (issue #23/#1910): only a REAL command
-            # mismatch (a different permission request) must abort the reject.
-            if _norm_req_cmd(channel_event_to_req_cmd(event)) != _norm_req_cmd(req_cmd):
+            # Directional same-request match (issue #23/#1910 + #3143/#3219):
+            # only a REAL channel-request mismatch (different / superset
+            # permission request) must abort the reject; truncated-prefix and
+            # access_directory path variance of the SAME request still reject.
+            if not _same_request(req_cmd, channel_event_to_req_cmd(event)):
                 return False, INJECT_SKIP_CHANGED
             write_decision(pane_id, event["permission_id"], "reject")
             return True, "permission.reply reject decision written (permission_id bound)"
@@ -600,16 +593,19 @@ class OpenCodeAdapter(AgentAdapter):
                     # exhausted without confirming, we fail closed below.
                     continue
                 return False, f"post-inject: dialog moved to '{live_stage}' before inject; aborted"
-            # Normalized comparison (issue #23/#1910): the live pane-text re-parse
-            # may render a leading '$ ' prompt or extra whitespace vs the
-            # channel-sourced req_cmd — normalize both before deciding the dialog
-            # trampolined to a different request.
+            # Directional same-request match (issue #23/#1910 + #3143/#3219): the
+            # live pane-text re-parse (screen) may render a leading '$ ' prompt /
+            # extra whitespace, a viewport-soft-wrap TRUNCATED prefix, or an
+            # access_directory path variance vs the channel-sourced req_cmd
+            # (approved). All are the SAME dialog — inject. A different or
+            # SUPERSET request is a real trampoline — abort the inject.
             live_req = self.get_pending_request(pane_id, visible)
-            if _norm_req_cmd(live_req) != _norm_req_cmd(req_cmd):
+            if not _same_request(req_cmd, live_req):
                 # The dialog trampolined to a DIFFERENT permission request while we
-                # were evaluating (e.g. "Access external directory" -> "Shell command").
-                # The stale req_cmd is gone; skip so the next poll re-parses the new
-                # request, instead of escalating an un-resolvable stale command.
+                # were evaluating (e.g. "Access external directory" -> "Shell command"),
+                # or the agent appended a dangerous superset. The stale req_cmd is
+                # gone; skip so the next poll re-parses the new request, instead of
+                # escalating an un-resolvable stale command.
                 return False, INJECT_SKIP_CHANGED
 
             # Inject a single enter (no arrows/numbers). run_cmd returns None on

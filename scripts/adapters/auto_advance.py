@@ -32,33 +32,19 @@ adapter's own channel_approve/inject_approval verified-inject contract.
 """
 
 import os
-import re
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter
 from adapters.herdr_client import get_pane_text
+from adapters.request_match import same_request
 from core.security_evaluator import DecisionLayer, Origin, audit_shell_command_with_taxonomy
 
 # At most this many chained auto-advance hops per action (INV-AA-3).
 MAX_AUTO_ADVANCE_HOPS = int(os.environ.get("SCHENGEN_AUTO_ADVANCE_MAX_HOPS", "3"))
 # Absolute wall-clock cap for the whole auto-advance action (INV-AA-4).
 AUTO_ADVANCE_DEADLINE_SECONDS = float(os.environ.get("SCHENGEN_AUTO_ADVANCE_DEADLINE_SECONDS", "10.0"))
-
-
-def _norm_req_cmd(s) -> str:
-    """Canonicalize a request-command for equality comparison.
-
-    Mirrors ``adapters.agent_adapters.opencode._norm_req_cmd`` EXACTLY: strip a
-    leading '$ ' prompt and collapse whitespace ONLY. Deliberately NOT
-    ``normalize_command`` — it collapses security-relevant fields (paths,
-    quoted payloads, hashes, versions) to placeholders, which would weaken the
-    trampoline guard and approve a DIFFERENT command (issue #23/#1910).
-    """
-    s = (s or "").strip()
-    s = re.sub(r"^\$\s+", "", s)
-    return re.sub(r"\s+", " ", s)
 
 
 @dataclass
@@ -124,7 +110,13 @@ def auto_advance_once(
     if new_req is None:
         return AutoAdvanceResult(outcome="not_trampolined", is_safe=False, reason="no pending request in live pane text")
 
-    if _norm_req_cmd(new_req) == _norm_req_cmd(prev_req_cmd):
+    # Directional same-request match (AGENTS.md rule 14, #3143/#3219):
+    # prev_req_cmd is command A — the ground-truth request the gatekeeper
+    # evaluated (approved); new_req is the live re-parse (screen). A live
+    # re-parse that is a viewport-truncated prefix / access_directory path
+    # variant of A is still A — not a trampoline. A re-parse that GREW beyond A
+    # (superset) is a REAL trampoline and falls through to full re-evaluation.
+    if same_request(prev_req_cmd, new_req):
         # The live dialog still shows the SAME request A — not a trampoline.
         return AutoAdvanceResult(
             outcome="not_trampolined", new_req_cmd=new_req, is_safe=False,
