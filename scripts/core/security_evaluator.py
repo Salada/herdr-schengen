@@ -1346,7 +1346,8 @@ def _mask_heredocs(s: str) -> "tuple[str, int]":
     literal `<<` marker, so body lines (and any `|`/`&`/newline inside them)
     no longer inflate the segment count. For an UNQUOTED heredoc the body is
     shell-expanded, so `$(...)` / backtick substitutions inside it are counted
-    and returned as `extra_subst`. Quoted (`<<'EOF'`) bodies expand nothing.
+    and returned as `extra_subst`. A QUOTED delimiter — single (`<<'EOF'`) OR
+    double (`<<"EOF"`) — suppresses expansion, so bodies expand nothing.
 
     Unterminated/truncated heredocs and here-strings (`<<<`) are left
     UNTOUCHED (fail-closed: never mask what we cannot fully bound).
@@ -1358,7 +1359,7 @@ def _mask_heredocs(s: str) -> "tuple[str, int]":
         if m.start() < cursor:
             continue  # inside an already-masked region
         delim = m.group("delim")
-        quoted = m.group("q") == "'"
+        quoted = m.group("q") in ("'", '"')
         # `<<-` terminators may be indented with leading tabs; otherwise the
         # terminator must start at column 0 (leading whitespace tolerated).
         lead = r"\t*" if m.group("dash") is not None else r"[ \t]*"
@@ -1484,55 +1485,54 @@ _SEM_CONTROL_FLOW_VERBS = {"eval", "xargs", "for", "while"}
 _SEM_PIPE_TAIL_EXEMPT = {"tail", "head", "grep", "rg", "sort", "uniq", "wc", "sed", "cut", "tr", "column"}
 
 
-def _classify_semantic_segment(seg: str, pipe_tail: bool) -> "tuple[float, bool, str]":
+def _classify_semantic_segment(seg: str, pipe_tail: bool) -> bool:
     """Classify one (heredoc-masked, fd-stripped) segment by its first verb.
 
-    Returns (weight, is_mutating, label). Fail-closed: an unknown first verb is
-    UNKNOWN (weight 2.0, is_mutating=True) — only the closed tables below ever
-    score non-mutating.
+    Returns True when the segment is mutating. Fail-closed: an unknown first
+    verb is mutating (True) — only the closed tables below ever classify as
+    non-mutating (READ_ONLY / VCS_SYNC / DIAGNOSTIC / PIPE_TAIL).
     """
     seg = seg.strip()
     if not seg:
-        return 0.0, False, "EMPTY"
+        return False
     # CONTROL_FLOW: substitution constructs in the segment override everything
     if re.search(r"\$\(|`", seg):
-        return 5.0, True, "CONTROL_FLOW"
+        return True
     tokens = seg.split()
     verb = tokens[0].strip("\"'").lower()
     if verb == "git":
         sub = tokens[1].strip("\"'").lower() if len(tokens) > 1 else ""
         if sub in _SEM_GIT_READ_ONLY_SUBS:
-            return 0.0, False, "READ_ONLY"
+            return False
         if sub in _SEM_GIT_VCS_SYNC_SUBS:
-            return 1.0, False, "VCS_SYNC"
+            return False
         if sub in ("pull", "merge"):
             # only the fast-forward form is non-mutating; anything else can
             # create merge commits / rewrite history -> fail-closed UNKNOWN
-            return (1.0, False, "VCS_SYNC") if "--ff-only" in tokens else (2.0, True, "UNKNOWN")
-        if sub == "push":
-            return 3.0, True, "MUTATING_MID"
-        return 2.0, True, "UNKNOWN"
+            return "--ff-only" not in tokens
+        # push or any other git subcommand -> mutating (fail-closed)
+        return True
     if verb in ("python3",) or verb.endswith("/bin/python3"):
         if len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "unittest":
-            return 0.5, False, "DIAGNOSTIC"
-        return 2.0, True, "UNKNOWN"
+            return False
+        return True
     if verb == "pytest" or verb.endswith("/bin/pytest"):
-        return 0.5, False, "DIAGNOSTIC"
+        return False
     if verb in _SEM_READ_ONLY_VERBS:
-        return 0.0, False, "READ_ONLY"
+        return False
     if verb in _SEM_MUTATING_LOW:
-        return 2.0, True, "MUTATING_LOW"
+        return True
     if verb in _SEM_MUTATING_MID:
-        return 3.0, True, "MUTATING_MID"
+        return True
     if verb in _SEM_MUTATING_HIGH:
-        return 4.0, True, "MUTATING_HIGH"
+        return True
     if verb in _SEM_DESTRUCTIVE:
-        return 5.0, True, "DESTRUCTIVE"
+        return True
     if verb in _SEM_CONTROL_FLOW_VERBS:
-        return 5.0, True, "CONTROL_FLOW"
+        return True
     if pipe_tail and verb in _SEM_PIPE_TAIL_EXEMPT:
-        return 0.0, False, "PIPE_TAIL"
-    return 2.0, True, "UNKNOWN"
+        return False
+    return True
 
 
 @dataclasses.dataclass
@@ -1540,32 +1540,29 @@ class SemanticComplexity:
     """Semantic complexity profile of a shell command (issue #4027).
 
     `structural` mirrors `compute_complexity` (heredoc payload isolated) and is
-    the threshold gate. `score` replaces the raw segment count with per-segment
-    semantic weights:
-        score = Σ segment_weights + n_substitutions + n_redirections
-    `has_mutation` is fail-closed: ANY MUTATING / DESTRUCTIVE / CONTROL_FLOW /
-    UNKNOWN segment (or `$()`/backtick substitution) marks the chain mutating —
-    mutating chains NEVER auto-approve via the cloud judge.
+    the threshold gate. `has_mutation` is fail-closed: ANY MUTATING /
+    DESTRUCTIVE / CONTROL_FLOW / UNKNOWN segment (or `$()`/backtick
+    substitution) marks the chain mutating — mutating chains NEVER auto-approve
+    via the cloud judge. Routing keys off `structural` + `has_mutation` only.
     """
 
     structural: int
-    score: float
     n_segments: int
     n_substitutions: int
     n_redirections: int
     mutating_segments: tuple
     has_mutation: bool
-    read_only_only: bool
 
 
 def compute_semantic_complexity(cmd_str: str) -> SemanticComplexity:
     """Semantic complexity with heredoc + quoted-region isolation (#4027, quotes).
 
     Splits on command separators after masking heredocs, collapsing quoted
-    regions, and stripping pure fd-redirects; weights each segment by its first
-    verb (see `_classify_semantic_segment`), and flags mutating chains
-    fail-closed. Substitutions surviving in shell-expanded regions (unquoted
-    heredoc bodies, double-quoted bodies) force `has_mutation`.
+    regions, and stripping pure fd-redirects; classifies each segment by its
+    first verb (see `_classify_semantic_segment`) as mutating or not, and flags
+    mutating chains fail-closed. Substitutions surviving in shell-expanded
+    regions (unquoted heredoc bodies, double-quoted bodies) force
+    `has_mutation`.
     """
     s, extra_subst = _isolate_heredocs(cmd_str)
     # structural component — byte-identical arithmetic to compute_complexity
@@ -1575,11 +1572,9 @@ def compute_semantic_complexity(cmd_str: str) -> SemanticComplexity:
     structural = n_segments_structural + n_subst + n_redir
     # semantic classification over the fd-redirect-stripped masked command
     stripped = _strip_fd_redirections(s)
-    total_weight = 0.0
     n_segments = 0
     mutating: list = []
     has_mutation = False
-    read_only_only = True
     prev_sep = ""
     for piece in re.split(r"([|&;\n\r]+)", stripped):
         if not piece:
@@ -1588,14 +1583,10 @@ def compute_semantic_complexity(cmd_str: str) -> SemanticComplexity:
             prev_sep = piece
             continue
         pipe_tail = prev_sep.endswith("|")
-        weight, mut, label = _classify_semantic_segment(piece, pipe_tail)
         n_segments += 1
-        total_weight += weight
-        if mut:
+        if _classify_semantic_segment(piece, pipe_tail):
             has_mutation = True
             mutating.append(piece.strip())
-        if label not in ("READ_ONLY", "PIPE_TAIL"):
-            read_only_only = False
         prev_sep = ""
     if extra_subst > 0:
         # (PR #186 review) an UNQUOTED heredoc body is shell-EXPANDED at run
@@ -1606,20 +1597,16 @@ def compute_semantic_complexity(cmd_str: str) -> SemanticComplexity:
         # the cloud judge). Quoted heredoc bodies expand nothing -> extra_subst
         # stays 0 and remain inert. The same applies to substitutions inside a
         # DOUBLE-quoted region (shell-expanded; _mask_quotes counts them into
-        # the same extra_subst) — the appended marker keeps the historic label
-        # for backward-compatible assertions.
+        # the same extra_subst).
         has_mutation = True
-        read_only_only = False
         mutating.append("(unquoted heredoc substitution)")
     return SemanticComplexity(
         structural=structural,
-        score=total_weight + n_subst + n_redir,
         n_segments=n_segments,
         n_substitutions=n_subst,
         n_redirections=n_redir,
         mutating_segments=tuple(mutating),
         has_mutation=has_mutation,
-        read_only_only=read_only_only,
     )
 
 
