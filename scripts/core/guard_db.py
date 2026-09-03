@@ -1074,7 +1074,6 @@ def set_channel_approve_config(enabled: bool) -> bool:
 _COMPLEXITY_TAX_DEFAULTS = {
     "complexity_tax_enabled": True,
     "complexity_threshold": 6,
-    "complexity_mode": "escalate",  # "escalate" | "judge" (judge reserved for M6)
 }
 
 # (#139-4) read-once validated cache for the complexity-tax knobs, keyed by the
@@ -1101,9 +1100,6 @@ def _load_complexity_tax_config() -> dict[str, Any]:
                     cfg[k] = max(1, min(10000, int(v)))
                 except (TypeError, ValueError):
                     pass
-            elif k == "complexity_mode":
-                if str(v).strip().lower() in ("escalate", "judge"):
-                    cfg[k] = str(v).strip().lower()
     return cfg
 
 
@@ -1126,7 +1122,7 @@ def get_complexity_tax_config() -> dict[str, Any]:
     return dict(cfg)
 
 
-def set_complexity_tax_config(enabled=None, threshold=None, mode=None) -> dict[str, Any]:
+def set_complexity_tax_config(enabled=None, threshold=None) -> dict[str, Any]:
     """Human-only write path (TUI settings modal); returns the new config.
     Mirror the set_answer_language / set_channel_approve_config upsert pattern."""
     global _complexity_tax_config_cache
@@ -1153,16 +1149,6 @@ def set_complexity_tax_config(enabled=None, threshold=None, mode=None) -> dict[s
                 """,
                 ("complexity_threshold", str(clamped), now_iso),
             )
-        if mode is not None:
-            m = str(mode).strip().lower()
-            if m in ("escalate", "judge"):
-                conn.execute(
-                    """
-                    INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                    """,
-                    ("complexity_mode", m, now_iso),
-                )
         conn.commit()
     _complexity_tax_config_cache = None  # (#139-4) invalidate read-once cache
     return get_complexity_tax_config()

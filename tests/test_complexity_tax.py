@@ -8,10 +8,9 @@ Covers:
  2. compute_semantic_complexity: per-segment first-verb mutating
     classification, pipe-tail exemptions (tee NOT exempt), fail-closed UNKNOWN,
     structural parity with compute_complexity.
-3. _apply_complexity_tax tiered routing: read-only/diagnostic/VCS chains over
-   threshold are absorbed via the cloud judge in BOTH complexity_mode values;
-   mutating chains NEVER auto-approve via the cloud judge (hard COMPLEXITY_TAX
-   deferral in both modes).
+ 3. _apply_complexity_tax tiered routing: read-only/diagnostic/VCS chains over
+    threshold are absorbed via the cloud judge; mutating chains NEVER
+    auto-approve via the cloud judge (hard COMPLEXITY_TAX deferral to human).
 
 Uses a clean temp DB + patched guard LLM env; post_cloud_judge is mocked.
 """
@@ -27,7 +26,7 @@ SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import core.guard_db as guard_db
-from core.guard_db import get_complexity_tax_config, set_complexity_tax_config
+from core.guard_db import get_complexity_tax_config
 from core.security_evaluator import (
     DecisionLayer,
     Origin,
@@ -377,27 +376,24 @@ class TestComplexityTaxRouting(unittest.TestCase):
         self.db_patch.stop()
         self.temp_dir.cleanup()
 
-    def _apply(self, cmd, mode=None):
-        if mode is not None:
-            set_complexity_tax_config(mode=mode)
+    def _apply(self, cmd):
         return self.apply_tax(cmd, get_complexity_tax_config(), self.Origin.AGENT,
                               cwd="", scope="default", agent_id="default")
 
-    def test_mutating_chain_hard_defers_both_modes_no_cloud(self):
+    def test_mutating_chain_hard_defers_no_cloud(self):
         calls = []
 
         def _recording(*args, **kwargs):
             calls.append(args)
             return _canned('{"is_safe": true, "confidence": 0.99, "reason": "benign"}')
 
-        for mode in ("escalate", "judge"):
-            with self.subTest(mode=mode), patch("core.security_evaluator.post_cloud_judge", side_effect=_recording):
-                res = self._apply(MUTATING_CHAIN, mode=mode)
-                self.assertIsNotNone(res)
-                safe, reason, layer = res
-                self.assertFalse(safe, f"mutating chain must defer in mode={mode}: {reason}")
-                self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
-                self.assertIn("complexity", reason)
+        with patch("core.security_evaluator.post_cloud_judge", side_effect=_recording):
+            res = self._apply(MUTATING_CHAIN)
+            self.assertIsNotNone(res)
+            safe, reason, layer = res
+            self.assertFalse(safe, f"mutating chain must defer: {reason}")
+            self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
+            self.assertIn("complexity", reason)
         self.assertEqual(calls, [], "cloud judge must NEVER be called for a mutating chain")
 
     def test_unquoted_heredoc_chain_never_routes_to_cloud_judge(self):
@@ -418,15 +414,12 @@ class TestComplexityTaxRouting(unittest.TestCase):
             calls.append(args)
             return _canned('{"is_safe": true, "confidence": 0.99, "reason": "benign"}')
 
-        for mode in ("escalate", "judge"):
-            with self.subTest(mode=mode), patch(
-                "core.security_evaluator.post_cloud_judge", side_effect=_recording
-            ):
-                res = self._apply(unquoted, mode=mode)
-                self.assertIsNotNone(res)
-                safe, reason, layer = res
-                self.assertFalse(safe, f"unquoted-heredoc chain must defer in mode={mode}: {reason}")
-                self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
+        with patch("core.security_evaluator.post_cloud_judge", side_effect=_recording):
+            res = self._apply(unquoted)
+            self.assertIsNotNone(res)
+            safe, reason, layer = res
+            self.assertFalse(safe, f"unquoted-heredoc chain must defer: {reason}")
+            self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
         self.assertEqual(calls, [], "cloud judge must NEVER be called for an unquoted-heredoc chain")
 
     def test_quoted_heredoc_chain_over_threshold_absorbed_by_cloud_judge(self):
@@ -448,31 +441,29 @@ class TestComplexityTaxRouting(unittest.TestCase):
         self.assertTrue(res[0], res[1])
         self.assertEqual(res[2], self.DecisionLayer.CLOUD_JUDGE)
 
-    def test_readonly_chain_absorbed_by_cloud_judge_both_modes(self):
+    def test_readonly_chain_absorbed_by_cloud_judge(self):
         readonly = "true && true && true && true && true && true && true"
         verdict = '{"is_safe": true, "confidence": 0.95, "reason": "read-only ok"}'
-        for mode in ("escalate", "judge"):
-            with self.subTest(mode=mode), patch(
-                "core.security_evaluator.post_cloud_judge", return_value=_canned(verdict)
-            ):
-                res = self._apply(readonly, mode=mode)
-                self.assertIsNotNone(res)
-                safe, reason, layer = res
-                self.assertTrue(safe, f"read-only chain must clear via cloud judge in mode={mode}: {reason}")
-                self.assertEqual(layer, self.DecisionLayer.CLOUD_JUDGE)
+        with patch(
+            "core.security_evaluator.post_cloud_judge", return_value=_canned(verdict)
+        ):
+            res = self._apply(readonly)
+            self.assertIsNotNone(res)
+            safe, reason, layer = res
+            self.assertTrue(safe, f"read-only chain must clear via cloud judge: {reason}")
+            self.assertEqual(layer, self.DecisionLayer.CLOUD_JUDGE)
 
     def test_readonly_chain_cloud_judge_unsafe_defers(self):
         readonly = "wait && wait && wait && wait && wait && wait && wait"
         verdict = '{"is_safe": false, "confidence": 0.95, "reason": "uncertain"}'
-        for mode in ("escalate", "judge"):
-            with self.subTest(mode=mode), patch(
-                "core.security_evaluator.post_cloud_judge", return_value=_canned(verdict)
-            ):
-                res = self._apply(readonly, mode=mode)
-                self.assertIsNotNone(res)
-                safe, reason, layer = res
-                self.assertFalse(safe, f"unsafe verdict must defer in mode={mode}: {reason}")
-                self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
+        with patch(
+            "core.security_evaluator.post_cloud_judge", return_value=_canned(verdict)
+        ):
+            res = self._apply(readonly)
+            self.assertIsNotNone(res)
+            safe, reason, layer = res
+            self.assertFalse(safe, f"unsafe verdict must defer: {reason}")
+            self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
 
     def test_under_threshold_passes_through(self):
         # Below/at threshold -> None regardless of cloud judge availability.
