@@ -54,6 +54,23 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 
 ## 🎯 Active Execution Backlog (상세 항목)
 
+### 🚨 [P0 Urgent / Bug] Disagree-and-Commit 규약 도입 후 과잉 Reject 및 Gatekeeper 권능 월권 회귀 수정 (PR #179 / #3864 후속)
+[] [Bug/Gatekeeper] Gatekeeper의 독자적 Reject 남발 및 인간 승인 의사 묵살 결함 긴급 해소:
+  - 현상 및 부작용 보고 (사용자 인시던트):
+    1) Gatekeeper가 인간에게 판단을 위임/요청하지 않고 자체적으로 `reject`를 섣불리 결정하여 에이전트에 에러/거절 메시지를 넘김 (인간 판단 요청 단계 생략 빈번).
+    2) 인간이 `/approve` 슬래시 커맨드가 아닌 채팅 메시지로 강력한 승인 의견을 제시했음에도 Gatekeeper가 이를 무시하고 자체 판정으로 `reject`를 강행함.
+  - **사용자 핵심 거버넌스 원칙 (Invariants)**:
+    • **원칙 1: 최종 결정권과 법적/보안 책임은 항상 인간 지휘관에게 귀속됨.**
+    • **원칙 2: Gatekeeper는 승인/거절을 독자적으로 '결정(Decide)'하지 말고, 자신의 전문적 소신 의견(Advisory Opinion)만 브리핑·주장해야 함.**
+    • **원칙 3: Gatekeeper 자체 Reject은 오직 "의심의 여지 없이 명백한 위험(Unambiguous Denylist/Critical Risk)"에 한해서만 극히 제한적으로 허용되어야 하며, 일반적 Gray-zone/복잡도 초과 건에서 인간을 건너뛰고 자의적으로 거절하는 행위는 절대 금지됨.**
+  - 해결 방향 및 아키텍처 재설계 (Redesign Directions):
+    1) `scripts/tools/schengen_agent_llm.py` 프롬프트 및 의사결정 머신 개편:
+       - Gatekeeper의 도구 호출(`reject_escalation`) 권한을 엄격히 축소하고, 인간 개입 필요 시 오직 **"판단 유보 및 사전 위험 브리핑(Advisory Assessment Card)"**만 생성하도록 강제.
+       - 인간의 자유 텍스트 메시지가 승인 뉘앙스일 경우, AI가 이에 반하여 단독 거절하는 동작을 원천 차단하고 인간의 지시를 존중(Direct Directive)하도록 시스템 프롬프트 수정.
+    2) `approve_advisory` 기본 동작 정밀화: 조언 모드에서도 AI는 거절을 '집행'하는 주체가 아니라 '위험을 경고하는 참모' 역할에 머물도록 결재 상태 머신 재정렬.
+
+---
+
 ### [Track 1] Quick-Wins & Precision Engine
 
 [] [Refactor/TestRunner] 안전한 read-only 체인 진단 명령 Fast-Track 확장 (사례: #3670 후속 백로그):
@@ -63,6 +80,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - **[INV-5/6 긴장 명시 및 Narrow Carve-out 요건]**:
     • 주의: INV-5/6 불변식은 Fast-Track에서 셸 메타문자(`|`, `&`, `;`, `&&`, `||`)를 원칙적으로 거부함. #2555(item 3)에서 `pytest 2>&1 && rm -rf /` 우회 갭을 fail-closed로 엄격 차단한 보안 원칙과 정면 충돌하지 않아야 함.
     • 따라서 단순 메타문자 허용이 아닌, **"모든 세그먼트가 엄격히 검증된 read-only 체인인 경우에만 한정 허용 + sensitive path 및 변이(mutating) 세그먼트 즉시 재거부"**하는 좁은 예외(Narrow Carve-out) 모델만 적용.
+
     • 구현 힌트: `security_evaluator.py:1118` `_is_read_only_pipeline` 확장 검토 (read-only 세그먼트만 파싱·검증, `&& rm -rf` 등 변이 세그먼트 탐지 시 fail-closed 에스컬레이션).
 
 [] [Idea/Complexity] Heredoc 페이로드 분리 및 시맨틱 복잡도(Semantic Risk & Multi-Factor Complexity) 산정 체계 재설계 (사례: #3864, #4027):
