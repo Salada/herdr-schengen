@@ -32,7 +32,9 @@ from core.security_evaluator import (
     DecisionLayer,
     Origin,
     _apply_complexity_tax,
+    _isolate_heredocs,
     _mask_heredocs,
+    _mask_quotes,
     audit_shell_command,
     compute_complexity,
     compute_semantic_complexity,
@@ -121,6 +123,79 @@ class TestHeredocMasking(unittest.TestCase):
         self.assertEqual(masked, "cat << EOF")
         self.assertEqual(extra, 0)
         self.assertEqual(compute_complexity("cat << EOF"), 2)
+
+
+class TestQuoteMasking(unittest.TestCase):
+    """_mask_quotes / compute_complexity quoted-region isolation.
+
+    Newlines / separators INSIDE a quoted shell word (multi-line
+    `python3 -c "..."`, `echo "a\\nb"`) are one literal argument — they must
+    never inflate the segment count — while newlines BETWEEN top-level
+    commands remain separators. Double-quoted bodies are shell-expanded so
+    their `$(...)`/backticks still count (extra_subst); single-quoted bodies
+    expand nothing; unterminated quotes stay untouched (fail-closed).
+    """
+
+    def test_multiline_double_quoted_python3_does_not_inflate(self):
+        # Actual newline characters inside the double-quoted `-c` payload.
+        cmd = 'python3 -c "import os\nprint(os.getcwd())\nprint(1)"'
+        self.assertEqual(compute_complexity(cmd), 1)
+
+    def test_multiline_echo_quotes_do_not_inflate(self):
+        self.assertEqual(compute_complexity('echo "a\nb\nc"'), 1)
+
+    def test_single_quoted_multiline_does_not_inflate(self):
+        self.assertEqual(compute_complexity("echo 'a\nb\nc'"), 1)
+
+    def test_separators_inside_quotes_are_not_control_separators(self):
+        # `;` / `|` / `&` inside quotes are literal word content, not chaining.
+        cmd = 'echo "a; b | c" && echo \'d & e\''
+        self.assertEqual(compute_complexity(cmd), 2)
+
+    def test_top_level_newline_separated_commands_still_count(self):
+        # Two top-level commands on separate lines = 2 segments (quotes do not
+        # swallow text between commands).
+        self.assertEqual(compute_complexity("git add a\ngit add b"), 2)
+        self.assertEqual(compute_complexity("echo hi\necho there\necho now"), 3)
+
+    def test_unterminated_quote_left_untouched(self):
+        # Fail-closed: no closing quote -> no masking -> newlines still split.
+        self.assertEqual(compute_complexity('python3 -c "a\nb\nc'), 3)
+
+    def test_double_quoted_substitution_still_counts(self):
+        # A DOUBLE-quoted body is shell-expanded: $(...) inside it executes and
+        # must still score (masked text + extra_subst = parity with the old
+        # global count).
+        self.assertEqual(compute_complexity('echo "$(date)"'), 2)
+
+    def test_single_quoted_substitution_is_inert(self):
+        # A single-quoted body expands nothing: $(...) is literal text and must
+        # NOT score as a substitution.
+        self.assertEqual(compute_complexity("echo '$(date)'"), 1)
+
+    def test_masked_quote_is_not_a_redirection(self):
+        # The placeholder must not be misread as a redirection / separator.
+        masked, extra = _mask_quotes('echo "x < y > z"')
+        self.assertEqual(masked, "echo Q")
+        self.assertEqual(extra, 0)
+        self.assertEqual(compute_complexity('echo "x < y > z"'), 1)
+
+    def test_quote_masking_after_heredoc_masking(self):
+        # Ordering invariant: heredoc payloads collapse FIRST; quote masking
+        # must not disturb them (a quoted heredoc opener is consumed whole).
+        heredoc = "cat <<'EOF'\nbody line\nEOF"
+        s, extra = _isolate_heredocs(heredoc)
+        self.assertEqual(s, "cat <<")
+        self.assertEqual(extra, 0)
+        self.assertEqual(compute_complexity(heredoc), 2)
+
+    def test_structural_parity_multi_command_quoted(self):
+        # compute_complexity and compute_semantic_complexity share the same
+        # masked structural value.
+        cmd = 'python3 -c "import os\nprint(1)" | tail -5'
+        prof = compute_semantic_complexity(cmd)
+        self.assertEqual(prof.structural, compute_complexity(cmd))
+        self.assertEqual(prof.structural, 2)
 
 
 class TestSemanticComplexity(unittest.TestCase):
