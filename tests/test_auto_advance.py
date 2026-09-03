@@ -135,6 +135,34 @@ class TestAutoAdvanceCoordinator(unittest.TestCase):
         self.assertEqual(res.outcome, "not_trampolined")
         self.assertEqual(self.adapter.inject_calls, [])
 
+    def test_truncated_prefix_is_not_trampolined(self):
+        # Issue #3143/#3219: the live re-parse can be a viewport-soft-wrap
+        # TRUNCATED prefix of the approved command A (cut at a word boundary).
+        # same_request must treat it as STILL A -> not_trampolined so the caller
+        # re-delegates A (which the adapter injects with prefix tolerance)
+        # instead of treating the truncation as a trampoline to a new dialog.
+        prev = "python3 -m unittest discover -s tests"
+        self.adapter._pending = lambda pane_id, text: "python3 -m unittest discover"
+        res = self._run(prev=prev)
+        self.assertEqual(res.outcome, "not_trampolined")
+        self.assertEqual(res.new_req_cmd, "python3 -m unittest discover")
+        self.assertEqual(self.adapter.inject_calls, [])
+
+    def test_superset_is_trampoline(self):
+        # Security invariant (directionality): a live re-parse that GREW beyond
+        # the approved command A (agent appended '&& rm -rf /') is a REAL
+        # trampoline — never not_trampolined. B is re-evaluated full-pipeline;
+        # here it is destructive -> advanced_unsafe, never injected.
+        self.adapter._pending = lambda pane_id, text: "git status --porcelain && rm -rf /"
+        with patch("adapters.auto_advance.audit_shell_command_with_taxonomy",
+                   return_value=_verdict(False, "destructive", DecisionLayer.SHELL_CRITICAL)):
+            res = self._run(prev="git status")
+        self.assertNotEqual(res.outcome, "not_trampolined")
+        self.assertEqual(res.outcome, "advanced_unsafe")
+        self.assertEqual(res.new_req_cmd, "git status --porcelain && rm -rf /")
+        self.assertFalse(res.is_safe)
+        self.assertEqual(self.adapter.inject_calls, [])
+
     def test_no_pending_request_fail_closed(self):
         # INV-AA-5: get_pending_request -> None -> not_trampolined (no new
         # dialog) — never inject.
