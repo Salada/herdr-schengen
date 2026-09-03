@@ -5,9 +5,9 @@ Covers:
    lines never inflate the segment count; quoted bodies isolate substitutions,
    unquoted bodies keep them (extra_subst), here-strings (`<<<`) and
    unterminated heredocs are never mistaken for openers.
-2. compute_semantic_complexity: per-segment first-verb weighting, pipe-tail
-   exemptions (tee NOT exempt), fail-closed UNKNOWN, structural parity with
-   compute_complexity.
+ 2. compute_semantic_complexity: per-segment first-verb mutating
+    classification, pipe-tail exemptions (tee NOT exempt), fail-closed UNKNOWN,
+    structural parity with compute_complexity.
 3. _apply_complexity_tax tiered routing: read-only/diagnostic/VCS chains over
    threshold are absorbed via the cloud judge in BOTH complexity_mode values;
    mutating chains NEVER auto-approve via the cloud judge (hard COMPLEXITY_TAX
@@ -94,6 +94,24 @@ class TestHeredocMasking(unittest.TestCase):
         self.assertEqual(extra, 4)  # 2x $(...) + 2 backticks
         # 1 segment + 4 surviving substitutions + 1 redirection
         self.assertEqual(compute_complexity(heredoc), 6)
+
+    def test_double_quoted_delimiter_suppresses_expansion(self):
+        # `<<"EOF"` quotes the delimiter, so shell suppresses body expansion
+        # exactly like `<<'EOF'` (regression: double-quoted delimiters were
+        # previously misclassified as unquoted and $(...) over-counted).
+        for opener in ('<<"EOF"', "<<'EOF'"):
+            with self.subTest(opener=opener):
+                heredoc = f"cat {opener}\n$(date)\nEOF"
+                masked, extra = _mask_heredocs(heredoc)
+                self.assertEqual(masked, "cat <<")
+                self.assertEqual(extra, 0)
+                self.assertEqual(compute_complexity(heredoc), 2)
+        # UNQUOTED delimiter still shell-expands the body: $(date) survives.
+        heredoc = "cat <<EOF\n$(date)\nEOF"
+        masked, extra = _mask_heredocs(heredoc)
+        self.assertEqual(masked, "cat <<")
+        self.assertEqual(extra, 1)
+        self.assertEqual(compute_complexity(heredoc), 3)
 
     def test_dash_heredoc_with_indented_terminator_masks(self):
         # `<<-` terminators may be indented with leading tabs.
@@ -204,29 +222,23 @@ class TestSemanticComplexity(unittest.TestCase):
     def test_readonly_chain_not_mutating(self):
         prof = compute_semantic_complexity("git status --short && echo '===' && git diff --stat")
         self.assertFalse(prof.has_mutation)
-        self.assertTrue(prof.read_only_only)
-        self.assertEqual(prof.score, 0.0)
         self.assertEqual(prof.mutating_segments, ())
         self.assertEqual(prof.structural, compute_complexity("git status --short && echo '===' && git diff --stat"))
 
     def test_git_push_marks_mutating(self):
         prof = compute_semantic_complexity("git commit -m 'x' && git push")
         self.assertTrue(prof.has_mutation)
-        self.assertFalse(prof.read_only_only)
         self.assertEqual(prof.mutating_segments, ("git push",))
-        # git commit (VCS_SYNC 1.0) + git push (MUTATING_MID 3.0)
-        self.assertEqual(prof.score, 4.0)
 
     def test_tee_not_exempt_as_pipe_tail(self):
         # `tee` writes — even as a pipe tail it must be UNKNOWN/mutating.
         prof = compute_semantic_complexity("git status | grep x | tee /tmp/o")
         self.assertTrue(prof.has_mutation)
         self.assertIn("tee /tmp/o", prof.mutating_segments)
-        self.assertEqual(prof.score, 2.0)
 
     def test_readonly_pipe_tail_exempt(self):
         # tail/head/grep/rg/sort/uniq/wc/sed/cut/tr/column as immediate pipe
-        # tails are read-only filters (weight 0.0, non-mutating).
+        # tails are read-only filters (non-mutating).
         for cmd in (
             "git status | grep x | wc -l",
             "git diff | head -20",
@@ -235,7 +247,6 @@ class TestSemanticComplexity(unittest.TestCase):
         ):
             prof = compute_semantic_complexity(cmd)
             self.assertFalse(prof.has_mutation, f"expected read-only for '{cmd}': {prof.mutating_segments}")
-            self.assertTrue(prof.read_only_only, cmd)
 
     def test_pipe_tail_exemption_requires_pipe(self):
         # A filter verb NOT in pipe-tail position is not exempt (fail-closed
@@ -247,22 +258,17 @@ class TestSemanticComplexity(unittest.TestCase):
     def test_substitution_in_segment_is_control_flow(self):
         prof = compute_semantic_complexity("echo $(pwd) && git status")
         self.assertTrue(prof.has_mutation)
-        # CONTROL_FLOW weight 5.0 + 1 substitution
-        self.assertEqual(prof.score, 6.0)
         self.assertEqual(prof.mutating_segments, ("echo $(pwd)",))
 
     def test_fd_redirects_stripped_before_split(self):
         prof = compute_semantic_complexity("python3 -m unittest discover -s tests 2>&1 | tail -30")
         self.assertFalse(prof.has_mutation)
         self.assertEqual(prof.n_segments, 2)
-        # DIAGNOSTIC 0.5 (head) + PIPE_TAIL 0.0; 1 fd redirection counted
-        self.assertEqual(prof.score, 0.5 + 1.0)
 
     def test_unknown_verb_fail_closed_mutating(self):
         prof = compute_semantic_complexity("some_random_tool --flag && git status")
         self.assertTrue(prof.has_mutation)
         self.assertIn("some_random_tool --flag", prof.mutating_segments)
-        self.assertEqual(prof.score, 2.0)
 
     def test_structural_parity_with_compute_complexity(self):
         for cmd in (
@@ -299,7 +305,6 @@ class TestSemanticComplexity(unittest.TestCase):
                 prof = compute_semantic_complexity(heredoc)
                 self.assertTrue(prof.has_mutation, f"unquoted-heredoc {label} must mark mutating")
                 self.assertIn("(unquoted heredoc substitution)", prof.mutating_segments)
-                self.assertFalse(prof.read_only_only)
                 # compute_complexity still counts the surviving substitutions
                 self.assertEqual(compute_complexity(heredoc), expected)
 
@@ -307,6 +312,23 @@ class TestSemanticComplexity(unittest.TestCase):
         # The exact PR #186 PoC shape: 3 x $(touch ...) in an unquoted heredoc.
         poc = "git commit -F - <<EOF\n$(touch /tmp/a)\n$(touch /tmp/b)\n$(touch /tmp/c)\nEOF"
         prof = compute_semantic_complexity(poc)
+        self.assertTrue(prof.has_mutation)
+        self.assertIn("(unquoted heredoc substitution)", prof.mutating_segments)
+
+    def test_double_quoted_heredoc_delimiter_body_remains_inert(self):
+        # A quoted delimiter — double (`<<"EOF"`) OR single (`<<'EOF'`) —
+        # suppresses body expansion: $(...) payload is inert text and must NOT
+        # mark the chain mutating (regression for double-quoted delimiters).
+        for opener in ('<<"EOF"', "<<'EOF'"):
+            with self.subTest(opener=opener):
+                heredoc = f"echo {opener}\n$(touch /tmp/q)\nEOF"
+                prof = compute_semantic_complexity(heredoc)
+                self.assertFalse(prof.has_mutation, f"{opener} body must be inert: {prof.mutating_segments}")
+                self.assertEqual(prof.mutating_segments, ())
+                self.assertEqual(prof.structural, 2)  # 1 seg + 1 redir, no surviving subst
+        # Contrast: an UNQUOTED delimiter shell-expands the body at run time.
+        heredoc = "echo <<EOF\n$(touch /tmp/q)\nEOF"
+        prof = compute_semantic_complexity(heredoc)
         self.assertTrue(prof.has_mutation)
         self.assertIn("(unquoted heredoc substitution)", prof.mutating_segments)
 
