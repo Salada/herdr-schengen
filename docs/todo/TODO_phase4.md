@@ -42,7 +42,8 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 1) **TUI Universal Deep-Link** (`[#ID]`, `[Audit #ID]`, `[▼ Details]` 원클릭 팝업/인라인 전개).
    - 2) **Pending Queue 4단계 상태 배지** (`🔍 Gatekeeper Checking`, `🚨 Action Required`, `⏳ Deferred (Slot #N)`, `⚡ Approved`).
    - 3) **AuditFullscreenModal 교환 뷰(`get_adjudication_exchange`) 전면 연동** 및 `scope_context`(Session vs Global) 메타데이터 감사 레저 반영.
-   - 4) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
+   - 4) **동적 URL / WebSearch (curl, wget) 듀얼 정책(Allowlist & Denylist) 관리** (SQLite `url_policy_rules` + Tool Call + TUI 탭/정렬 뷰).
+   - 5) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
 
 4. 🔬 **[Track 4 — 딥 리서치 & 장기 안정성 (Research & Hardening)]**:
    - 1) **LLM Base URL 엔드포인트 서버 장애 감지·서킷 브레이커 & 자동 복구(Auto-Restart)** 메커니즘.
@@ -122,6 +123,14 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - 해결 방안:
     1) Prefix 및 상위/하위 경로 포괄 매칭: `live_req`가 `req_cmd`의 Prefix이거나, `access_directory`의 경우 파일 경로의 상위 디렉터리와 매칭 시 동일 요청으로 인정.
     2) `ctrl+f` 풀스크린 전개 연동 (PR #152 `expand_dialog` 활용): 절단 의심 시 `ctrl+f`로 전개 후 재비교 (사용자 지침: 키 전개는 천천히 신중히).
+  - **[Caveat & Warning — AGY `ctrl+g` / 전개 시 다이얼로그 소멸 및 오승인 위험 & 포커스 추론]**:
+    • AGY 등에서 장문 스크립트를 확인하기 위해 `ctrl+g`(또는 전개 키)를 입력하여 뷰포트를 전환할 경우, **기존 프롬프트의 승인 확인 모달(Confirmation Dialog)이 화면에서 일시적으로 사라지는 현상 발생**.
+    • 이 때 Watcher나 Eviction 로직(`dialog_is_live == False`)이 이를 "사용자가 직접 승인/완료하여 다이얼로그가 해소됨(`pane-direct`)"으로 오판(False Positive)하여 승인 처리하거나, 반대로 주입할 다이얼로그를 찾지 못해 상태 불일치가 일어날 수 있음.
+    • **유저 포커스(Focus)와 상호작용 추론의 필요성**:
+      - 유저가 해당 Pane에 포커스하고 있는 상태라면, 반대로 유저가 직접 내용을 보기 위해 `ctrl+g`를 눌렀거나 터미널을 조작 중일 가능성이 높으므로 단순 상태 전이만으로 결론내리지 않는 정밀 추론 필요.
+      - **권장 어프로치**: `ctrl+g`를 통한 덤프/전개는 **"해당 Pane에 유저 포커스가 없거나(Unfocused), 사용자 키 입력이 전혀 감지되지 않는 유휴(Idle) 상태일 때만"** 열고 닫도록 제어하는 것이 안전함.
+      - **타 에이전트 일반화 (Universal Extension)**: AGY의 `ctrl+g`뿐만 아니라 OpenCode(`ctrl+f`), Codex(`ctrl+a` fullscreen) 등 단축키만 다를 뿐 전개/확대 시 다이얼로그 레이아웃이 변형되는 모든 에이전트 어댑터에 공통 적용되는 일반화 아키텍처 과제임.
+    • 따라서 전개 덤프 중에는 일시적 다이얼로그 부재를 즉시 승인/소멸로 간주하지 않도록 가드 락(Liveness Eviction Hold)을 반드시 연계해야 함.
 
 [] [Deferred/TUI] `SettingsModal` 내 잔여 설정 토글 연동 (Approval Bias, Fast-Track, approve_advisory):
   - 1) `SettingsModal` (Automation 섹션) 내 `approve_advisory` On/Off 토글 스위치 연동 (PR #180 후속).
@@ -196,6 +205,34 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     2. DB Schema & TUI Audit Ledger 반영:
        - `audit_logs` 테이블에 `scope_context` 컬럼 추가 (또는 `mechanism` 컬럼 값 표준화: `fast-track:global`, `session-memory:pane_id`, `allowlist:repo`).
        - TUI Audit Table 및 Detail Modal에 스코프 태그/배지 노출 (예: `[🤖 AUTO: Session]` vs `[🤖 AUTO: Global]`).
+
+[] [Feature/Security] 동적 URL / WebSearch (curl, wget, webfetch) 듀얼 정책(Allowlist & Denylist) 관리 및 TUI 테이블 연동:
+  - Context & Objective:
+    • 에이전트의 외부 웹 탐색(`webfetch`, `websearch`) 및 네트워크 명령어(`curl`, `wget`)에 대해, 안전 허용(Allow)뿐만 아니라 명백한 악성/유출 위험 도메인 차단(Deny)을 명확하게 통제할 수 있는 동적 URL 정책 체계 필요.
+    • 정적 코드 수정 없이 TUI 및 도구 호출(Tool Call)을 통해 실시간으로 신뢰 도메인(Allow) 및 유출/위험 도메인(Deny) 패턴을 추가/삭제/조회/토글할 수 있어야 함.
+  - Architecture & SQLite Schema Design:
+    1. **통합 정책 테이블 구축 (`url_policy_rules`)**:
+       - `id INTEGER PRIMARY KEY AUTOINCREMENT`
+       - `pattern TEXT NOT NULL` (도메인, URL 접두사, 정규식 또는 glob: 예 `api.github.com`, `*.pastebin.com`, `http://malicious.net/*`)
+       - `rule_type TEXT NOT NULL CHECK(rule_type IN ('ALLOW', 'DENY'))` (허용/차단 명시)
+       - `category TEXT DEFAULT 'general'` (`docs`, `api`, `search`, `exfil`, `malware`, `suspicious`)
+       - `reason TEXT` (등록 사유 및 메모)
+       - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+       - `created_by TEXT DEFAULT 'human'` (`human`, `gatekeeper_tool`)
+       - `UNIQUE(pattern, rule_type)`
+    2. **판정 우선순위 규약 (Deny-First Security Invariant)**:
+       - 1) **Denylist 일치 시**: `Tier A (UNAMBIGUOUS CRITICAL / EXFIL_GUARD)`로 즉시 자율 거절(`reject_escalation`).
+       - 2) **Allowlist 일치 시**: `Tier B / Fast-Track (SAFE_NETWORK)`로 즉시 자율 승인(`approve_escalation`).
+       - 3) **둘 다 미해당 시**: `Tier C (Gray-Zone)`로 분류하여 맥락 조사 후 통상 처리.
+    3. **Gatekeeper Tool-Calling 인터페이스 확장**:
+       - `query_url_policy(url)`: 대상 URL의 Allow/Deny 여부 및 등록 사유 조회.
+       - `add_url_rule(pattern, rule_type, reason)` / `remove_url_rule(pattern, rule_type)`: 게이트키퍼가 신뢰 문서 등록 또는 차단 사이트 동적 블랙리스팅.
+    4. **TUI 정책 매니저 뷰 (`UrlPolicyModal` / `SettingsModal` 연계)**:
+       - **대소문자 무시 알파벳순(Case-Insensitive Alphabetical Sorting)** 정렬 및 표시.
+       - 상단 필터 탭: `[All]`, `[🟢 Allowlist]`, `[🔴 Denylist]`.
+       - TUI 단축키/버튼: `Add Rule` (Allow/Deny 선택), `Delete Rule`, `Toggle Type` (Allow ↔ Deny 빠른 전환).
+    5. **보안 평가기 연동 (`security_evaluator.py`)**:
+       - `evaluate_network_calls` 및 `webfetch` 단계에서 `url_policy_rules`를 선행 조회하여 Deny 우선 차단 및 Allow 고속 패스트트랙 집행.
 
 [] [Deferred/OpenCode] OpenCode 보조 지침 전달 큐, 다이얼로그 디바운스 및 배치 Defer UX 개선 (#3615/#3623/#3636 후속):
   - 1) **지침 전달 큐 (Instruction Queue)**: Bubble Tea 모달 상태에서 `send-text` 무효화 대응을 위해 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.

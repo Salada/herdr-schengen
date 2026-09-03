@@ -755,6 +755,63 @@ class TestOpenCodeInjectSkip(unittest.TestCase):
             approved, reason = self.adapter.inject_approval("w1D:p1", "python3 -m unittest discover -s tests")
         self.assertTrue(approved)
 
+    def test_inject_accepts_truncated_prefix(self):
+        # Issue #3143/#3219 FIX: the live pane-text re-parse can be a viewport-
+        # soft-wrap TRUNCATED prefix of the approved req_cmd (cut at a word
+        # boundary). same_request must treat it as the SAME request — the enter
+        # is still injected, no INJECT_SKIP_CHANGED (no key-injection drop).
+        full = "python3 -m unittest discover -s tests"
+        truncated = "python3 -m unittest discover"
+        dialog = "Permission required\n\n  $ python3 -m unittest discover -s tests\n\nAllow once  Allow always  Reject"
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value=dialog), patch(
+            "adapters.agent_adapters.opencode.run_cmd", return_value=True
+        ), patch(
+            "adapters.agent_adapters.opencode.resolve_opencode_injection", return_value=("success", "once approved")
+        ), patch.object(self.adapter, "classify_dialog_stage", return_value="permission"), patch.object(
+            self.adapter, "get_pending_request", return_value=truncated
+        ), patch.dict(os.environ, {"SCHENGEN_OPENCODE_REPOLL_SECONDS": "0"}):
+            approved, reason = self.adapter.inject_approval("w1D:p1", full)
+        self.assertTrue(approved)
+
+    def test_inject_still_skips_superset(self):
+        # Security invariant (directionality): a live re-parse that GREW beyond
+        # the approved req_cmd (agent appended '&& rm -rf /') must NEVER match —
+        # same_request is not symmetric and the inject must SKIP fail-closed.
+        dialog = (
+            "Permission required\n\n  $ git status --porcelain && rm -rf /\n\n"
+            "Allow once  Allow always  Reject"
+        )
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value=dialog), patch(
+            "adapters.agent_adapters.opencode.run_cmd", return_value=True
+        ) as rc, patch.object(
+            self.adapter, "classify_dialog_stage", return_value="permission"
+        ), patch.object(
+            self.adapter, "get_pending_request", return_value="git status --porcelain && rm -rf /"
+        ):
+            approved, reason = self.adapter.inject_approval("w1D:p1", "git status")
+        self.assertFalse(approved)
+        self.assertEqual(reason, INJECT_SKIP_CHANGED)
+        rc.assert_not_called()  # the dangerous superset must never receive an enter
+
+    def test_inject_accepts_access_dir_parent(self):
+        # Issue #3143/#3219: the approved access_directory grant referenced a
+        # concrete file path; the live dialog re-parses to the PARENT directory
+        # (same directory grant). Path-variance tolerance must still inject.
+        dialog = (
+            "Permission required\n\n  Access external directory /tmp/work/proj/src\n"
+            "Patterns\n- /tmp/work/proj/src/*\n"
+            "Allow once  Allow always  Reject"
+        )
+        with patch("adapters.agent_adapters.opencode.get_pane_text", return_value=dialog), patch(
+            "adapters.agent_adapters.opencode.run_cmd", return_value=True
+        ), patch(
+            "adapters.agent_adapters.opencode.resolve_opencode_injection", return_value=("success", "once approved")
+        ), patch.object(self.adapter, "classify_dialog_stage", return_value="permission"), patch.object(
+            self.adapter, "get_pending_request", return_value="access_directory /tmp/work/proj/src"
+        ), patch.dict(os.environ, {"SCHENGEN_OPENCODE_REPOLL_SECONDS": "0"}):
+            approved, reason = self.adapter.inject_approval("w1D:p1", "access_directory /tmp/work/proj/src/tui.py")
+        self.assertTrue(approved)
+
 
 class TestNormReqCmd(unittest.TestCase):
     """_norm_req_cmd must be SURGICAL (prompt + whitespace only), not a

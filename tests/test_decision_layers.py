@@ -917,6 +917,32 @@ class TestFastTrackTestRunner(unittest.TestCase):
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
 
+    def test_cd_safe_dir_prefix_test_runner_fast_tracks(self):
+        # (issue #3670) a single leading `cd <safe-dir> &&` may prefix the narrow
+        # test-runner fast-track.
+        safe_cmds = (
+            "cd ~/code/herdr-schengen && python3 -m unittest discover -s tests 2>&1 | tail -30",
+            "cd ~/code/herdr-schengen && pytest",
+            "cd /Users/kyjbusan/code/herdr-schengen && python3 -m unittest tests.test_decision_layers",
+        )
+        for cmd in safe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+
+    def test_cd_unsafe_dir_prefix_stays_fail_closed(self):
+        # (issue #3670) the cd-prefix strip is fail-closed: an unsafe/navigation
+        # dir keeps the raw command, whose '&&' then rejects the fast-track.
+        unsafe_cmds = (
+            "cd ~/.ssh && python3 -m unittest discover -s tests",
+            "cd ~ && python3 -m unittest discover -s tests",
+            "cd .. && python3 -m unittest discover -s tests",
+            "cd / && python3 -m unittest discover -s tests",
+        )
+        for cmd in unsafe_cmds:
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
+
 
 class TestComplexityTax(unittest.TestCase):
     """M3 COMPLEXITY_TAX (INV-16): structural-complexity deferral layer.
@@ -1028,6 +1054,31 @@ class TestComplexityTax(unittest.TestCase):
         safe, reason, layer, tax = self._audit(cmd)
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.COMPLEXITY_TAX)
+
+    def test_heredoc_body_lines_do_not_inflate_complexity(self):
+        # (issue #4027) a terminated heredoc collapses to a single '<<' marker —
+        # 16 body lines previously scored ~19 as phantom segments; now ~2.
+        heredoc = "cat <<'EOF'\n" + "\n".join(f"line{i}" for i in range(1, 17)) + "\nEOF"
+        self.assertEqual(compute_complexity(heredoc), 2)
+
+    def test_quoted_heredoc_substitutions_isolated(self):
+        # (issue #4027) a QUOTED heredoc body expands nothing: $(...) inside it
+        # must NOT count as a substitution, and body lines must not inflate.
+        heredoc = "cat <<'EOF'\n" + "echo $(date) `whoami`\n" * 8 + "EOF"
+        self.assertEqual(compute_complexity(heredoc), 2)
+
+    def test_unquoted_heredoc_substitutions_survive(self):
+        # (issue #4027) an UNQUOTED heredoc body IS shell-expanded: count its
+        # $(...) / backticks even though the body lines themselves are masked.
+        heredoc = "cat <<EOF\n" + "a $(date)\nb `whoami`\nc $(pwd)\nd end\n" + "EOF"
+        # 1 segment + (2 '$(' + 2 backticks) + 1 redirection = 6
+        self.assertEqual(compute_complexity(heredoc), 6)
+
+    def test_herestring_and_unterminated_heredoc_unchanged(self):
+        # `<<<` must never be mistaken for a heredoc opener; an unterminated
+        # heredoc is left untouched (fail-closed: no masking without a bound).
+        self.assertEqual(compute_complexity("cat <<< hello"), 2)
+        self.assertEqual(compute_complexity("cat << EOF\nbody line\n"), 3)
 
 
 class TestOriginWeighting(unittest.TestCase):

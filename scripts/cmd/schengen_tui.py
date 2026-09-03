@@ -126,6 +126,18 @@ from adapters.herdr_client import get_pane_info, get_pane_text, run_cmd
 from cmd.schengen_watcher import list_active_guard_locks
 
 
+# Free-text human directive detection (INV-HO-1 free-text parity, edge-case-7):
+# anchored + case-insensitive, matches ONLY the start of a NON-slash human chat
+# message. On a match the raw message is persisted as a human opinion so the
+# gatekeeper prompt can surface a genuine directive even when the LLM is
+# unreachable or would misread the intent. Lightweight heuristic only — the
+# gatekeeper still independently interprets the escalation.
+_HUMAN_DIRECTIVE_RE = re.compile(
+    r"^(approve|allow|proceed|go ahead|run it|yes[ ,]?(do it)?|reject|block|stop|no)\b",
+    re.IGNORECASE,
+)
+
+
 def format_local_time(iso_ts: str) -> str:
     """Convert UTC ISO timestamp string into Local Time HH:MM format."""
     try:
@@ -3253,6 +3265,23 @@ class SchengenTUIApp(App):
                     )
                 self._write("\n".join(lines))
                 return
+
+            # Free-text directive provenance (INV-HO-1 parity, edge-case-7):
+            # a NON-slash human directive ("yes, do it", "go ahead", "run it",
+            # "approve it", "no", "stop", …) must persist its raw opinion BEFORE
+            # the gatekeeper LLM call — the opinion survives an LLM outage or a
+            # hallucinated judge reading (the /approve /reject slash handlers
+            # above already do this). Anchored regex on the stripped message,
+            # user-authored only; non-fatal — an opinion write failure must
+            # never break the chat flow.
+            if author == "user" and not trimmed.startswith("/"):
+                if _HUMAN_DIRECTIVE_RE.match(trimmed):
+                    try:
+                        esc_now = get_current_command_escalation()
+                        if esc_now:
+                            record_human_opinion(esc_now["id"], user_msg)
+                    except Exception:
+                        pass
 
             def on_tool(chunk: str):
                 self._write_markdown(chunk)
