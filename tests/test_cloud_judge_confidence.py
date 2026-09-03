@@ -1,20 +1,17 @@
-"""M6 cloud-judge confidence tests: confidence-threshold gating + complexity_mode='judge'.
+"""M6 cloud-judge confidence tests: confidence-threshold gating + tiered routing.
 
 Covers:
 1. High-confidence safe verdict -> auto-approve (confidence >= threshold).
 2. Low-confidence safe verdict -> defer to human (fail-closed).
 3. Missing confidence -> defer; parse_json_verdict returns a 3-tuple.
-4. complexity_mode='judge' + NON-mutating over-threshold chain -> routed to the
-   cloud judge (direct + end-to-end layer == CLOUD_JUDGE on high-confidence safe).
-5. judge-mode low-confidence -> defers with COMPLEXITY_TAX.
-6. INJECTED origin -> ORIGIN_GUARD fires BEFORE any cloud judge call (INV-23),
-   even with mode='judge'.
-7. Default mode='escalate': MUTATING over-threshold -> COMPLEXITY_TAX, cloud
-   judge NOT called.
+4. NON-mutating over-threshold chain -> routed to the cloud judge (direct +
+   end-to-end layer == CLOUD_JUDGE on high-confidence safe).
+5. Low-confidence read-only over-threshold chain -> defers with COMPLEXITY_TAX.
+6. INJECTED origin -> ORIGIN_GUARD fires BEFORE any cloud judge call (INV-23).
+7. MUTATING over-threshold -> COMPLEXITY_TAX, cloud judge NOT called.
 8. (issue #4027 tiered routing, fail-closed) MUTATING over-threshold chains
-   NEVER auto-approve via the cloud judge — hard COMPLEXITY_TAX deferral in
-   BOTH complexity_mode values; only read-only/diagnostic/VCS chains are
-   absorbed by the judge (again in both modes).
+   NEVER auto-approve via the cloud judge — hard COMPLEXITY_TAX deferral; only
+   read-only/diagnostic/VCS chains are absorbed by the judge.
 
 Uses a clean temp DB (patch guard_db.DB_PATH + init_db) so defaults apply, and
 wipes the global in-memory pane-approval / eval caches to avoid cross-test leaks.
@@ -37,7 +34,6 @@ from core.guard_db import (
     get_cloud_judge_config,
     get_complexity_tax_config,
     set_cloud_judge_config,
-    set_complexity_tax_config,
 )
 from core.security_evaluator import (
     DecisionLayer,
@@ -63,7 +59,7 @@ def _canned(content_str: str) -> dict:
 
 
 class TestCloudJudgeConfidence(unittest.TestCase):
-    """M6: cloud-judge confidence threshold + complexity_mode='judge'."""
+    """M6: cloud-judge confidence threshold + tiered complexity-tax routing."""
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -129,10 +125,9 @@ class TestCloudJudgeConfidence(unittest.TestCase):
         self.assertIsNone(parsed[1])
         self.assertIn("x", parsed[2])
 
-    def test_judge_mode_readonly_chain_routes_to_cloud_judge(self):
-        # (issue #4027) judge mode: a NON-mutating over-threshold chain is
-        # absorbed by the cloud judge (direct + end-to-end == CLOUD_JUDGE).
-        set_complexity_tax_config(mode="judge")
+    def test_readonly_chain_routes_to_cloud_judge(self):
+        # (issue #4027) a NON-mutating over-threshold chain is absorbed by the
+        # cloud judge (direct + end-to-end == CLOUD_JUDGE).
         cfg = get_complexity_tax_config()
         verdict = '{"is_safe": true, "confidence": 0.95, "reason": "complex but benign"}'
         with patch("core.security_evaluator.post_cloud_judge", return_value=_canned(verdict)):
@@ -142,17 +137,16 @@ class TestCloudJudgeConfidence(unittest.TestCase):
             )
             self.assertIsNotNone(res)
             safe, reason, layer = res
-            self.assertTrue(safe, f"judge-mode high-confidence must clear: {reason}")
+            self.assertTrue(safe, f"high-confidence read-only verdict must clear: {reason}")
             self.assertEqual(layer, self.DecisionLayer.CLOUD_JUDGE)
             # end-to-end audit_shell_command
             e_safe, e_reason, e_layer = self.audit_shell_command(READONLY_CHAIN_A)
-            self.assertTrue(e_safe, f"end-to-end judge-mode must clear: {e_reason}")
+            self.assertTrue(e_safe, f"end-to-end read-only chain must clear: {e_reason}")
             self.assertEqual(e_layer, self.DecisionLayer.CLOUD_JUDGE)
 
-    def test_judge_mode_mutating_chain_never_routes_to_cloud_judge(self):
-        # (issue #4027 fail-closed decision) even in judge mode a MUTATING chain
-        # (mkdir) must NOT be auto-approved by the cloud judge — hard deferral.
-        set_complexity_tax_config(mode="judge")
+    def test_mutating_chain_never_routes_to_cloud_judge(self):
+        # (issue #4027 fail-closed decision) a MUTATING chain (mkdir) must NOT
+        # be auto-approved by the cloud judge — hard deferral.
         cfg = get_complexity_tax_config()
         calls = []
 
@@ -166,16 +160,15 @@ class TestCloudJudgeConfidence(unittest.TestCase):
             )
             self.assertIsNotNone(res)
             safe, reason, layer = res
-            self.assertFalse(safe, "mutating chain must NEVER cloud-approve, even in judge mode")
+            self.assertFalse(safe, "mutating chain must NEVER cloud-approve")
             self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
             # end-to-end stays fail-closed too
             e_safe, e_reason, e_layer = self.audit_shell_command(COMPLEX_CHAIN)
             self.assertFalse(e_safe, f"end-to-end mutating chain must defer: {e_reason}")
             self.assertEqual(e_layer, self.DecisionLayer.COMPLEXITY_TAX)
-        self.assertEqual(calls, [], "post_cloud_judge must NOT be called for a mutating chain in judge mode")
+        self.assertEqual(calls, [], "post_cloud_judge must NOT be called for a mutating chain")
 
-    def test_judge_mode_low_confidence_defers(self):
-        set_complexity_tax_config(mode="judge")
+    def test_low_confidence_verdict_defers(self):
         cfg = get_complexity_tax_config()
         verdict = '{"is_safe": true, "confidence": 0.5, "reason": "ambiguous"}'
         with patch("core.security_evaluator.post_cloud_judge", return_value=_canned(verdict)):
@@ -184,11 +177,10 @@ class TestCloudJudgeConfidence(unittest.TestCase):
             )
             self.assertIsNotNone(res)
             safe, reason, layer = res
-            self.assertFalse(safe, "judge-mode low-confidence must defer to human")
+            self.assertFalse(safe, "low-confidence read-only verdict must defer to human")
             self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
 
     def test_injected_origin_blocks_before_cloud_judge(self):
-        set_complexity_tax_config(mode="judge")
         calls = []
 
         def _recording(*args, **kwargs):
@@ -201,8 +193,9 @@ class TestCloudJudgeConfidence(unittest.TestCase):
         self.assertEqual(layer, self.DecisionLayer.ORIGIN_GUARD)
         self.assertEqual(calls, [], "post_cloud_judge must NOT be called for INJECTED origin")
 
-    def test_default_mode_escalate_mutating_skips_cloud_judge(self):
-        # Clean temp DB -> default complexity_mode='escalate'
+    def test_mutating_chain_skips_cloud_judge(self):
+        # Clean temp DB -> default complexity-tax config: a MUTATING over-threshold
+        # chain hard-defers (COMPLEXITY_TAX) without consulting the cloud judge.
         calls = []
 
         def _recording(*args, **kwargs):
@@ -216,18 +209,18 @@ class TestCloudJudgeConfidence(unittest.TestCase):
             )
             self.assertIsNotNone(res)
             safe, reason, layer = res
-            self.assertFalse(safe, "escalate mode must defer to human")
+            self.assertFalse(safe, "mutating over-threshold chain must defer to human")
             self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
             # end-to-end
             e_safe, e_reason, e_layer = self.audit_shell_command(COMPLEX_CHAIN)
-            self.assertFalse(e_safe, "escalate mode end-to-end must defer")
+            self.assertFalse(e_safe, "mutating over-threshold end-to-end must defer")
             self.assertEqual(e_layer, self.DecisionLayer.COMPLEXITY_TAX)
-        self.assertEqual(calls, [], "post_cloud_judge must NOT be called for a mutating chain in escalate mode")
+        self.assertEqual(calls, [], "post_cloud_judge must NOT be called for a mutating chain")
 
-    def test_default_mode_escalate_readonly_chain_absorbed_by_cloud_judge(self):
-        # (issue #4027 tiered routing) in the DEFAULT escalate mode a NON-mutating
-        # over-threshold chain is ALSO absorbed by the cloud judge — high-confidence
-        # safe -> CLOUD_JUDGE approve, unsafe -> COMPLEXITY_TAX deferral.
+    def test_readonly_chain_absorbed_by_cloud_judge(self):
+        # (issue #4027 tiered routing) a NON-mutating over-threshold chain is
+        # absorbed by the cloud judge — high-confidence safe -> CLOUD_JUDGE
+        # approve, unsafe -> COMPLEXITY_TAX deferral.
         calls = []
 
         def _recording(*args, **kwargs):
@@ -241,11 +234,11 @@ class TestCloudJudgeConfidence(unittest.TestCase):
             )
             self.assertIsNotNone(res)
             safe, reason, layer = res
-            self.assertTrue(safe, f"read-only chain cleared by cloud judge in escalate mode: {reason}")
+            self.assertTrue(safe, f"read-only chain cleared by cloud judge: {reason}")
             self.assertEqual(layer, self.DecisionLayer.CLOUD_JUDGE)
         self.assertEqual(len(calls), 1, "cloud judge must be called exactly once for the read-only chain")
 
-    def test_default_mode_escalate_readonly_chain_low_confidence_defers(self):
+    def test_readonly_chain_low_confidence_verdict_defers(self):
         calls = []
 
         def _recording(*args, **kwargs):

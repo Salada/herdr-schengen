@@ -1619,20 +1619,19 @@ def _apply_complexity_tax(
     agent_id: str = "default",
 ) -> "Optional[tuple[bool, str, str]]":
     """Return an escalation tuple if the command exceeds the complexity threshold,
-    else None (pass through). NEVER returns is_safe=True in escalate mode.
+    else None (pass through). Never returns is_safe=True for a mutating chain.
 
     M5 threads `origin`; HUMAN origin skips the structural-complexity deferral
     (trust concession gated by the origin_weighting_enabled knob). (issue #4027)
-    tiered routing replaces the old monolithic judge-vs-escalate split:
+    over-threshold chains are routed by their mutation profile:
 
       * threshold gate = `structural` (heredoc payload isolated, see
         compute_semantic_complexity);
       * an over-threshold chain with NO mutating segments (pure read-only /
-        diagnostic / VCS chain) is absorbed via the cloud judge in BOTH
-        complexity_mode values (CLOUD_JUDGE on high-confidence safe, else
-        COMPLEXITY_TAX deferral);
+        diagnostic / VCS chain) is absorbed via the cloud judge
+        (CLOUD_JUDGE on high-confidence safe, else COMPLEXITY_TAX deferral);
       * an over-threshold chain WITH a mutating segment NEVER auto-approves via
-        the cloud judge — hard COMPLEXITY_TAX deferral in BOTH modes
+        the cloud judge — hard COMPLEXITY_TAX deferral to the human
         (fail-closed decision).
     """
     if not cfg.get("complexity_tax_enabled", True):
@@ -1646,7 +1645,7 @@ def _apply_complexity_tax(
         return None
     if not prof.has_mutation:
         # Read-only / diagnostic / VCS chain over threshold: absorb via the
-        # cloud judge (issue #4027) in both complexity_mode values.
+        # cloud judge (issue #4027).
         origin_str = origin.value if isinstance(origin, Origin) else str(origin)
         cloud_safe, cloud_reason = audit_with_cloud_judge(
             cmd_str,
@@ -1660,7 +1659,7 @@ def _apply_complexity_tax(
             return True, f"Complex read-only chain cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
         return False, f"Complex read-only chain deferred to human ({cloud_reason})", DecisionLayer.COMPLEXITY_TAX
     # Mutating chain over threshold: NEVER auto-approve via cloud judge —
-    # apply the tighter hard-deferral behavior in both complexity_mode values.
+    # apply the tighter hard-deferral behavior (deferral to the human).
     return (
         False,
         f"Complex mutating compound command requires human review (complexity={cx} > threshold={thr})",
