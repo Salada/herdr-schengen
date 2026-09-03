@@ -7,7 +7,8 @@ an opencode permission dialog can differ from the FULL canonical request command
 * a terminal viewport soft-wrap can TRUNCATE the captured text to a prefix of
   the approved command, and
 * ``access_directory`` grants can render with path-expression variance
-  (``~`` vs absolute, parent dir vs file inside it, glob vs concrete path).
+  (``~`` vs absolute, the immediate containing directory vs an over-specific
+  file capture, same-depth glob vs concrete path).
 
 ``same_request(approved_cmd, screen_cmd)`` decides whether the live re-parse
 still shows the SAME permission request:
@@ -19,11 +20,15 @@ DIRECTIONALITY IS CRITICAL (fail-closed): screen may be a truncated PREFIX of
 approved (same dialog -> match), but a SUPERSET of approved (e.g. the agent
 appended ``&& rm -rf /`` after the gatekeeper approved) is a DIFFERENT — and
 potentially dangerous — request and MUST NEVER match. ``same_request`` is
-intentionally NOT symmetric.
+intentionally NOT symmetric. ``access_directory`` is a CONTAINMENT LATTICE, so
+its path variance is bounded to the SAME SCOPE: only the immediate containing
+directory or a same-depth glob expression of the approved path matches — never
+root / grandparent / deeper ancestors, which would grant MORE scope than the
+gatekeeper evaluated.
 
 The pure normalization ``norm_req_cmd`` stays SURGICAL (strip leading ``$ ``
 prompt + collapse whitespace ONLY — issue #23/#1910, pinned by
-TestNormReqCmd); the prefix / upper-directory / glob tolerance lives HERE, not
+TestNormReqCmd); the prefix / directory / glob tolerance lives HERE, not
 inside ``norm_req_cmd``.
 
 Stdlib only (os, re, fnmatch): importable by any adapter / coordinator without
@@ -109,15 +114,42 @@ def _norm_path(p: str) -> str:
         return os.path.normpath(p)
 
 
+def _glob_segments_match(path: str, pattern: str) -> bool:
+    """fnmatch per path SEGMENT at EQUAL depth (glob '*' never crosses os.sep).
+
+    Unlike ``fnmatch.fnmatch(path, pattern)`` — where a bare '*' spans '/' and
+    lets '/a/*' match '/a/b/c/tui.py' (a scope-broadening false positive) —
+    this splits both absolute paths on os.sep and fnmatches each segment at the
+    SAME index. '/a/*' therefore matches '/a/b' (a DIRECT child) but never
+    '/a/b/c/tui.py'. Equal segment counts keep a 'dir/*' grant expression
+    anchored to the single level beneath 'dir'.
+    """
+    path_parts = [p for p in path.split(os.sep) if p]
+    pattern_parts = [p for p in pattern.split(os.sep) if p]
+    if len(path_parts) != len(pattern_parts):
+        return False
+    return all(fnmatch.fnmatch(seg, pat) for seg, pat in zip(path_parts, pattern_parts))
+
+
 def _is_path_inclusive(approved: str, screen: str) -> bool:
     """True for ``access_directory`` path-expression variance of the SAME grant.
 
-    access_directory is the one permission type where the canonical request
-    (channel filepath / pane-text dir) and the live re-parse can legitimately
-    differ in PATH EXPRESSION while still being the same directory grant:
-      - screen is an ancestor directory of approved (parent dir vs file inside);
-      - screen is a glob covering approved (dir/* vs the concrete path);
-      - ``~`` vs absolute spelling of the same directory.
+    access_directory is a CONTAINMENT LATTICE, so directionality must bound the
+    SCOPE: a shallower path is a scope SUPERSET (broader grant). The canonical
+    request is usually an over-specific capture — the plugin's filepath names
+    the FILE under the directory the dialog actually grants (#3219) — so the
+    ONLY sanctioned variances are:
+
+      - ``~`` vs absolute spelling of the same directory (equality after
+        normalization);
+      - screen is the IMMEDIATE containing directory of the approved path
+        (``os.path.dirname(approved_real) == screen_real``) — ONE level only.
+        Root, grandparent, or any deeper ancestor grant MORE scope than the
+        gatekeeper evaluated and NEVER match;
+      - screen is a glob expression at the SAME depth as the approved path,
+        matched SEGMENT-wise (a '*' in one segment never crosses '/' into a
+        deeper tree).
+
     Deliberately access_directory ONLY: edit_file / read_file path parent/glob
     mismatches are NOT relaxed here (fail-closed) — the generic whitespace-
     boundary text-prefix tolerance above is the only leeway those kinds get.
@@ -131,8 +163,11 @@ def _is_path_inclusive(approved: str, screen: str) -> bool:
     if pa == pb:
         return True
     if _has_glob(pb):
-        return fnmatch.fnmatch(pa, pb)
-    return pa.startswith(pb.rstrip(os.sep) + os.sep)
+        return _glob_segments_match(pa, pb)
+    # Over-specific file capture (#3219): the canonical request named a file
+    # whose IMMEDIATE containing directory is the directory grant the live
+    # dialog renders. ONLY that single level matches.
+    return os.path.dirname(pa) == pb
 
 
 def same_request(approved_cmd, screen_cmd) -> bool:
@@ -142,10 +177,11 @@ def same_request(approved_cmd, screen_cmd) -> bool:
     Match when (after surgical normalization) they are EQUAL, when screen is a
     plausible viewport-TRUNCATED whitespace-boundary prefix of approved with the
     full approved command long enough (>= MIN_PREFIX_LEN), or when
-    approved/screen are ``access_directory`` variants of the same directory
-    grant (ancestor / glob / ~-vs-absolute). A screen that is a SUPERSET of
-    approved — the agent appended a dangerous suffix after approval — never
-    matches (fail-closed).
+    approved/screen are ``access_directory`` variants of the SAME directory
+    scope (same path, immediate containing directory, or same-depth glob — see
+    _is_path_inclusive; broader ancestors never match). A screen that is a
+    SUPERSET of approved — the agent appended a dangerous suffix after
+    approval — never matches (fail-closed).
     """
     approved = norm_req_cmd(approved_cmd)
     screen = norm_req_cmd(screen_cmd)

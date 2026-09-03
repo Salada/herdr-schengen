@@ -95,12 +95,36 @@ class TestSameRequestAccessDir(unittest.TestCase):
     """access_directory path-expression variance of the SAME directory grant."""
 
     def test_access_dir_parent_dir_matches(self):
-        # Screen re-parsed as the PARENT directory of the approved concrete path.
+        # #3219: the approved path is an over-specific FILE capture; the screen
+        # re-parsed as its IMMEDIATE containing directory is the SAME grant
+        # (single level — never root/grandparent).
         self.assertTrue(same_request("access_directory /a/b/c/tui.py", "access_directory /a/b/c"))
 
     def test_access_dir_glob_matches(self):
-        # Screen rendered as a glob covering the approved concrete path.
+        # Screen rendered as a glob covering the approved concrete path at the
+        # SAME depth (direct child of the glob's parent).
         self.assertTrue(same_request("access_directory /a/b/c/tui.py", "access_directory /a/b/c/*"))
+
+    def test_access_dir_glob_matches_direct_child_dir(self):
+        # A 'dir/*' expression covers the DIRECT children of dir (one segment).
+        self.assertTrue(same_request("access_directory /a/b", "access_directory /a/*"))
+
+    def test_access_dir_root_ancestor_rejected(self):
+        # Security review (PR #187 BLOCKING): '/' is a scope SUPERSET of any
+        # grant — the live dialog asking for the root must never match.
+        self.assertFalse(
+            same_request("access_directory /home/alice/project/tui.py", "access_directory /")
+        )
+
+    def test_access_dir_grandparent_ancestor_rejected(self):
+        # Grandparent grants MORE scope than the gatekeeper evaluated (only the
+        # IMMEDIATE containing directory is the same grant).
+        self.assertFalse(same_request("access_directory /a/b/c/tui.py", "access_directory /a"))
+
+    def test_access_dir_glob_crossing_separator_rejected(self):
+        # fnmatch-style '*' crossing '/' would let '/a/*' match a DEEP path
+        # (non-ancestor siblings included) — segment-wise globbing rejects it.
+        self.assertFalse(same_request("access_directory /a/b/c/tui.py", "access_directory /a/*"))
 
     def test_access_dir_tilde_vs_absolute(self):
         # '~' vs absolute spelling of the same directory grant.
