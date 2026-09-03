@@ -117,6 +117,10 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - 해결 방안:
     1) Prefix 및 상위/하위 경로 포괄 매칭: `live_req`가 `req_cmd`의 Prefix이거나, `access_directory`의 경우 파일 경로의 상위 디렉터리와 매칭 시 동일 요청으로 인정.
     2) `ctrl+f` 풀스크린 전개 연동 (PR #152 `expand_dialog` 활용): 절단 의심 시 `ctrl+f`로 전개 후 재비교 (사용자 지침: 키 전개는 천천히 신중히).
+  - **[Caveat & Warning — AGY `ctrl+g` / 전개 시 다이얼로그 소멸 및 오승인 위험]**:
+    • AGY 등에서 장문 스크립트를 확인하기 위해 `ctrl+g`(또는 전개 키)를 입력하여 뷰포트를 전환할 경우, **기존 프롬프트의 승인 확인 모달(Confirmation Dialog)이 화면에서 사라지는 현상 발생**.
+    • 이 때 Watcher나 Eviction 로직(`dialog_is_live == False`)이 이를 "사용자가 직접 승인/완료하여 다이얼로그가 해소됨(`pane-direct`)"으로 오판(False Positive)하여 승인 처리하거나, 반대로 주입할 다이얼로그를 찾지 못해 상태 불일치가 일어날 수 있음.
+    • 따라서 `ctrl+g` 덤프/전개 중에는 일시적 다이얼로그 부재를 즉시 승인/소멸로 간주하지 않도록 가드 락(Liveness Eviction Hold)을 고려해야 함.
 
 [] [Deferred/TUI] `SettingsModal` 내 잔여 설정 토글 연동 (Approval Bias, Fast-Track, approve_advisory):
   - 1) `SettingsModal` (Automation 섹션) 내 `approve_advisory` On/Off 토글 스위치 연동 (PR #180 후속).
