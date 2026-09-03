@@ -113,16 +113,14 @@ class TestDecisionLayers(unittest.TestCase):
         # via the removed catch-all — but never via a denylist false positive.
         fast_track_allowed = [
             'echo "use ps eww to dump env vars"',
+            # `|` in a quoted grep pattern is regex alternation, not a pipe.
+            "grep -rn 'auxe|eww|wwE|axeww|launchctl|/proc/|getenv|ps e' tests/",
         ]
         escalated_not_denylisted = [
             "ps -e",
             "ps aux",
             "ps auxww",
             "ps -ef",
-            # The `|` inside the quoted grep pattern is a literal alternation, not a
-            # pipe; the naive INV-6 metachar check still escalates it (fail-closed,
-            # conservative) — but never as an env-dump denylist false positive.
-            "grep -rn 'auxe|eww|wwE|axeww|launchctl|/proc/|getenv|ps e' tests/",
             "git commit -m 'fix ps eww false positive in heredoc'",
             "cat > /tmp/handoff.txt <<'EOF'\n## Issue #51 — ps eww 프로세스 env 키 노출 수정\nEOF",
         ]
@@ -1022,6 +1020,16 @@ class TestComplexityTax(unittest.TestCase):
         self.assertEqual(compute_complexity("a&&b"), 2)
         self.assertEqual(compute_complexity("a\n&&\nb"), 2)
         self.assertEqual(compute_complexity("a   &&   b"), 2)
+
+    def test_quoted_or_escaped_controls_do_not_add_complexity(self):
+        self.assertEqual(compute_complexity("echo 'a|b; c & d > e < f'"), 1)
+        self.assertEqual(compute_complexity(r"echo a\|b\;c\&d\>e\<f"), 1)
+        # The Codex MCP query stays one command even if its argument contains
+        # diagnostic punctuation that looks like a shell control.
+        self.assertEqual(
+            compute_complexity('codex mcp get local --format "name|status; retry & timeout"'),
+            1,
+        )
 
     def test_already_blocked_unaffected(self):
         safe, reason, layer, tax = self._audit("rm -rf /tmp/x && sudo id")

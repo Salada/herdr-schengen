@@ -1178,6 +1178,58 @@ def _is_safe_cd_segment(seg: str) -> bool:
     return False
 
 
+def _shell_structure_view(cmd_str: str) -> str:
+    """Mask quoted or escaped argument data while preserving character offsets.
+
+    Shell controls in quotes are data, not syntax.  This deliberately limited
+    view is only for finding controls; callers still inspect the original text.
+    Dynamic substitutions are handled before the fast-track path.
+
+    An UNTERMINATED quote is left untouched (fail-closed): a malformed quote
+    must not hide a substitution/redirection from the control scan, so its
+    content is restored verbatim rather than masked away.
+    """
+    chars = list(cmd_str)
+    quote = None
+    quote_start = -1
+    index = 0
+    while index < len(chars):
+        char = chars[index]
+        if char == "\\" and quote != "'":
+            chars[index] = " "
+            if index + 1 < len(chars):
+                chars[index + 1] = " "
+            index += 2
+            continue
+        if quote is None:
+            if char in ("'", '"'):
+                quote = char
+                quote_start = index
+                chars[index] = " "
+        else:
+            chars[index] = " "
+            if char == quote:
+                quote = None
+                quote_start = -1
+        index += 1
+    if quote is not None and quote_start >= 0:
+        for j in range(quote_start, len(chars)):
+            chars[j] = cmd_str[j]
+    return "".join(chars)
+
+
+def _split_shell_control_segments(cmd_str: str) -> list[str]:
+    """Split on unquoted shell controls while returning original segments."""
+    structure = _shell_structure_view(cmd_str)
+    segments = []
+    start = 0
+    for match in re.finditer(r"[|&;]+", structure):
+        segments.append(cmd_str[start:match.start()])
+        start = match.end()
+    segments.append(cmd_str[start:])
+    return segments
+
+
 def _is_readonly_pipeline_segment(seg: str) -> bool:
     """True if a single pipeline segment is a pure read-only command with no sensitive target."""
     seg = seg.strip()
@@ -1223,7 +1275,7 @@ def _is_readonly_pipeline_segment(seg: str) -> bool:
 
 def _is_safe_readonly_pipeline(cmd_str: str) -> bool:
     """True if cmd_str is a pure read-only pipeline (segments joined by | && ;)."""
-    segments = re.split(r"[|&;]+", cmd_str)
+    segments = _split_shell_control_segments(cmd_str)
     nonempty = [s.strip() for s in segments if s.strip()]
     if not nonempty:
         return False
@@ -1238,16 +1290,17 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     by | && ;) or a single read-only command — always refusing sensitive paths,
     broad/root-level wildcard targets, and destructive git flags.
     """
+    structure = _shell_structure_view(cmd_str)
     # Hard rejects — never fast-track mutation/execution/dynamic constructs
-    if re.search(r"\$\(|`", cmd_str):
+    if re.search(r"\$\(|`", structure):
         return False          # command substitution
-    if re.search(r">>?|<<?", cmd_str):
+    if re.search(r">>?|<<?", structure):
         return False          # redirection / heredoc (write)
     if _FORENSIC_NETWORK_BIN_RE.search(cmd_str):
         return False          # forensic / network egress primitives
 
     # Pure read-only pipeline (segments joined by | && ;)
-    if _PIPELINE_SEP_RE.search(cmd_str):
+    if _PIPELINE_SEP_RE.search(structure):
         return _is_safe_readonly_pipeline(cmd_str)
 
     # Single-command allowlist (no pipeline separators)
@@ -1446,6 +1499,9 @@ def _isolate_heredocs(cmd_str: str) -> "tuple[str, int]":
     s = re.sub(r">&|&>", ">", s)
     masked, extra_heredoc = _mask_heredocs(s)
     masked, extra_quotes = _mask_quotes(masked)
+    # Quote-aware shell controls (PR #188): mask backslash-escaped characters
+    # (`\|`, `\;`, `\&`, ...) so they are not misread as separators/substitutions.
+    masked = _shell_structure_view(masked)
     return masked, extra_heredoc + extra_quotes
 
 

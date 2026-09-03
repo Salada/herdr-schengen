@@ -74,6 +74,11 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 
 ### [Track 1] Quick-Wins & Precision Engine
 
+[] [Bug/Guard] 따옴표/이스케이프된 셸 제어문자 과도 에스컬레이션 완화:
+  - `security_evaluator.py`의 구조 뷰가 인용된 `|`, `;`, `&`, `<`, `>`를 인자 데이터로 마스킹하되, 원문 오프셋을 유지한다. 비인용 제어문자, 동적 치환, 민감 경로, 변이 명령은 기존 fail-closed 규칙을 유지한다.
+  - [ ] **AGY (Coder tab):** PR을 검토하고 전체 단위 테스트가 통과하면 Forgejo `main`에 merge한다.
+  - [ ] **OpenCode:** merge 뒤 깨끗한 worktree에서 `git pull --ff-only origin main` 후 `HERDR_ENV=1 ~/.local/share/herdr-schengen-tui-venv/bin/python3 -m unittest discover -s tests`를 실행하고, quoted-control 회귀 사례와 `rm -rf`/`.env` 차단 사례를 확인한다.
+
 [] [Refactor/TestRunner] 안전한 read-only 체인 진단 명령 Fast-Track 확장 (사례: #3670 후속 백로그):
   - 현상 및 요구사항:
     • 에이전트들의 일상적인 검증/진단용 안전 체인 명령(`cd <worktree> && python3 -m unittest discover -s tests 2>&1 | tail -30`, `git status --short && echo "..." && git diff --stat`)이 `NOT_ALLOWLISTED`로 인간 승인을 매번 요구하여 피로도 유발.
