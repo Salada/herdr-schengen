@@ -59,6 +59,7 @@ from core.guard_db import (
     get_pending_escalations,
     get_recent_audit_logs,
     group_pending_escalations,
+    has_human_opinion,
     record_adjudication,
     record_audit_log,
     resolve_escalation,
@@ -998,6 +999,7 @@ STEP 4 — FEEDBACK FORMAT:
 - Intercepted Reason: {active_esc['safety_reason']}
 - Detected Target: `{target_candidate}`
 - Decision Layer: {active_esc.get('decision_layer', 'UNKNOWN')}
+- Human Opinion Recorded: {has_human_opinion(active_esc['id'])}
 
 {protocol}
 """
