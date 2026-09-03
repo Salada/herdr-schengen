@@ -117,10 +117,14 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - 해결 방안:
     1) Prefix 및 상위/하위 경로 포괄 매칭: `live_req`가 `req_cmd`의 Prefix이거나, `access_directory`의 경우 파일 경로의 상위 디렉터리와 매칭 시 동일 요청으로 인정.
     2) `ctrl+f` 풀스크린 전개 연동 (PR #152 `expand_dialog` 활용): 절단 의심 시 `ctrl+f`로 전개 후 재비교 (사용자 지침: 키 전개는 천천히 신중히).
-  - **[Caveat & Warning — AGY `ctrl+g` / 전개 시 다이얼로그 소멸 및 오승인 위험]**:
-    • AGY 등에서 장문 스크립트를 확인하기 위해 `ctrl+g`(또는 전개 키)를 입력하여 뷰포트를 전환할 경우, **기존 프롬프트의 승인 확인 모달(Confirmation Dialog)이 화면에서 사라지는 현상 발생**.
+  - **[Caveat & Warning — AGY `ctrl+g` / 전개 시 다이얼로그 소멸 및 오승인 위험 & 포커스 추론]**:
+    • AGY 등에서 장문 스크립트를 확인하기 위해 `ctrl+g`(또는 전개 키)를 입력하여 뷰포트를 전환할 경우, **기존 프롬프트의 승인 확인 모달(Confirmation Dialog)이 화면에서 일시적으로 사라지는 현상 발생**.
     • 이 때 Watcher나 Eviction 로직(`dialog_is_live == False`)이 이를 "사용자가 직접 승인/완료하여 다이얼로그가 해소됨(`pane-direct`)"으로 오판(False Positive)하여 승인 처리하거나, 반대로 주입할 다이얼로그를 찾지 못해 상태 불일치가 일어날 수 있음.
-    • 따라서 `ctrl+g` 덤프/전개 중에는 일시적 다이얼로그 부재를 즉시 승인/소멸로 간주하지 않도록 가드 락(Liveness Eviction Hold)을 고려해야 함.
+    • **유저 포커스(Focus)와 상호작용 추론의 필요성**:
+      - 유저가 해당 Pane에 포커스하고 있는 상태라면, 반대로 유저가 직접 내용을 보기 위해 `ctrl+g`를 눌렀거나 터미널을 조작 중일 가능성이 높으므로 단순 상태 전이만으로 결론내리지 않는 정밀 추론 필요.
+      - **권장 어프로치**: `ctrl+g`를 통한 덤프/전개는 **"해당 Pane에 유저 포커스가 없거나(Unfocused), 사용자 키 입력이 전혀 감지되지 않는 유휴(Idle) 상태일 때만"** 열고 닫도록 제어하는 것이 안전함.
+      - **타 에이전트 일반화 (Universal Extension)**: AGY의 `ctrl+g`뿐만 아니라 OpenCode(`ctrl+f`), Codex(`ctrl+a` fullscreen) 등 단축키만 다를 뿐 전개/확대 시 다이얼로그 레이아웃이 변형되는 모든 에이전트 어댑터에 공통 적용되는 일반화 아키텍처 과제임.
+    • 따라서 전개 덤프 중에는 일시적 다이얼로그 부재를 즉시 승인/소멸로 간주하지 않도록 가드 락(Liveness Eviction Hold)을 반드시 연계해야 함.
 
 [] [Deferred/TUI] `SettingsModal` 내 잔여 설정 토글 연동 (Approval Bias, Fast-Track, approve_advisory):
   - 1) `SettingsModal` (Automation 섹션) 내 `approve_advisory` On/Off 토글 스위치 연동 (PR #180 후속).
