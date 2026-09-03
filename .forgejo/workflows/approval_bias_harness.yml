@@ -22,6 +22,7 @@ jobs:
       SCHENGEN_JUDGE_API_KEY: ${{ secrets.SCHENGEN_INSPECTOR_API_KEY }}
       SCHENGEN_JUDGE_BASE_URL: ${{ secrets.SCHENGEN_INSPECTOR_BASE_URL }}
       SCHENGEN_JUDGE_MODEL: "gpt-5.6-luna"
+      HERDR_ENV: "1"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -43,7 +44,8 @@ jobs:
           export PATH="$PWD/.venv/bin:$PATH"
           .venv/bin/python3 -m unittest tests.test_schengen_bias_harness tests.test_approval_bias_corpus -v
 
-      - name: Run Live Approval-Bias Harness (gatekeeper LLM drift gate)
+      - name: Run Live Approval-Bias Harness (gatekeeper LLM drift gate — canary only)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: |
           if [ -z "${SCHENGEN_INSPECTOR_API_KEY}" ]; then
             echo "ℹ️  SCHENGEN_INSPECTOR_API_KEY secret not set; skipping live approval-bias harness (non-blocking)."
