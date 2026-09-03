@@ -1080,18 +1080,28 @@ _PIPELINE_SEP_RE = re.compile(r"[|&;]")
 def _is_safe_cd_target(directory: str) -> bool:
     """True iff `directory` is a concrete, non-escaping cd target (issue #3670).
 
-    Rejects navigation/root shorthand (`.`, `..`, `-`, `~`, `~/`, `/`, `//...`)
-    and any target that trips the sensitive-file / sensitive-directory /
-    broad-wildcard backstops. A bare absolute or home-relative path that names
-    a SPECIFIC directory (e.g. `~/code/herdr-schengen`,
-    `/Users/x/code/herdr-schengen`) passes.
+    Accepts ONLY a concrete specific directory (e.g. `~/code/herdr-schengen`,
+    `/Users/x/code/herdr-schengen`, relative `scripts/...`). Trailing slashes
+    are normalized away FIRST so `../`, `~/`, `./` cannot slip past literal
+    checks (PR #186 review finding), then rejects:
+      * `..` path components anywhere (`..`, `../`, `../..`, `a/../b`);
+      * bare/home/root anchors (`.`, `./`, `~`, `~/`, `~/.`, `/`, `//...`);
+      * any target tripping the sensitive-file / sensitive-directory /
+        broad-wildcard backstops.
     """
     if not directory:
         return False
-    if directory in (".", "..", "-", "~", "~/", "/"):
+    t = directory.rstrip("/")
+    if not t:  # "/" / "//" ... -> pure root
         return False
-    if directory.startswith("//"):
+    if t in (".", "..", "-", "~"):
         return False
+    if t.startswith("//"):
+        return False
+    if t.endswith("/."):
+        return False  # "~/.", "a/." -> anchor/dot-dir, not a concrete dir
+    if any(comp == ".." for comp in t.split("/")):
+        return False  # "..", "../..", "a/../b", "x/.."
     # Backstops (INV-SENS-1/2): never cd into a sensitive or broad/root target.
     if SENSITIVE_FILE_PATTERN.search(directory) or SENSITIVE_DIRECTORY_PATTERN.search(directory):
         return False
@@ -1472,6 +1482,17 @@ def compute_semantic_complexity(cmd_str: str) -> SemanticComplexity:
         if label not in ("READ_ONLY", "PIPE_TAIL"):
             read_only_only = False
         prev_sep = ""
+    if extra_subst > 0:
+        # (PR #186 review) an UNQUOTED heredoc body is shell-EXPANDED at run
+        # time, so its $(...) / backtick substitutions EXECUTE code. Even though
+        # the payload is masked away before segment classification, those
+        # surviving substitutions are CONTROL_FLOW-equivalent mutations and must
+        # force has_mutation=True (never absorb an unquoted-heredoc chain via
+        # the cloud judge). Quoted heredoc bodies expand nothing -> extra_subst
+        # stays 0 and remain inert.
+        has_mutation = True
+        read_only_only = False
+        mutating.append("(unquoted heredoc substitution)")
     return SemanticComplexity(
         structural=structural,
         score=total_weight + n_subst + n_redir,

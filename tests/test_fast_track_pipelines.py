@@ -161,6 +161,8 @@ class TestCdPrefixCarveout(unittest.TestCase):
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed (sensitive dir), got safe=True: {reason}")
 
     def test_cd_escape_forms_fail_closed(self):
+        # PR #186 review: trailing-slash and dot-suffixed forms of the anchor
+        # escapes (`../`, `~/`, `~/.`, `./`) must NOT slip past the carve-out.
         for cmd in (
             "cd .. && git status",
             "cd ~ && git status",
@@ -168,9 +170,27 @@ class TestCdPrefixCarveout(unittest.TestCase):
             "cd ~/ && git status",
             "cd - && git status",
             "cd . && git status",
+            "cd ../ && git status",
+            "cd ../.. && git status",
+            "cd ~/. && git status",
+            "cd ./ && git status",
+            "cd a/../b && git status",
         ):
             safe, reason, layer = audit_shell_command(cmd)
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed (cd escape), got safe=True: {reason}")
+
+    def test_cd_concrete_dirs_still_fast_track(self):
+        # PR #186 review: the narrow carve-out must keep accepting ONLY concrete
+        # specific dirs — home-relative, absolute, and plain relative.
+        for cmd in (
+            "cd ~/code/herdr-schengen && git status",
+            "cd /Users/kyjbusan/code/herdr-schengen && git status",
+            "cd scripts/tests && git status",
+            "cd ./scripts/tests && git status",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, FAST_TRACK)
 
     def test_cd_second_and_still_fail_closed(self):
         # A second '&&' means a second (unguarded) prefix position — fail-closed.

@@ -203,12 +203,48 @@ class TestSemanticComplexity(unittest.TestCase):
             self.assertEqual(prof.structural, compute_complexity(cmd), cmd)
 
     def test_heredoc_body_never_mutating_payload(self):
-        # A heredoc body containing mutating verbs is inert payload — masked
-        # before classification, so it must not flag the chain.
+        # A QUOTED heredoc body is inert payload — masked before classification,
+        # expands nothing, so it must not flag the chain as mutating.
         heredoc = "git commit -F - <<'MSG'\nrm -rf /\nMSG"
         prof = compute_semantic_complexity(heredoc)
         self.assertFalse(prof.has_mutation)
         self.assertEqual(prof.mutating_segments, ())
+
+    def test_unquoted_heredoc_substitutions_mark_mutating(self):
+        # PR #186 review (BLOCKING 1): an UNQUOTED heredoc body is shell-expanded
+        # at run time — $(...) / backticks inside it EXECUTE and must force
+        # has_mutation=True even though the payload is masked before segment
+        # classification (CONTROL_FLOW-equivalent mutation).
+        for body_line, label, expected in (
+            ("$(touch /tmp/a)", "command substitution", 3),  # 1 seg + 1 subst + 1 redir
+            ("`touch /tmp/a`", "backtick substitution", 4),  # 2 backticks survive
+        ):
+            heredoc = "git commit -F - <<EOF\n" + body_line + "\nEOF"
+            with self.subTest(label=label):
+                prof = compute_semantic_complexity(heredoc)
+                self.assertTrue(prof.has_mutation, f"unquoted-heredoc {label} must mark mutating")
+                self.assertIn("(unquoted heredoc substitution)", prof.mutating_segments)
+                self.assertFalse(prof.read_only_only)
+                # compute_complexity still counts the surviving substitutions
+                self.assertEqual(compute_complexity(heredoc), expected)
+
+    def test_unquoted_heredoc_substitutions_over_threshold_poc(self):
+        # The exact PR #186 PoC shape: 3 x $(touch ...) in an unquoted heredoc.
+        poc = "git commit -F - <<EOF\n$(touch /tmp/a)\n$(touch /tmp/b)\n$(touch /tmp/c)\nEOF"
+        prof = compute_semantic_complexity(poc)
+        self.assertTrue(prof.has_mutation)
+        self.assertIn("(unquoted heredoc substitution)", prof.mutating_segments)
+
+    def test_quoted_heredoc_with_substitutions_remains_inert(self):
+        # Quoted heredoc bodies expand nothing — even $(touch ...) payload is
+        # inert text and must NOT mark the chain mutating.
+        heredoc = "git commit -F - <<'MSG'\n" + "\n".join(
+            f"$(touch /tmp/q{i})" for i in range(6)
+        ) + "\nMSG"
+        prof = compute_semantic_complexity(heredoc)
+        self.assertFalse(prof.has_mutation)
+        self.assertEqual(prof.mutating_segments, ())
+        self.assertEqual(prof.structural, 2)  # body fully masked, no surviving subst
 
 
 class TestComplexityTaxRouting(unittest.TestCase):
@@ -266,6 +302,54 @@ class TestComplexityTaxRouting(unittest.TestCase):
                 self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
                 self.assertIn("complexity", reason)
         self.assertEqual(calls, [], "cloud judge must NEVER be called for a mutating chain")
+
+    def test_unquoted_heredoc_chain_never_routes_to_cloud_judge(self):
+        # PR #186 review (BLOCKING 1): an over-threshold chain whose only
+        # mutation is executable $(...) inside an UNQUOTED heredoc body must
+        # hard-defer (COMPLEXITY_TAX) — NEVER be absorbed by the cloud judge
+        # (structural = 1 masked segment + 6 surviving substitutions + 1
+        # redirection = 8 > default threshold 6).
+        unquoted = "git commit -F - <<EOF\n" + "\n".join(
+            f"$(touch /tmp/a{i})" for i in range(6)
+        ) + "\nEOF"
+        prof = compute_semantic_complexity(unquoted)
+        self.assertEqual(prof.structural, 8)
+        self.assertTrue(prof.has_mutation)
+        calls = []
+
+        def _recording(*args, **kwargs):
+            calls.append(args)
+            return _canned('{"is_safe": true, "confidence": 0.99, "reason": "benign"}')
+
+        for mode in ("escalate", "judge"):
+            with self.subTest(mode=mode), patch(
+                "core.security_evaluator.post_cloud_judge", side_effect=_recording
+            ):
+                res = self._apply(unquoted, mode=mode)
+                self.assertIsNotNone(res)
+                safe, reason, layer = res
+                self.assertFalse(safe, f"unquoted-heredoc chain must defer in mode={mode}: {reason}")
+                self.assertEqual(layer, self.DecisionLayer.COMPLEXITY_TAX)
+        self.assertEqual(calls, [], "cloud judge must NEVER be called for an unquoted-heredoc chain")
+
+    def test_quoted_heredoc_chain_over_threshold_absorbed_by_cloud_judge(self):
+        # Contrast: a QUOTED heredoc body is inert, so an over-threshold chain
+        # carrying one is non-mutating and MAY still be absorbed by the cloud
+        # judge (structural = 7 masked segments + 1 redirection = 8 > threshold).
+        quoted = (
+            "git commit -F - <<'MSG'\n"
+            + "\n".join(f"body{i}" for i in range(6))
+            + "\nMSG\n&& echo a && echo b && echo c && echo d && echo e && echo f"
+        )
+        prof = compute_semantic_complexity(quoted)
+        self.assertEqual(prof.structural, 8)
+        self.assertFalse(prof.has_mutation)
+        verdict = '{"is_safe": true, "confidence": 0.95, "reason": "quoted heredoc ok"}'
+        with patch("core.security_evaluator.post_cloud_judge", return_value=_canned(verdict)):
+            res = self._apply(quoted)
+        self.assertIsNotNone(res)
+        self.assertTrue(res[0], res[1])
+        self.assertEqual(res[2], self.DecisionLayer.CLOUD_JUDGE)
 
     def test_readonly_chain_absorbed_by_cloud_judge_both_modes(self):
         readonly = "true && true && true && true && true && true && true"
