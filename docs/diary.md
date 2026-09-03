@@ -55,3 +55,11 @@ hardcoded "allow add/commit, block push" rulesets — they only complexify the c
 
 **Fix**: revised Tier C prompt to "approve if proven safe, defer if not, never
 reject"; discarded the deterministic safe-VCS-mutation ruleset.
+
+## 2026-09-03 — Folder-level allowlist for mirror paths (future direction)
+
+**Idea**: whitelist specific non-git durable dirs (`~/.agents/skills/herdr-schengen`,
+`~/.gemini/skills/herdr-schengen`) so the standard skill-mirror rsync/cp to those
+paths can fast-track or LLM-approve without escalating every time. The rsync
+escalation itself is reasonable (T3 non-git overwrite), but a folder allowlist
+would remove recurring fatigue on a known-safe deployment path.
