@@ -22,6 +22,7 @@ from core.guard_db import enqueue_pending_escalation
 from tools.schengen_agent_llm import execute_tool_call, reject_batch_escalations
 from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
 from adapters.agent_adapters import INJECT_SKIP_CHANGED
+from adapters.auto_advance import AutoAdvanceResult
 
 
 class _FakeAdapter:
@@ -129,7 +130,7 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
             "tools.schengen_agent_llm.record_adjudication"
         ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
             "tools.schengen_agent_llm.get_adapter", return_value=fake
-        ):
+        ), patch("tools.schengen_agent_llm.run_auto_advance", return_value=AutoAdvanceResult(outcome="not_trampolined")):
             res = execute_tool_call("approve_escalation", {"escalation_id": esc_id, "english_feedback": "x"})
         out = json.loads(res)
         self.assertEqual(out["status"], "error")

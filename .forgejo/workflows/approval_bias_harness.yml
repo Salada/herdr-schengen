@@ -67,10 +67,11 @@ jobs:
           fi
           exit "$code"
 
-      - name: Archive Bias Report
+      - name: Show Bias Report
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: approval-bias-report
-          path: approval-bias-report.json
-          if-no-files-found: ignore
+        run: |
+          if [ -f approval-bias-report.json ]; then
+            cat approval-bias-report.json
+          else
+            echo "(no live harness run — canary only)"
+          fi
