@@ -1369,7 +1369,7 @@ class AuditFullscreenModal(ModalCloseMixin, ModalScreen):
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         event.stop()
-        self._open_detail(event.row_index)
+        self._open_detail(event.cursor_row)
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         meta = getattr(event.style, "meta", None) or {}

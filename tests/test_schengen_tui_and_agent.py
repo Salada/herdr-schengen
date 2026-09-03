@@ -723,6 +723,19 @@ class TestTUIAuditScrollAndModal(unittest.IsolatedAsyncioTestCase):
     """Test Recent Audits scroll disabling and Fullscreen Modal scroll configuration."""
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    def test_fullscreen_modal_keyboard_selection_uses_cursor_row(self):
+        from cmd.schengen_tui import AuditFullscreenModal
+        from textual.widgets import DataTable
+
+        modal = AuditFullscreenModal()
+        event = DataTable.RowSelected(DataTable(), cursor_row=2, row_key=None)
+
+        with patch.object(modal, "_open_detail") as open_detail:
+            modal.on_data_table_row_selected(event)
+
+        open_detail.assert_called_once_with(2)
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_audit_table_paging_scroll_config(self):
         # Infinite-scroll sidebar table (Sprint: audit ledger UI): the compact
         # table must NOT steal horizontal scroll, must stay click-to-open
