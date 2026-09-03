@@ -54,6 +54,15 @@ class TestFastTrackReadonlyPipelines(unittest.TestCase):
             self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
             self.assertEqual(layer, FAST_TRACK)
 
+    def test_quoted_shell_controls_are_argument_data(self):
+        for cmd in (
+            "echo 'a|b; c & d > e < f'",
+            r"echo a\|b\;c\&d\>e\<f",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected quoted data in '{cmd}' to fast-track, got: {reason}")
+            self.assertEqual(layer, FAST_TRACK)
+
 
 class TestPipelineFailClosed(unittest.TestCase):
     """Sensitive/broad/mutating/network constructs must escalate."""
