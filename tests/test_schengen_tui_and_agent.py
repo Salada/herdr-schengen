@@ -141,24 +141,27 @@ Approved. All files verified safely."""
         s5 = format_tool_call_beautified("reject_escalation", {"escalation_id": 42, "english_feedback": "Critical risk."})
         self.assertIn("🛑 **[Action Reject]**", s5)
 
-    @patch("tools.schengen_agent_llm.get_approve_advisory_config", return_value=True)
     @patch("tools.schengen_agent_llm.get_current_command_escalation")
-    def test_build_system_prompt_structure(self, mock_get_active, mock_approve_advisory):
+    def test_build_system_prompt_structure(self, mock_get_active):
         mock_get_active.return_value = {
             "id": 123,
             "pane_id": "w1D:p1",
             "agent_kind": "agy",
             "raw_command": "rm -rf /tmp/test_dir",
             "safety_reason": "Destructive deletion",
+            "decision_layer": "GRAY_ZONE",
         }
         prompt = build_system_prompt()
         self.assertIn("Escalation ID: #123", prompt)
         self.assertIn("investigate_path_details", prompt)
         self.assertIn("investigate_pane_history", prompt)
         self.assertIn("read_file_snippet", prompt)
-        self.assertIn("PRE-COMPLEXITY/RISK BRIEFING", prompt)
-        self.assertIn("DISAGREE & COMMIT", prompt)
-        self.assertNotIn("NO Autonomous Reject", prompt)
+        self.assertIn("ADVISORY SECURITY REVIEW", prompt)
+        self.assertIn("TRIAGE", prompt)
+        self.assertIn("OBVIOUS-SAFE FORM", prompt)
+        self.assertIn("NO AUTONOMOUS REJECT", prompt)
+        self.assertIn("- Decision Layer: GRAY_ZONE", prompt)
+        self.assertNotIn("DISAGREE & COMMIT", prompt)
 
     @patch("tools.schengen_agent_llm.get_current_command_escalation")
     def test_build_system_prompt_language_directive(self, mock_get_active):
