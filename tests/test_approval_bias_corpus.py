@@ -116,7 +116,11 @@ class TestApprovalBiasCorpus(unittest.TestCase):
         decision_layer for every command (this is what keeps the corpus usable
         in CI / git bisect without a live LLM)."""
         mismatches = []
-        with _hermetic_environ():
+        with _hermetic_environ(), mock.patch(
+            "core.security_evaluator.audit_shell_with_shellcheck", return_value=(True, "mocked-safe", None)
+        ), mock.patch(
+            "core.security_evaluator.audit_script_with_semgrep", return_value=(True, "mocked-safe", {"degraded": False})
+        ):
             for c in self.cases:
                 try:
                     _safe, _reason, layer = audit_shell_command(c["command"], cwd=str(REPO_ROOT))
