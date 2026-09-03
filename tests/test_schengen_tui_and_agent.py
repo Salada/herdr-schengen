@@ -15,7 +15,7 @@ import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -591,6 +591,82 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(detail.query_one("#detail-fields"))
             self.assertTrue(detail.query_one("#detail-command"))
             self.assertTrue(detail.query_one("#detail-opinions"))
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+
+class TestTUIFreeTextDirectiveProvenance(unittest.IsolatedAsyncioTestCase):
+    """Free-text human directive → record_human_opinion BEFORE send_message.
+
+    INV-HO-1 free-text parity (edge-case-7): a NON-slash human directive such
+    as "yes, do it" must persist its raw opinion before the gatekeeper LLM
+    call, so the opinion survives an LLM outage or a hallucinated judge
+    reading. Detection is an anchored regex on the stripped user message; a
+    non-directive free-text message must NOT record an opinion.
+    """
+
+    _ACTIVE_ESC = {"id": 4242, "pane_id": "w1D:p1", "agent_kind": "codex"}
+
+    def _make_app(self):
+        from cmd.schengen_tui import SchengenTUIApp
+        return SchengenTUIApp()
+
+    async def _run_directive(self, app, msg: str):
+        from cmd.schengen_tui import (
+            get_current_command_escalation,
+            record_human_opinion,
+        )
+        with (
+            patch("cmd.schengen_tui.get_current_command_escalation", return_value=dict(self._ACTIVE_ESC)),
+            patch("cmd.schengen_tui.record_human_opinion") as mock_opinion,
+            patch.object(SchengenAgentChat, "send_message", new=AsyncMock(return_value="ok")),
+            patch.object(app, "update_radar_data"),
+        ):
+            async with app.run_test() as pilot:
+                w = app.process_user_chat(msg)
+                await w.wait()
+                await pilot.pause()
+        return mock_opinion
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_free_text_directive_records_opinion(self):
+        app = self._make_app()
+        try:
+            mock_opinion = await self._run_directive(app, "yes, do it")
+            mock_opinion.assert_called_once_with(self._ACTIVE_ESC["id"], "yes, do it")
+        finally:
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_free_text_directive_approve_it_records_opinion(self):
+        app = self._make_app()
+        try:
+            mock_opinion = await self._run_directive(app, "approve it, that's fine")
+            mock_opinion.assert_called_once_with(self._ACTIVE_ESC["id"], "approve it, that's fine")
+        finally:
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_non_directive_message_does_not_record_opinion(self):
+        app = self._make_app()
+        try:
+            mock_opinion = await self._run_directive(app, "why was this command blocked?")
+            mock_opinion.assert_not_called()
+        finally:
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_slash_command_does_not_record_free_text_opinion(self):
+        # Slash-prefixed messages are routed by the slash handlers (which own
+        # their own record_human_opinion); the free-text path must skip them.
+        app = self._make_app()
+        try:
+            mock_opinion = await self._run_directive(app, "/custom-command xyz")
+            mock_opinion.assert_not_called()
+        finally:
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
 

@@ -178,6 +178,46 @@ class TestGatekeeperTargetBlock(unittest.TestCase):
             self.assertIn(layer, prompt)
 
 
+class TestGatekeeperHumanOpinionSurface(unittest.TestCase):
+    """has_human_opinion is surfaced in the ACTIVE ESCALATION TARGET block so
+    the gatekeeper can distinguish a genuine human directive from a
+    hallucinated one (edge-case-7 / INV-HO-1 free-text parity)."""
+
+    def test_human_opinion_recorded_true_surfaced(self):
+        with _patch_esc(), patch(
+            "tools.schengen_agent_llm.has_human_opinion", return_value=True
+        ) as mock_ho:
+            prompt = build_system_prompt()
+        self.assertIn("- Human Opinion Recorded: True", prompt)
+        mock_ho.assert_called_once_with(_ACTIVE_ESC["id"])
+
+    def test_human_opinion_recorded_false_surfaced(self):
+        with _patch_esc(), patch(
+            "tools.schengen_agent_llm.has_human_opinion", return_value=False
+        ) as mock_ho:
+            prompt = build_system_prompt()
+        self.assertIn("- Human Opinion Recorded: False", prompt)
+        mock_ho.assert_called_once_with(_ACTIVE_ESC["id"])
+
+    def test_human_opinion_surfaced_in_read_only_mode(self):
+        # Question interpretation mode keeps the target block — the hint must
+        # surface there too (adjudication capability is removed, not the info).
+        with _patch_esc(), patch(
+            "tools.schengen_agent_llm.has_human_opinion", return_value=True
+        ):
+            prompt = build_system_prompt(allow_adjudication=False)
+        self.assertIn("- Human Opinion Recorded: True", prompt)
+
+    def test_no_active_escalation_returns_without_human_opinion_line(self):
+        # Early-return branch (no active escalation) must not call has_human_opinion.
+        with _patch_esc(None), patch(
+            "tools.schengen_agent_llm.has_human_opinion", return_value=True
+        ) as mock_ho:
+            prompt = build_system_prompt()
+        self.assertNotIn("Human Opinion Recorded", prompt)
+        mock_ho.assert_not_called()
+
+
 class TestGatekeeperPromptReadOnlyMode(unittest.TestCase):
     """Question non-adjudication: else-branch untouched and disjoint."""
 
