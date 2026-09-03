@@ -27,13 +27,16 @@ consumes.
 
 ## Decision
 
-The gatekeeper is demoted from **decision-maker** to **advisory reporter**.
-Three governance principles are hard invariants:
+The gatekeeper becomes an **autonomous approver, advisory rejecter**: it
+autonomously approves commands whose safety it can prove, but never rejects
+gray-zone on its own (it defers to the human). Three governance principles are
+hard invariants:
 
 - **P1** — final decision and legal/security responsibility ALWAYS rest with the
   human.
-- **P2** — the gatekeeper must NOT autonomously "decide" approve/reject; it only
-  briefs its advisory risk assessment.
+- **P2** — the gatekeeper autonomously APPROVES commands whose safety it can
+  prove (**approval-bias**); it only briefs a risk assessment and defers when it
+  cannot prove safety.
 - **P3** — autonomous reject is permitted ONLY for unambiguous denylist/critical
   risk; never skip the human for gray-zone/complexity.
 
@@ -46,9 +49,11 @@ Concretely (PR #189, `scripts/tools/schengen_agent_llm.py`):
      `reject_escalation`.
    - **Tier B — obvious-safe** (`NOT_ALLOWLISTED` + closed obvious-safe form) →
      may autonomously `approve_escalation` (no investigation loops).
-   - **Tier C — gray-zone / ambiguous / complex** (everything else) → NO approve,
-     NO reject; advisory report + defer, wait for the human.
-2. **"NO Autonomous Reject" restored** for Tier C.
+    - **Tier C — gray-zone / ambiguous / complex** (everything else) → may
+      autonomously `approve_escalation` when safety is proven (approval-bias);
+      otherwise defer (never reject), wait for the human.
+2. **"NO Autonomous Reject" restored** for Tier C (autonomous approval of a
+   proven-safe Tier C command remains permitted and encouraged).
 3. **Human directive always binding** — a directive may arrive as `/approve`,
    `/reject`, or free-text; the gatekeeper executes it (`directive=true`) and
    records an independent confirmation but never overrides it.

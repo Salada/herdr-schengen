@@ -120,7 +120,14 @@ class TestGatekeeperAdvisoryProtocol(unittest.TestCase):
         with _patch_esc():
             prompt = build_system_prompt()
         self.assertIn("do NOT call `reject_escalation` on your own judgment for any Tier-C command", prompt)
-        self.assertIn("report risks and wait for explicit human instructions", prompt)
+        self.assertIn("Autonomous APPROVAL of a proven-safe Tier-C command is permitted and encouraged", prompt)
+
+    def test_protocol_approval_bias_tier_c(self):
+        with _patch_esc():
+            prompt = build_system_prompt()
+        self.assertIn("Bias toward APPROVAL", prompt)
+        self.assertIn("MAY autonomously call `approve_escalation`", prompt)
+        self.assertIn("NEVER call `reject_escalation` on your own judgment", prompt)
 
     def test_protocol_advisory_report_not_a_gate(self):
         with _patch_esc():

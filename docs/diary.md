@@ -39,3 +39,19 @@ formula/score breakdown.
 Broader direction: audit the gatekeeper's human-facing escalation reason for raw
 heuristic leakage (e.g. "complexity=26 > threshold=6") and rephrase to
 plain-risk wording.
+
+## 2026-09-03 — Gatekeeper bias must lean toward APPROVAL, not deferral
+
+**Correction**: the advisory-only redesign (ADR-015) over-corrected — it made
+Tier C "never approve, never reject, always defer", which removed the gatekeeper's
+autonomous approval for low-risk mutations (git add/commit) and pushed the system
+toward hardcoded rulesets instead of LLM judgment.
+
+**Principle**: the bias must be approval-bias — (1) expand the 1ms deterministic
+allowlist only for unambiguously-safe commands; (2) for everything else, the
+gatekeeper uses the LLM + tool calls to PROVE safety and autonomously APPROVE;
+(3) only when safety cannot be proven does it defer (never reject). Avoid
+hardcoded "allow add/commit, block push" rulesets — they only complexify the code.
+
+**Fix**: revised Tier C prompt to "approve if proven safe, defer if not, never
+reject"; discarded the deterministic safe-VCS-mutation ruleset.
