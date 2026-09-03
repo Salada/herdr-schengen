@@ -42,7 +42,8 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 1) **TUI Universal Deep-Link** (`[#ID]`, `[Audit #ID]`, `[▼ Details]` 원클릭 팝업/인라인 전개).
    - 2) **Pending Queue 4단계 상태 배지** (`🔍 Gatekeeper Checking`, `🚨 Action Required`, `⏳ Deferred (Slot #N)`, `⚡ Approved`).
    - 3) **AuditFullscreenModal 교환 뷰(`get_adjudication_exchange`) 전면 연동** 및 `scope_context`(Session vs Global) 메타데이터 감사 레저 반영.
-   - 4) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
+   - 4) **동적 URL / WebSearch (curl, wget) 화이트리스트 관리** (SQLite `url_allowlist` + Tool Call + TUI 대소문자 무시 정렬 뷰).
+   - 5) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
 
 4. 🔬 **[Track 4 — 딥 리서치 & 장기 안정성 (Research & Hardening)]**:
    - 1) **LLM Base URL 엔드포인트 서버 장애 감지·서킷 브레이커 & 자동 복구(Auto-Restart)** 메커니즘.
@@ -199,6 +200,28 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     2. DB Schema & TUI Audit Ledger 반영:
        - `audit_logs` 테이블에 `scope_context` 컬럼 추가 (또는 `mechanism` 컬럼 값 표준화: `fast-track:global`, `session-memory:pane_id`, `allowlist:repo`).
        - TUI Audit Table 및 Detail Modal에 스코프 태그/배지 노출 (예: `[🤖 AUTO: Session]` vs `[🤖 AUTO: Global]`).
+
+[] [Feature/Security] 동적 URL / WebSearch (curl, wget, webfetch) 화이트리스트 관리 및 TUI 테이블 연동:
+  - Context & Objective:
+    • 에이전트의 외부 웹 탐색(`webfetch`, `websearch`) 및 네트워크 명령어(`curl`, `wget`)에 대해, 안전/위험 여부를 명확하고 일관되게 판단할 수 있는 동적 화이트리스트 체계 필요.
+    • 정적 코드 수정 없이 TUI 및 도구 호출(Tool Call)을 통해 실시간으로 신뢰 도메인/URL 패턴을 추가/삭제/조회할 수 있어야 함.
+  - Architecture & SQLite Schema Design:
+    1. **SQLite 전용 테이블 구축 (`url_allowlist`)**:
+       - `id INTEGER PRIMARY KEY AUTOINCREMENT`
+       - `pattern TEXT UNIQUE NOT NULL` (도메인, URL 접두사, 정규식 또는 glob: 예 `api.github.com`, `https://docs.python.org/*`)
+       - `category TEXT DEFAULT 'general'` (`docs`, `api`, `search`, `package`)
+       - `reason TEXT` (등록 사유 및 메모)
+       - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+       - `created_by TEXT DEFAULT 'human'` (`human`, `gatekeeper_tool`)
+    2. **Gatekeeper Tool-Calling 인터페이스 확장**:
+       - `query_url_allowlist(pattern/url)`: 현재 URL/도메인이 등록된 화이트리스트에 포함되는지 검사 (Safe 판단 근거).
+       - `add_url_allowlist(pattern, reason)` / `remove_url_allowlist(pattern)`: 게이트키퍼가 신뢰성이 확인된 공식 문서/API를 등록하거나 관리자 지시를 반영.
+    3. **TUI 화이트리스트 매니저 뷰 (`UrlAllowlistModal` / `SettingsModal` 연계)**:
+       - **대소문자 무시 알파벳순(Case-Insensitive Alphabetical Sorting)** 정렬 및 표시.
+       - TUI 상에서 등록된 URL/도메인 목록을 한눈에 열람하고 검색.
+       - TUI 단축키 또는 버튼을 통해 신규 URL 즉시 추가(Add) 및 불필요한 패턴 삭제(Delete) 기능 제공.
+    4. **보안 평가기 연동 (`security_evaluator.py`)**:
+       - `evaluate_network_calls` 및 `webfetch` 단계에서 SQLite `url_allowlist`를 조회하여 매칭 시 `FAST_TRACK_AST` 또는 `SAFE_NETWORK`로 즉시 자율 승인.
 
 [] [Deferred/OpenCode] OpenCode 보조 지침 전달 큐, 다이얼로그 디바운스 및 배치 Defer UX 개선 (#3615/#3623/#3636 후속):
   - 1) **지침 전달 큐 (Instruction Queue)**: Bubble Tea 모달 상태에서 `send-text` 무효화 대응을 위해 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
