@@ -11,6 +11,7 @@ Combines:
 """
 
 import ast
+import dataclasses
 import io
 import json
 import os
@@ -1076,6 +1077,63 @@ _BROAD_WILDCARD_RE = re.compile(r"(^|\s)(~|~/|/(?:\s|$)|\.\*|\.\.(?:\s|$)|(?<!\S
 _PIPELINE_SEP_RE = re.compile(r"[|&;]")
 
 
+def _is_safe_cd_target(directory: str) -> bool:
+    """True iff `directory` is a concrete, non-escaping cd target (issue #3670).
+
+    Accepts ONLY a concrete specific directory (e.g. `~/code/herdr-schengen`,
+    `/Users/x/code/herdr-schengen`, relative `scripts/...`). Trailing slashes
+    are normalized away FIRST so `../`, `~/`, `./` cannot slip past literal
+    checks (PR #186 review finding), then rejects:
+      * `..` path components anywhere (`..`, `../`, `../..`, `a/../b`);
+      * bare/home/root anchors (`.`, `./`, `~`, `~/`, `~/.`, `/`, `//...`);
+      * any target tripping the sensitive-file / sensitive-directory /
+        broad-wildcard backstops.
+    """
+    if not directory:
+        return False
+    t = directory.rstrip("/")
+    if not t:  # "/" / "//" ... -> pure root
+        return False
+    if t in (".", "..", "-", "~"):
+        return False
+    if t.startswith("//"):
+        return False
+    if t.endswith("/."):
+        return False  # "~/.", "a/." -> anchor/dot-dir, not a concrete dir
+    if any(comp == ".." for comp in t.split("/")):
+        return False  # "..", "../..", "a/../b", "x/.."
+    # Backstops (INV-SENS-1/2): never cd into a sensitive or broad/root target.
+    if SENSITIVE_FILE_PATTERN.search(directory) or SENSITIVE_DIRECTORY_PATTERN.search(directory):
+        return False
+    if _BROAD_WILDCARD_RE.search(directory):
+        return False
+    return True
+
+
+def _is_safe_cd_segment(seg: str) -> bool:
+    """True iff seg is a `cd <specific-safe-dir>` (narrow carve-out, issue #3670).
+
+    Primary regex accepts exactly ONE concrete dir token (`cd <dir>`); a quoted
+    dir (e.g. `cd 'dir with spaces'`) is handled via the shlex fallback. Bare
+    `cd`, `cd -/.`/`..`, home/root shorthand and sensitive/broad targets all
+    fail closed. Used ONLY inside pure read-only chains — a mutating segment
+    anywhere in the chain is still rejected by the surrounding guards.
+    """
+    if not seg or not seg.strip():
+        return False
+    m = re.match(r"^\s*cd\s+(\S+)\s*$", seg)
+    if m:
+        return _is_safe_cd_target(m.group(1))
+    # shlex fallback: quoted directory token
+    try:
+        parts = shlex.split(seg)
+    except ValueError:
+        return False
+    if len(parts) == 2 and parts[0] == "cd":
+        return _is_safe_cd_target(parts[1])
+    return False
+
+
 def _is_readonly_pipeline_segment(seg: str) -> bool:
     """True if a single pipeline segment is a pure read-only command with no sensitive target."""
     seg = seg.strip()
@@ -1098,6 +1156,11 @@ def _is_readonly_pipeline_segment(seg: str) -> bool:
                     return False
                 return True
         return False
+    # (issue #3670) `cd <specific-safe-dir>` is a read-only navigation segment —
+    # allowed BEFORE the membership check so it can head a read-only chain, but
+    # NEVER added to READONLY_PIPELINE_COMMANDS (bare `cd` stays fail-closed).
+    if cmd == "cd":
+        return _is_safe_cd_segment(seg)
     if cmd not in READONLY_PIPELINE_COMMANDS:
         return False
     # sed is a language: override the loose READONLY membership with the strict
@@ -1216,6 +1279,62 @@ _COMPLEXITY_CONTROL_RE = re.compile(r"[|&;\n\r]+")
 # (heredoc) still counts as one redirection.
 _COMPLEXITY_REDIR_RE = re.compile(r"<<<|(?<![<>])[<>]{1,2}(?![<>])")
 
+# (issue #4027) heredoc opener: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"` (also
+# `<< EOF`). `<<<` (here-string) can NEVER match: after `<<` the regex demands
+# an optional dash then a bare/quote-wrapped [A-Za-z_] delimiter — `<` is not
+# one, so `cat <<< hello` is never mistaken for a heredoc opener.
+_HEREDOC_OPENER_RE = re.compile(r"<<(?P<dash>-)?\s*(?P<q>['\"]?)(?P<delim>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
+
+
+def _mask_heredocs(s: str) -> "tuple[str, int]":
+    """Isolate terminated heredoc payloads (issue #4027) for complexity scoring.
+
+    Each TERMINATED heredoc (opener ... terminator line) collapses to the
+    literal `<<` marker, so body lines (and any `|`/`&`/newline inside them)
+    no longer inflate the segment count. For an UNQUOTED heredoc the body is
+    shell-expanded, so `$(...)` / backtick substitutions inside it are counted
+    and returned as `extra_subst`. Quoted (`<<'EOF'`) bodies expand nothing.
+
+    Unterminated/truncated heredocs and here-strings (`<<<`) are left
+    UNTOUCHED (fail-closed: never mask what we cannot fully bound).
+    """
+    out = []
+    extra_subst = 0
+    cursor = 0
+    for m in _HEREDOC_OPENER_RE.finditer(s):
+        if m.start() < cursor:
+            continue  # inside an already-masked region
+        delim = m.group("delim")
+        quoted = m.group("q") == "'"
+        # `<<-` terminators may be indented with leading tabs; otherwise the
+        # terminator must start at column 0 (leading whitespace tolerated).
+        lead = r"\t*" if m.group("dash") is not None else r"[ \t]*"
+        term = re.compile(rf"^{lead}{re.escape(delim)}\s*$", re.MULTILINE).search(s, m.end())
+        if term is None:
+            continue  # unterminated / truncated -> leave untouched (fail-closed)
+        if not quoted:
+            body = s[m.end():term.start()]
+            extra_subst += body.count("$(") - body.count("$((") + body.count("`")
+        out.append(s[cursor:m.start()])
+        out.append("<<")
+        cursor = term.end()
+    out.append(s[cursor:])
+    return "".join(out), extra_subst
+
+
+def _isolate_heredocs(cmd_str: str) -> "tuple[str, int]":
+    """CRLF-normalize, fd-normalize, and collapse terminated heredocs.
+
+    Shared front-end for compute_complexity / compute_semantic_complexity so
+    the structural metric is byte-identical across both.
+    """
+    s = cmd_str.replace("\r\n", "\n").replace("\r", "\n")
+    # INV-16 fix (issue #2555): '2>&1' / '1>&2' / '&>' are file-descriptor
+    # redirections, not command separators — strip the '&' so it is not
+    # misread as a segment split. The '>' is still counted as a redirection.
+    s = re.sub(r">&|&>", ">", s)
+    return _mask_heredocs(s)
+
 
 def compute_complexity(cmd_str: str) -> int:
     """Structural complexity score (INV-16: separator-agnostic, pure, never semantic).
@@ -1226,19 +1345,164 @@ def compute_complexity(cmd_str: str) -> int:
     that "individually-passes-narrow-gates but hides risk." Aliasing/semantic
     obfuscation is out of scope (caught by SHELL_CRITICAL/SAST earlier).
     """
-    s = cmd_str.replace("\r\n", "\n").replace("\r", "\n")
-    # INV-16 fix (issue #2555): '2>&1' / '1>&2' / '&>' are file-descriptor
-    # redirections, not command separators — strip the '&' so it is not
-    # misread as a segment split. The '>' is still counted as a redirection.
-    s = re.sub(r">&|&>", ">", s)
+    s, extra_subst = _isolate_heredocs(cmd_str)
     n_segments = len([seg for seg in _COMPLEXITY_CONTROL_RE.split(s) if seg.strip()])
     # (#139-3) arithmetic expansion `$((...))` is NOT command substitution —
     # `$(` inside `$((` must not score a substitution. `count("$(") - count("$((")`
     # scores only genuine `$(...)` substitutions; a nested `$(( $(cmd) ))` still
-    # counts the inner `$(cmd)` exactly once.
-    n_subst = s.count("$(") - s.count("$((") + s.count("`")
+    # counts the inner `$(cmd)` exactly once. (issue #4027) substitutions that
+    # survived heredoc masking (unquoted bodies) are added via `extra_subst`.
+    n_subst = s.count("$(") - s.count("$((") + s.count("`") + extra_subst
     n_redir = len(_COMPLEXITY_REDIR_RE.findall(s))
     return n_segments + n_subst + n_redir
+
+
+# (issue #4027) semantic per-segment classification tables.
+_SEM_READ_ONLY_VERBS = {"cd", "echo", "printf", "pwd", "shasum", "true", "false", "wait", "sleep"}
+_SEM_GIT_READ_ONLY_SUBS = {"status", "log", "diff", "shortlog", "show"}
+_SEM_GIT_VCS_SYNC_SUBS = {"checkout", "commit", "fetch", "add", "stash"}
+_SEM_MUTATING_LOW = {"mkdir", "touch"}
+_SEM_MUTATING_MID = {"cp", "mv", "make", "kubectl", "magick"}
+_SEM_MUTATING_HIGH = {"rsync", "scp", "kill", "pkill", "killall"}
+_SEM_DESTRUCTIVE = {"rm", "rmdir", "chmod", "chown", "chgrp"}
+_SEM_CONTROL_FLOW_VERBS = {"eval", "xargs", "for", "while"}
+# read-only filters that are exempt ONLY as an immediate pipe tail (`| verb`);
+# `tee` is deliberately absent (it writes).
+_SEM_PIPE_TAIL_EXEMPT = {"tail", "head", "grep", "rg", "sort", "uniq", "wc", "sed", "cut", "tr", "column"}
+
+
+def _classify_semantic_segment(seg: str, pipe_tail: bool) -> "tuple[float, bool, str]":
+    """Classify one (heredoc-masked, fd-stripped) segment by its first verb.
+
+    Returns (weight, is_mutating, label). Fail-closed: an unknown first verb is
+    UNKNOWN (weight 2.0, is_mutating=True) — only the closed tables below ever
+    score non-mutating.
+    """
+    seg = seg.strip()
+    if not seg:
+        return 0.0, False, "EMPTY"
+    # CONTROL_FLOW: substitution constructs in the segment override everything
+    if re.search(r"\$\(|`", seg):
+        return 5.0, True, "CONTROL_FLOW"
+    tokens = seg.split()
+    verb = tokens[0].strip("\"'").lower()
+    if verb == "git":
+        sub = tokens[1].strip("\"'").lower() if len(tokens) > 1 else ""
+        if sub in _SEM_GIT_READ_ONLY_SUBS:
+            return 0.0, False, "READ_ONLY"
+        if sub in _SEM_GIT_VCS_SYNC_SUBS:
+            return 1.0, False, "VCS_SYNC"
+        if sub in ("pull", "merge"):
+            # only the fast-forward form is non-mutating; anything else can
+            # create merge commits / rewrite history -> fail-closed UNKNOWN
+            return (1.0, False, "VCS_SYNC") if "--ff-only" in tokens else (2.0, True, "UNKNOWN")
+        if sub == "push":
+            return 3.0, True, "MUTATING_MID"
+        return 2.0, True, "UNKNOWN"
+    if verb in ("python3",) or verb.endswith("/bin/python3"):
+        if len(tokens) >= 3 and tokens[1] == "-m" and tokens[2] == "unittest":
+            return 0.5, False, "DIAGNOSTIC"
+        return 2.0, True, "UNKNOWN"
+    if verb == "pytest" or verb.endswith("/bin/pytest"):
+        return 0.5, False, "DIAGNOSTIC"
+    if verb in _SEM_READ_ONLY_VERBS:
+        return 0.0, False, "READ_ONLY"
+    if verb in _SEM_MUTATING_LOW:
+        return 2.0, True, "MUTATING_LOW"
+    if verb in _SEM_MUTATING_MID:
+        return 3.0, True, "MUTATING_MID"
+    if verb in _SEM_MUTATING_HIGH:
+        return 4.0, True, "MUTATING_HIGH"
+    if verb in _SEM_DESTRUCTIVE:
+        return 5.0, True, "DESTRUCTIVE"
+    if verb in _SEM_CONTROL_FLOW_VERBS:
+        return 5.0, True, "CONTROL_FLOW"
+    if pipe_tail and verb in _SEM_PIPE_TAIL_EXEMPT:
+        return 0.0, False, "PIPE_TAIL"
+    return 2.0, True, "UNKNOWN"
+
+
+@dataclasses.dataclass
+class SemanticComplexity:
+    """Semantic complexity profile of a shell command (issue #4027).
+
+    `structural` mirrors `compute_complexity` (heredoc payload isolated) and is
+    the threshold gate. `score` replaces the raw segment count with per-segment
+    semantic weights:
+        score = Σ segment_weights + n_substitutions + n_redirections
+    `has_mutation` is fail-closed: ANY MUTATING / DESTRUCTIVE / CONTROL_FLOW /
+    UNKNOWN segment (or `$()`/backtick substitution) marks the chain mutating —
+    mutating chains NEVER auto-approve via the cloud judge.
+    """
+
+    structural: int
+    score: float
+    n_segments: int
+    n_substitutions: int
+    n_redirections: int
+    mutating_segments: tuple
+    has_mutation: bool
+    read_only_only: bool
+
+
+def compute_semantic_complexity(cmd_str: str) -> SemanticComplexity:
+    """Semantic complexity with heredoc payload isolation (issue #4027).
+
+    Splits on command separators after masking heredocs and stripping pure
+    fd-redirects, weights each segment by its first verb (see
+    `_classify_semantic_segment`), and flags mutating chains fail-closed.
+    """
+    s, extra_subst = _isolate_heredocs(cmd_str)
+    # structural component — byte-identical arithmetic to compute_complexity
+    n_segments_structural = len([seg for seg in _COMPLEXITY_CONTROL_RE.split(s) if seg.strip()])
+    n_subst = s.count("$(") - s.count("$((") + s.count("`") + extra_subst
+    n_redir = len(_COMPLEXITY_REDIR_RE.findall(s))
+    structural = n_segments_structural + n_subst + n_redir
+    # semantic classification over the fd-redirect-stripped masked command
+    stripped = _strip_fd_redirections(s)
+    total_weight = 0.0
+    n_segments = 0
+    mutating: list = []
+    has_mutation = False
+    read_only_only = True
+    prev_sep = ""
+    for piece in re.split(r"([|&;\n\r]+)", stripped):
+        if not piece:
+            continue
+        if re.fullmatch(r"[|&;\n\r]+", piece):
+            prev_sep = piece
+            continue
+        pipe_tail = prev_sep.endswith("|")
+        weight, mut, label = _classify_semantic_segment(piece, pipe_tail)
+        n_segments += 1
+        total_weight += weight
+        if mut:
+            has_mutation = True
+            mutating.append(piece.strip())
+        if label not in ("READ_ONLY", "PIPE_TAIL"):
+            read_only_only = False
+        prev_sep = ""
+    if extra_subst > 0:
+        # (PR #186 review) an UNQUOTED heredoc body is shell-EXPANDED at run
+        # time, so its $(...) / backtick substitutions EXECUTE code. Even though
+        # the payload is masked away before segment classification, those
+        # surviving substitutions are CONTROL_FLOW-equivalent mutations and must
+        # force has_mutation=True (never absorb an unquoted-heredoc chain via
+        # the cloud judge). Quoted heredoc bodies expand nothing -> extra_subst
+        # stays 0 and remain inert.
+        has_mutation = True
+        read_only_only = False
+        mutating.append("(unquoted heredoc substitution)")
+    return SemanticComplexity(
+        structural=structural,
+        score=total_weight + n_subst + n_redir,
+        n_segments=n_segments,
+        n_substitutions=n_subst,
+        n_redirections=n_redir,
+        mutating_segments=tuple(mutating),
+        has_mutation=has_mutation,
+        read_only_only=read_only_only,
+    )
 
 
 def _apply_complexity_tax(
@@ -1253,36 +1517,81 @@ def _apply_complexity_tax(
     else None (pass through). NEVER returns is_safe=True in escalate mode.
 
     M5 threads `origin`; HUMAN origin skips the structural-complexity deferral
-    (trust concession gated by the origin_weighting_enabled knob). M6: when
-    complexity_mode == "judge", an over-threshold command is routed to the cloud
-    judge (with the confidence gate) instead of a hard human deferral.
+    (trust concession gated by the origin_weighting_enabled knob). (issue #4027)
+    tiered routing replaces the old monolithic judge-vs-escalate split:
+
+      * threshold gate = `structural` (heredoc payload isolated, see
+        compute_semantic_complexity);
+      * an over-threshold chain with NO mutating segments (pure read-only /
+        diagnostic / VCS chain) is absorbed via the cloud judge in BOTH
+        complexity_mode values (CLOUD_JUDGE on high-confidence safe, else
+        COMPLEXITY_TAX deferral);
+      * an over-threshold chain WITH a mutating segment NEVER auto-approves via
+        the cloud judge — hard COMPLEXITY_TAX deferral in BOTH modes
+        (fail-closed decision).
     """
     if not cfg.get("complexity_tax_enabled", True):
         return None
     if origin == Origin.HUMAN and get_origin_weighting_config().get("origin_weighting_enabled", True):
         return None   # M5: HUMAN trust concession — skip structural complexity deferral
     thr = cfg.get("complexity_threshold", 6)
-    cx = compute_complexity(cmd_str)
-    if cx > thr:
-        if cfg.get("complexity_mode") == "judge":
-            origin_str = origin.value if isinstance(origin, Origin) else str(origin)
-            cloud_safe, cloud_reason = audit_with_cloud_judge(
-                cmd_str,
-                context="Complex command (M6 judge mode): verify safety before auto-approval.",
-                cwd=cwd,
-                scope=scope,
-                agent_id=agent_id,
-                origin=origin_str,
-            )
-            if cloud_safe:
-                return True, f"Complex command cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
-            return False, f"Complex command deferred to human ({cloud_reason})", DecisionLayer.COMPLEXITY_TAX
-        return (
-            False,
-            f"Complex command requires human review (complexity={cx} > threshold={thr})",
-            DecisionLayer.COMPLEXITY_TAX,
+    prof = compute_semantic_complexity(cmd_str)
+    cx = prof.structural
+    if cx <= thr:
+        return None
+    if not prof.has_mutation:
+        # Read-only / diagnostic / VCS chain over threshold: absorb via the
+        # cloud judge (issue #4027) in both complexity_mode values.
+        origin_str = origin.value if isinstance(origin, Origin) else str(origin)
+        cloud_safe, cloud_reason = audit_with_cloud_judge(
+            cmd_str,
+            context="Read-only diagnostic chain; no mutating segments",
+            cwd=cwd,
+            scope=scope,
+            agent_id=agent_id,
+            origin=origin_str,
         )
-    return None
+        if cloud_safe:
+            return True, f"Complex read-only chain cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
+        return False, f"Complex read-only chain deferred to human ({cloud_reason})", DecisionLayer.COMPLEXITY_TAX
+    # Mutating chain over threshold: NEVER auto-approve via cloud judge —
+    # apply the tighter hard-deferral behavior in both complexity_mode values.
+    return (
+        False,
+        f"Complex mutating compound command requires human review (complexity={cx} > threshold={thr})",
+        DecisionLayer.COMPLEXITY_TAX,
+    )
+
+
+def _strip_fd_redirections(s: str) -> str:
+    """Strip side-effect-free fd redirections (issue #2555).
+
+    Pure fd-to-fd redirects ('2>&1' / '1>&2' / spaced '2 >&1') never write a
+    file, and '&> /dev/null' discards — strip them before separator/token
+    checks. '&> file' with a REAL target keeps its '>' (a file write) and is
+    NOT stripped. Shared by _is_fast_track_test_runner and
+    compute_semantic_complexity.
+    """
+    s = re.sub(r"\s+[12]\s*>&[12]\b", " ", s)
+    s = re.sub(r"\s*&>\s*/dev/null\b", " ", s)
+    return s.strip()
+
+
+def _strip_leading_cd_prefix(cmd_str: str) -> Optional[str]:
+    """Strip a SINGLE leading `cd <safe-dir> && ...` prefix (issue #3670).
+
+    Matches a leading `cd <dir> &&` (single '&&'; ';'/'||'/second-'&&' are NOT
+    part of the prefix), validates the dir via `_is_safe_cd_segment`, and
+    returns the substring AFTER the '&&' — else None (fail-closed). The
+    caller's own separator guard then guarantees at most ONE `cd ... &&`
+    prefix is consumed.
+    """
+    m = re.match(r"^\s*cd\s+(\S+)\s*&&\s*", cmd_str)
+    if not m:
+        return None
+    if not _is_safe_cd_segment("cd " + m.group(1)):
+        return None
+    return cmd_str[m.end():]
 
 
 # INV-TEST-1: Narrow test-runner fast-track (documented code-execution exception).
@@ -1311,14 +1620,18 @@ def _is_fast_track_test_runner(cmd_str: str) -> bool:
     if re.search(r"(^|\s)(sudo|su)(\s|$)", cmd_str):
         return False
     rest = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+", "", cmd_str).strip()
+    # (issue #3670) a single leading `cd <safe-dir> && ...` prefix is allowed —
+    # attempt the strip AFTER env assignments and BEFORE fd-redirect handling;
+    # the separator guard below still rejects any SECOND '&&'/'||'/'; segment.
+    cd_remainder = _strip_leading_cd_prefix(rest)
+    if cd_remainder is not None:
+        rest = cd_remainder
     # (issue #2555) fd-redirect strip symmetry: pure fd-to-fd redirects never
     # write a file, so strip '2>&1' / '1>&2' (and the spaced '2 >&1' variant)
     # before the token/shape checks. '&>' is a combined redirect that ALSO names
     # a file target: only the side-effect-free '/dev/null' discard is stripped —
     # any other '&> file' target keeps its '>' and stays fail-closed below.
-    rest = re.sub(r"\s+[12]\s*>&[12]\b", " ", rest).strip()
-    if re.search(r"&>\s*/dev/null\b", rest):
-        rest = re.sub(r"\s*&>\s*/dev/null\b", " ", rest).strip()
+    rest = _strip_fd_redirections(rest)
     # (round 2) reject any remaining file redirection / heredoc in the FULL
     # command (head AND filter tail) — '> file' / '>> file' / '< file' / '<<'.
     if re.search(r">>?|<<?", rest):
