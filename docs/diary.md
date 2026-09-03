@@ -24,3 +24,18 @@ provenance) + PR #190 (obvious-safe fast-track + quote masking).
 must be ADVISORY, not decisive. Final authority and responsibility always rest
 with the human; autonomous reject is limited to unambiguous denylist. A
 "disagree & commit / override-the-human" framing is an anti-pattern here.
+
+## 2026-09-03 — Human-facing explanation should be plain-risk, not raw heuristics
+
+**Principle (operator guidance)**: this project's purpose is to help human
+judgment — give clear explanations, auto-approve low-risk commands as much as
+possible, and surface only real risk. The internal risk-scoring machinery
+(complexity scores, segment counts, weight tables) should be abstracted away;
+the human-facing explanation must be a plain risk statement, not a
+formula/score breakdown.
+
+**Trigger**: the `complexity_mode` knob exposed an internal judge-vs-escalate
+"calculation mode" to operators and then went dead (deprecated this session).
+Broader direction: audit the gatekeeper's human-facing escalation reason for raw
+heuristic leakage (e.g. "complexity=26 > threshold=6") and rephrase to
+plain-risk wording.
