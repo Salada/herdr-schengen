@@ -1060,6 +1060,10 @@ FAST_TRACK_SAFE_GIT_PATTERNS = (
     r"^git\s+branch(?:\s+(-a|-r|--all|--remote|--list|-l))?(?:\s|$)",
     r"^git\s+tag(?:\s+(-l|--list))?(?:\s|$)",
     r"^git\s+config\s+(--get|--list|--get-regexp)(?:\s|$)",
+    # closed, side-effect-free version/help queries (obvious-safe)
+    r"^git\s+--version(?:\s|$)",
+    r"^git\s+-v(?:\s|$)",
+    r"^git\s+--help(?:\s|$)",
 )
 
 # Read-only commands permitted inside a pure read-only pipeline (segments joined by | && ;)
@@ -1075,6 +1079,46 @@ _BROAD_WILDCARD_RE = re.compile(r"(^|\s)(~|~/|/(?:\s|$)|\.\*|\.\.(?:\s|$)|(?<!\S
 
 # Pipeline separators that join a (possibly) multi-segment command
 _PIPELINE_SEP_RE = re.compile(r"[|&;]")
+
+# CLOSED set of interpreters / package CLIs for which a bare version/help query
+# is provably side-effect-free. Deliberately NOT extended to arbitrary binaries —
+# only these enumerated commands may ever be obvious-safe fast-tracked.
+_OBVIOUS_SAFE_VERSION_BINS = (
+    "node", "python", "python3", "pip", "pip3", "npm", "ruby", "go",
+    "rustc", "cargo", "docker", "brew", "git",
+)
+# Anchored: `<bin> <flag>` with the version/help flag as the SOLE argument.
+# Longer bins first so e.g. `pip3`/`python3` cannot be shadowed by shorter
+# alternatives inside a non-backtracking engine; `\s` after the bin guarantees
+# a real token boundary (never `python3.12 --version`, `nodejs -v`, ...).
+_OBVIOUS_SAFE_VERSION_HELP_RE = re.compile(
+    r"^\s*(?:python3|pip3|node|python|pip|npm|ruby|go|rustc|cargo|docker|brew|git)"
+    r"\s+(?:--version|-v|-V|--help|-h)\s*$"
+)
+
+
+def _is_obvious_safe_version_help(cmd_str: str) -> bool:
+    """True iff cmd_str is a CLOSED, trivially-safe version/help query.
+
+    Recognizes exactly `<bin> <--version|-v|-V|--help|-h>` for the enumerated
+    `_OBVIOUS_SAFE_VERSION_BINS`, with the flag as the SOLE argument. Hard
+    gates (defense in depth, mirroring `_is_fast_track_allowlisted`):
+      * NO command substitution (`$(` / backtick) — nothing dynamic;
+      * NO redirection (`>` / `<` / `>>` / `<<` ...) — no write/egress shape;
+      * NO pipeline / chaining separator (`|`, `&`, `;`, newline) — a single
+        segment only.
+    Everything else (scripts as arguments, extra args, pipes, mutation,
+    egress, sensitive targets) fails closed and falls through to the normal
+    gate layers. `node -e "rm -rf /"` carries a script argument, so it never
+    matches; `cat ~/.ssh/id_rsa` is not a version/help shape at all.
+    """
+    if re.search(r"\$\(|`", cmd_str):
+        return False
+    if re.search(r">>?|<<?", cmd_str):
+        return False
+    if re.search(r"[|&;\n\r]", cmd_str):
+        return False
+    return _OBVIOUS_SAFE_VERSION_HELP_RE.match(cmd_str) is not None
 
 
 def _is_safe_cd_target(directory: str) -> bool:
@@ -1229,6 +1273,15 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     if cmd_str.startswith("sed "):
         return _is_readonly_sed(cmd_str)
 
+    # Obvious-safe closed recognizer: bare `<bin> --version|-v|-V|--help|-h`
+    # for the enumerated interpreter/package CLIs. Consulted here — after every
+    # hard reject and the single-command allowlists above — so CRITICAL /
+    # SECRET_GUARD / gray-zone / SAST layers (which run in audit_shell_command
+    # BEFORE this function) always take precedence. Script args, pipes, and
+    # chained commands never match (see _is_obvious_safe_version_help gates).
+    if _is_obvious_safe_version_help(cmd_str):
+        return True
+
     tokens = cmd_str.split()
     if not tokens or tokens[0] not in FAST_TRACK_SAFE_COMMANDS:
         return False
@@ -1322,18 +1375,77 @@ def _mask_heredocs(s: str) -> "tuple[str, int]":
     return "".join(out), extra_subst
 
 
+# Quoted shell regions that must never inflate the structural complexity
+# metric. Single-quoted bodies expand NOTHING; double-quoted bodies are
+# shell-expanded (counted as extra_subst, mirroring unquoted-heredoc
+# handling); ANSI-C `$'...'` bodies expand escapes only. Backslash escapes are
+# honored inside "..." and $'...' so an escaped quote never truncates a
+# region; plain single quotes have no escapes in shell, so `'[^']*'` is exact.
+_QUOTED_REGION_RE = re.compile(
+    r'"(?:[^"\\]|\\.)*"|'      # double-quoted (\" / \\ ...)
+    r"'[^']*'|"                # single-quoted (no escapes)
+    r"\$'(?:[^'\\]|\\.)*'"     # ANSI-C $'...' ( \' allowed )
+)
+
+
+def _mask_quotes(s: str) -> "tuple[str, int]":
+    """Collapse TERMINATED '...' / "..." / $'...' regions to one placeholder.
+
+    Interior newlines / `|` / `&` / `;` (and inert `$(`/backticks) inside a
+    quoted shell word must not be misread as top-level control separators: a
+    multi-line `python3 -c "..."` or `echo "a\\nb"` is ONE command, not one per
+    embedded line. Newlines BETWEEN top-level commands (outside any quotes)
+    remain separators.
+
+    Mirrors `_mask_heredocs`'s design:
+      * each fully-terminated quoted region collapses to the literal `Q`
+        placeholder (never a separator / redirection / substitution char);
+      * a DOUBLE-quoted body is shell-expanded at runtime, so `$(...)` /
+        backtick substitutions inside it are counted and returned as
+        `extra_subst` (never silently dropped — fail-closed);
+      * single-quoted and `$'...'` bodies expand nothing -> no extra_subst;
+      * UNTERMINATED quotes are left UNTOUCHED (fail-closed: never mask what
+        we cannot fully bound).
+    """
+    out = []
+    extra_subst = 0
+    cursor = 0
+    for m in _QUOTED_REGION_RE.finditer(s):
+        if m.start() < cursor:
+            continue  # inside an already-masked region
+        body = m.group(0)
+        if body.startswith('"'):
+            inner = body[1:-1]
+            extra_subst += inner.count("$(") - inner.count("$((") + inner.count("`")
+        out.append(s[cursor:m.start()])
+        out.append("Q")
+        cursor = m.end()
+    out.append(s[cursor:])
+    return "".join(out), extra_subst
+
+
 def _isolate_heredocs(cmd_str: str) -> "tuple[str, int]":
-    """CRLF-normalize, fd-normalize, and collapse terminated heredocs.
+    """CRLF-normalize, fd-normalize, collapse terminated heredocs AND quotes.
 
     Shared front-end for compute_complexity / compute_semantic_complexity so
     the structural metric is byte-identical across both.
+
+    Heredocs are masked FIRST (`_mask_heredocs`): quote-masking before heredoc
+    masking would destroy `<<'EOF'` / `<<"EOF"` opener quotes and leave the
+    body unmasked (inflating every heredoc body line back into segments).
+    After heredoc payloads are gone, `_mask_quotes` collapses any remaining
+    terminated quoted regions so newlines/separators inside a quoted word
+    (e.g. multi-line `python3 -c "..."`) never inflate the count. Both
+    functions return surviving shell-expanded substitutions as extra_subst.
     """
     s = cmd_str.replace("\r\n", "\n").replace("\r", "\n")
     # INV-16 fix (issue #2555): '2>&1' / '1>&2' / '&>' are file-descriptor
     # redirections, not command separators — strip the '&' so it is not
     # misread as a segment split. The '>' is still counted as a redirection.
     s = re.sub(r">&|&>", ">", s)
-    return _mask_heredocs(s)
+    masked, extra_heredoc = _mask_heredocs(s)
+    masked, extra_quotes = _mask_quotes(masked)
+    return masked, extra_heredoc + extra_quotes
 
 
 def compute_complexity(cmd_str: str) -> int:
@@ -1350,8 +1462,9 @@ def compute_complexity(cmd_str: str) -> int:
     # (#139-3) arithmetic expansion `$((...))` is NOT command substitution —
     # `$(` inside `$((` must not score a substitution. `count("$(") - count("$((")`
     # scores only genuine `$(...)` substitutions; a nested `$(( $(cmd) ))` still
-    # counts the inner `$(cmd)` exactly once. (issue #4027) substitutions that
-    # survived heredoc masking (unquoted bodies) are added via `extra_subst`.
+    # counts the inner `$(cmd)` exactly once. (issue #4027 / quote-masking)
+    # substitutions that survived heredoc masking (unquoted bodies) or live
+    # inside a shell-expanded DOUBLE-quoted region are added via `extra_subst`.
     n_subst = s.count("$(") - s.count("$((") + s.count("`") + extra_subst
     n_redir = len(_COMPLEXITY_REDIR_RE.findall(s))
     return n_segments + n_subst + n_redir
@@ -1446,11 +1559,13 @@ class SemanticComplexity:
 
 
 def compute_semantic_complexity(cmd_str: str) -> SemanticComplexity:
-    """Semantic complexity with heredoc payload isolation (issue #4027).
+    """Semantic complexity with heredoc + quoted-region isolation (#4027, quotes).
 
-    Splits on command separators after masking heredocs and stripping pure
-    fd-redirects, weights each segment by its first verb (see
-    `_classify_semantic_segment`), and flags mutating chains fail-closed.
+    Splits on command separators after masking heredocs, collapsing quoted
+    regions, and stripping pure fd-redirects; weights each segment by its first
+    verb (see `_classify_semantic_segment`), and flags mutating chains
+    fail-closed. Substitutions surviving in shell-expanded regions (unquoted
+    heredoc bodies, double-quoted bodies) force `has_mutation`.
     """
     s, extra_subst = _isolate_heredocs(cmd_str)
     # structural component — byte-identical arithmetic to compute_complexity
@@ -1489,7 +1604,10 @@ def compute_semantic_complexity(cmd_str: str) -> SemanticComplexity:
         # surviving substitutions are CONTROL_FLOW-equivalent mutations and must
         # force has_mutation=True (never absorb an unquoted-heredoc chain via
         # the cloud judge). Quoted heredoc bodies expand nothing -> extra_subst
-        # stays 0 and remain inert.
+        # stays 0 and remain inert. The same applies to substitutions inside a
+        # DOUBLE-quoted region (shell-expanded; _mask_quotes counts them into
+        # the same extra_subst) — the appended marker keeps the historic label
+        # for backward-compatible assertions.
         has_mutation = True
         read_only_only = False
         mutating.append("(unquoted heredoc substitution)")
