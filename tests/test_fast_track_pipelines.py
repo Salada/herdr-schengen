@@ -129,5 +129,91 @@ class TestTestRunnerFdRedirectSymmetry(unittest.TestCase):
             self.assertFalse(safe, f"Expected '{cmd}' fail-closed, got safe=True: {reason}")
 
 
+class TestCdPrefixCarveout(unittest.TestCase):
+    """Issue #3670: `cd <safe-dir> && <read-only chain>` narrow carve-out.
+
+    A SINGLE leading `cd <specific-safe-dir> &&` may head a read-only chain
+    (allowlist) or the narrow test-runner fast-track. Anything unsafe — a
+    sensitive/broad cd target, a second '&&', or a mutating remainder — must
+    still fail closed. `cd` is deliberately NOT added to
+    READONLY_PIPELINE_COMMANDS: bare/navigation `cd` forms stay rejected.
+    """
+
+    def test_cd_safe_dir_then_test_runner_fast_tracks(self):
+        cmd = "cd ~/code/herdr-schengen && python3 -m unittest discover -s tests 2>&1 | tail -30"
+        safe, reason, layer = audit_shell_command(cmd)
+        self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+        self.assertEqual(layer, FAST_TRACK)
+
+    def test_cd_safe_dir_then_readonly_fast_tracks(self):
+        cmd = "cd ~/code/herdr-schengen && git status"
+        safe, reason, layer = audit_shell_command(cmd)
+        self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+        self.assertEqual(layer, FAST_TRACK)
+
+    def test_cd_sensitive_dir_fail_closed(self):
+        for cmd in (
+            "cd ~/.ssh && git status",
+            "cd ~/.aws && git status",
+            "cd ~/.config/gh && git status",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed (sensitive dir), got safe=True: {reason}")
+
+    def test_cd_escape_forms_fail_closed(self):
+        # PR #186 review: trailing-slash and dot-suffixed forms of the anchor
+        # escapes (`../`, `~/`, `~/.`, `./`) must NOT slip past the carve-out.
+        for cmd in (
+            "cd .. && git status",
+            "cd ~ && git status",
+            "cd / && git status",
+            "cd ~/ && git status",
+            "cd - && git status",
+            "cd . && git status",
+            "cd ../ && git status",
+            "cd ../.. && git status",
+            "cd ~/. && git status",
+            "cd ./ && git status",
+            "cd a/../b && git status",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed (cd escape), got safe=True: {reason}")
+
+    def test_cd_concrete_dirs_still_fast_track(self):
+        # PR #186 review: the narrow carve-out must keep accepting ONLY concrete
+        # specific dirs — home-relative, absolute, and plain relative.
+        for cmd in (
+            "cd ~/code/herdr-schengen && git status",
+            "cd /Users/kyjbusan/code/herdr-schengen && git status",
+            "cd scripts/tests && git status",
+            "cd ./scripts/tests && git status",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertTrue(safe, f"Expected '{cmd}' fast-track safe, got: {reason}")
+            self.assertEqual(layer, FAST_TRACK)
+
+    def test_cd_second_and_still_fail_closed(self):
+        # A second '&&' means a second (unguarded) prefix position — fail-closed.
+        cmd = "cd ~/code/herdr-schengen && python3 -m unittest discover -s tests && rm -rf /"
+        safe, reason, layer = audit_shell_command(cmd)
+        self.assertFalse(safe, f"Expected '{cmd}' fail-closed (second &&), got safe=True: {reason}")
+
+    def test_mutating_remainder_after_cd_fail_closed(self):
+        # INVARIANT: a mutating segment in the remainder must still be rejected.
+        for cmd in (
+            "cd ~/code/herdr-schengen && git push origin feat/x",
+            "cd ~/code/herdr-schengen && rm -rf build/",
+            "cd ~/code/herdr-schengen && pytest > /tmp/out",
+        ):
+            safe, reason, layer = audit_shell_command(cmd)
+            self.assertFalse(safe, f"Expected '{cmd}' fail-closed (mutating remainder), got safe=True: {reason}")
+
+    def test_pytest_and_rm_still_shell_critical(self):
+        # Regression guard: fd-redirect + second-&& mutation must stay SHELL_CRITICAL.
+        safe, reason, layer = audit_shell_command("pytest 2>&1 && rm -rf /")
+        self.assertFalse(safe, f"Expected 'pytest 2>&1 && rm -rf /' fail-closed, got safe=True: {reason}")
+        self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
+
+
 if __name__ == "__main__":
     unittest.main()

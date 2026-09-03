@@ -17,6 +17,7 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GUARD_LLM_MODEL: "gpt-5.6-luna"
       GUARD_REASONING_EFFORT: "low"
+      HERDR_ENV: "1"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4

@@ -22,6 +22,7 @@ source-code path(s) under `scripts/`.
 | [ADR-012](adr/adr-012-high-contrast-text-selection.md) | Active | High-contrast text-selection visibility in the TUI. | `scripts/cmd/schengen_tui.py` |
 | [ADR-013](adr/adr-013-opencode-structured-permission-channel.md) | Active | OpenCode structured permission channel & programmatic approval. | `opencode/plugins/schengen-host.js`, `scripts/adapters/agent_adapters/` |
 | [ADR-014](adr/adr-014-escalation-phase-model-and-ephemeral-ipc.md) | Active | Escalation phase model (in-flight / judging / human-required) & ephemeral cross-process IPC. | `scripts/core/security_evaluator.py` (`_emit_phase`), `scripts/cmd/schengen_watcher.py`, `scripts/cmd/schengen_tui.py` |
+| [ADR-015](adr/adr-015-gatekeeper-advisory-only-governance.md) | Active | Gatekeeper advisory-only governance: human final authority, no autonomous reject (Disagree & Commit regression fix). | `scripts/tools/schengen_agent_llm.py`, `scripts/core/security_evaluator.py` |
 
 ## 2. Guides (`docs/guides/`)
 
@@ -37,9 +38,11 @@ source-code path(s) under `scripts/`.
 
 | Doc | Summary | Related source |
 | :--- | :--- | :--- |
-| [TODO_phase1.md](todo/TODO_phase1.md) | Phase-1 backlog (core gate, allowlist, audit). | `scripts/core/security_evaluator.py` |
-| [TODO_phase2.md](todo/TODO_phase2.md) | Phase-2 backlog (adapters, escalation, codex support). | `scripts/adapters/`, `scripts/cmd/schengen_tui.py` |
-| [TODO_phase3.md](todo/TODO_phase3.md) | Phase-3 backlog (TUI queue status taxonomy, doc restructure #166). | `scripts/cmd/schengen_tui.py` |
+| [TODO_phase1.md](todo/TODO_phase1.md) | Phase-1 backlog (core gate, allowlist, audit) — Completed. | `scripts/core/security_evaluator.py` |
+| [TODO_phase2.md](todo/TODO_phase2.md) | Phase-2 backlog (adapters, escalation, codex support) — Completed. | `scripts/adapters/`, `scripts/cmd/schengen_tui.py` |
+| [TODO_phase3.md](todo/TODO_phase3.md) | Phase-3 backlog (Sprint 1/2/3, provenance split, settings modal) — Completed. | `scripts/cmd/schengen_tui.py`, `scripts/tools/` |
+| [TODO_phase4.md](todo/TODO_phase4.md) | Phase-4 active backlog (Sprint 4 parallel concurrency, #3670 fast-track, #4027 heredoc). | `scripts/core/`, `scripts/cmd/`, `scripts/tools/` |
+
 
 ## 4. Issues & Archive
 
