@@ -85,6 +85,14 @@ class TestSameRequestBasic(unittest.TestCase):
         # approved command (agent appended '&& rm -rf /') must NEVER match.
         self.assertFalse(same_request("git status", "git status --porcelain && rm -rf /"))
 
+    def test_soft_wrap_can_split_token_path_or_operator(self):
+        self.assertTrue(same_request("git status --short", "git status --\n  short"))
+        self.assertTrue(same_request("cat /tmp/example.txt", "cat /tmp/exam\n  ple.txt"))
+        self.assertTrue(same_request("echo ok && echo next", "echo ok &\n  & echo next"))
+
+    def test_soft_wrap_equivalence_never_drops_a_superset(self):
+        self.assertFalse(same_request("git status", "git sta\n  tus && rm -rf /"))
+
     def test_short_prefix_rejected(self):
         # The approved command is too short to have been viewport-wrapped; a
         # shorter screen is a DIFFERENT request (MIN_PREFIX_LEN gate).

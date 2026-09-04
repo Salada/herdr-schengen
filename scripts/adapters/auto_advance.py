@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, canonical_request, get_adapter
+from adapters.capture_evaluator import evaluate_capture_pair
 from adapters.herdr_client import get_pane_text
 from adapters.request_match import same_request
 from core.security_evaluator import DecisionLayer, Origin, audit_shell_command_with_taxonomy
@@ -102,7 +103,9 @@ def auto_advance_once(
         )
 
     try:
-        new_req, _ = canonical_request(adapter, pane_id, text)
+        new_req, capture_source = canonical_request(adapter, pane_id, text)
+        raw_parser = getattr(adapter, "parse_permission_request", None)
+        raw_req = raw_parser(text) if callable(raw_parser) else new_req
     except Exception as exc:
         # INV-AA-5: re-parse failure -> fail-closed.
         return AutoAdvanceResult(outcome="parse_failed", is_safe=False, reason=f"dialog re-parse failed (fail-closed): {exc}")
@@ -126,14 +129,17 @@ def auto_advance_once(
     # INV-AA-1/2: FULL evaluator, fresh verdict — B never inherits A's
     # approval. Origin is re-derived as AGENT (never inherited).
     try:
-        is_safe, reason, layer, tax = audit_shell_command_with_taxonomy(
+        is_safe, reason, layer, tax = evaluate_capture_pair(
+            raw_req,
             new_req,
+            capture_source,
             use_llm_judge=use_llm_judge,
             reasoning_effort=reasoning_effort,
             origin=Origin.AGENT,
             cwd=cwd,
             scope=scope,
             agent_id=agent_id,
+            audit_func=audit_shell_command_with_taxonomy,
         )
     except Exception as exc:
         # INV-AA-5: evaluator exception -> fail-closed (treat as unsafe).
