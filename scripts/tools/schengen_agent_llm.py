@@ -381,6 +381,43 @@ def _inject_approval(
     return injected, inject_reason
 
 
+def _inject_rejection(
+    target_pane: str,
+    agent_kind: str,
+    req_cmd: str,
+    feedback: str,
+    send_instruction: bool,
+    send_after_adapter: bool = True,
+) -> Tuple[bool, str]:
+    """Dismiss the verified live request before recording a rejection."""
+    if not target_pane:
+        return False, "no target pane"
+    adapter = get_adapter(agent_kind)
+    handled = False
+    if adapter is not None:
+        handled, reason = adapter.inject_reject(target_pane, req_cmd)
+        if not handled and reason != INJECT_REJECT_NOT_IMPLEMENTED:
+            return False, reason
+    if not handled:
+        subprocess.run(
+            ["herdr", "agent", "send-keys", target_pane, "escape"],
+            capture_output=True,
+            timeout=5.0,
+        )
+    if send_instruction and feedback and (send_after_adapter or not handled):
+        subprocess.run(
+            ["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"],
+            capture_output=True,
+            timeout=5.0,
+        )
+        subprocess.run(
+            ["herdr", "agent", "send-keys", target_pane, "enter"],
+            capture_output=True,
+            timeout=5.0,
+        )
+    return True, "rejection delivered"
+
+
 def approve_batch_escalations(feedback: str = "Approved in batch via TUI") -> Dict[str, Any]:
     """One-key approve (M7 INV-13/INV-25..28): resolve the FIFO head batch.
 
@@ -510,25 +547,13 @@ def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dic
         kind = item["agent_kind"]
         req = item.get("raw_command", "")
         try:
-            if pane:
-                # M7 item 4: agent-aware reject protocol instead of a bare
-                # escape. Fall back to the legacy bare-escape dismiss ONLY when
-                # the adapter is missing or reports not-implemented; any other
-                # false return is a real reject failure -> defer (fail-closed).
-                handled = False
-                adapter = get_adapter(kind)
-                if adapter is not None:
-                    rejected, reject_reason = adapter.inject_reject(pane, req)
-                    if rejected:
-                        handled = True
-                    elif reject_reason != INJECT_REJECT_NOT_IMPLEMENTED:
-                        deferred.append(esc_id)
-                        continue
-                if not handled:
-                    subprocess.run(["herdr", "agent", "send-keys", pane, "escape"], capture_output=True, timeout=5.0)
-                    if send_instruction and safe_feedback:
-                        subprocess.run(["herdr", "pane", "send-text", pane, f"# [SECURITY GATEKEEPER]: {safe_feedback}"], capture_output=True, timeout=5.0)
-                        subprocess.run(["herdr", "agent", "send-keys", pane, "enter"], capture_output=True, timeout=5.0)
+            injected, _inject_reason = _inject_rejection(
+                pane, kind, req, safe_feedback, send_instruction,
+                send_after_adapter=False,
+            )
+            if not injected:
+                deferred.append(esc_id)
+                continue
             resolve_escalation(
                 pane_id=pane, escalation_id=esc_id, resolution_status="CANCELLED", approver="human-tui"
             )
@@ -765,6 +790,19 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
 
             esc_row = _get_escalation_row(esc_id) if esc_id > 0 else None
             target_pane = esc_row.get("pane_id") if esc_row else ""
+            agent_kind = esc_row.get("agent_kind", "agy") if esc_row else "agy"
+            req_cmd = esc_row.get("raw_command", "") if esc_row else ""
+
+            cfg = get_instruction_delivery_config()
+            send_instruction = bool(cfg.get("send_reject_instruction", True))
+            injected, inject_reason = _inject_rejection(
+                target_pane, agent_kind, req_cmd, feedback, send_instruction
+            )
+            if not injected:
+                return json.dumps({
+                    "status": "error",
+                    "error": f"rejection injection failed ({agent_kind}): {inject_reason or 'no adapter'}",
+                }, ensure_ascii=False)
 
             resolve_escalation(pane_id="", escalation_id=esc_id, resolution_status="CANCELLED")
             directive = bool(args.get("directive"))
@@ -773,15 +811,6 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                 esc_id, target_pane, "", "REJECT", feedback,
                 approver=approver, human_note=(feedback if directive else None),
             )
-
-            cfg = get_instruction_delivery_config()
-            send_instruction = bool(cfg.get("send_reject_instruction", True))
-
-            if target_pane:
-                subprocess.run(["herdr", "agent", "send-keys", target_pane, "escape"], capture_output=True, timeout=5.0)
-                if send_instruction and feedback:
-                    subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
-                    subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
 
             return json.dumps({
                 "status": "success",
@@ -1271,5 +1300,3 @@ class SchengenAgentChat:
                 await judge_client.aclose()
 
         return "Investigation and execution completed."
-
-

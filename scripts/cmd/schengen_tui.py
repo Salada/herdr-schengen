@@ -86,6 +86,7 @@ from core.feature_db import (
 from core.guard_db import (
     LOG_DIR,
     add_to_allowlist,
+    add_url_to_allowlist,
     get_adjudications_for_audit,
     get_answer_language,
     get_audit_log_by_id,
@@ -102,10 +103,12 @@ from core.guard_db import (
     get_session_dashboard_summary,
     group_pending_escalations,
     list_allowlist_rules,
+    list_url_allowlist,
     read_in_flight_state,
     record_human_opinion,
     resolve_escalation,
     revoke_allowlist_rule,
+    revoke_url_allowlist,
     set_answer_language,
     set_batch_approval_config,
     set_channel_approve_config,
@@ -116,26 +119,16 @@ from core.guard_db import (
 from tools.schengen_agent_llm import (
     SchengenAgentChat,
     approve_batch_escalations,
+    execute_tool_call,
     get_current_active_escalation,
     get_current_command_escalation,
     get_oldest_question_escalation,
     reject_batch_escalations,
 )
+from core.human_directives import parse_human_directive
 from adapters.agent_adapters import get_adapter
 from adapters.herdr_client import get_pane_info, get_pane_text, run_cmd
 from cmd.schengen_watcher import list_active_guard_locks
-
-
-# Free-text human directive detection (INV-HO-1 free-text parity, edge-case-7):
-# anchored + case-insensitive, matches ONLY the start of a NON-slash human chat
-# message. On a match the raw message is persisted as a human opinion so the
-# gatekeeper prompt can surface a genuine directive even when the LLM is
-# unreachable or would misread the intent. Lightweight heuristic only — the
-# gatekeeper still independently interprets the escalation.
-_HUMAN_DIRECTIVE_RE = re.compile(
-    r"^(approve|allow|proceed|go ahead|run it|yes[ ,]?(do it)?|reject|block|stop|no)\b",
-    re.IGNORECASE,
-)
 
 
 def format_local_time(iso_ts: str) -> str:
@@ -3101,6 +3094,54 @@ class SchengenTUIApp(App):
             self.action_open_settings()
             return
 
+        # #201: explicit human approval/rejection bypasses the LLM entirely.
+        # Free text is a closed set of complete English/Korean utterances;
+        # ambiguous chat and broad phrases such as "전체 승인" remain advisory.
+        directive = parse_human_directive(trimmed) if author == "user" else None
+        if directive and directive.escalation_id is None:
+            active_command = get_current_command_escalation()
+            directive = parse_human_directive(
+                trimmed,
+                active_escalation_id=(active_command or {}).get("id"),
+            )
+        if directive:
+            if not self.is_controller:
+                self._write(f"[bold yellow]⚠️ [Observer Mode]:[/] Read-only instance. Leader PID {self.leader_pid} controls execution.")
+                return
+            safe_user_msg = rich_escape(user_msg)
+            self._write(f"\n{self._timestamp()} {_author_label}[/] {safe_user_msg}")
+            active_command = get_current_command_escalation()
+            if not directive.escalation_id or not active_command:
+                self._write("[bold yellow]⚠️ No active command escalation. Question dialogs cannot be approved or rejected here.[/]")
+                return
+            if directive.escalation_id != active_command["id"]:
+                self._write(
+                    f"[bold yellow]⚠️ Escalation #{directive.escalation_id} is not the active command "
+                    f"(active: #{active_command['id']}).[/]"
+                )
+                return
+            try:
+                record_human_opinion(directive.escalation_id, user_msg)
+            except Exception:
+                pass
+            result = await asyncio.to_thread(
+                execute_tool_call,
+                f"{directive.action}_escalation",
+                {
+                    "escalation_id": directive.escalation_id,
+                    "english_feedback": directive.feedback,
+                    "directive": True,
+                },
+            )
+            self._write(f"{self._timestamp()} 🤖 [bold cyan]Deterministic Gatekeeper[/]:")
+            self._write_markdown(f"```json\n{result}\n```")
+            self.update_radar_data(force=True)
+            return
+
+        if author == "user" and re.match(r"^/(approve|reject)(?:\s|$)", trimmed, re.IGNORECASE):
+            self._write("[bold yellow]⚠️ Usage: /approve [id] [reason] or /reject [id] [reason][/]")
+            return
+
         if self._processing_chat:
             self._write("[dim]⏳ Another investigation/chat is currently in-flight. Press ESC twice or type [bold yellow]/interrupt[/] to abort.[/]")
             return
@@ -3117,42 +3158,6 @@ class SchengenTUIApp(App):
             if user_msg.strip() in ("/start", "/stop", "/toggle"):
                 msg = self.toggle_guard_daemon()
                 self._write(f"[bold yellow]⚙️ [Daemon Control]:[/] {msg}")
-                self.update_radar_data(force=True)
-                return
-
-            if user_msg.startswith("/approve "):
-                parts = user_msg.split(maxsplit=2)
-                esc_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-                reason = parts[2] if len(parts) > 2 else "Approved via TUI"
-                # Provenance split (INV-HO-1): persist the human's raw opinion
-                # BEFORE the gatekeeper LLM call so it survives an LLM outage.
-                # Non-fatal — an opinion write failure must not block the flow.
-                try:
-                    if esc_id:
-                        record_human_opinion(esc_id, reason)
-                except Exception:
-                    pass
-                resp = await self.agent.send_message(f"Approve escalation #{esc_id} with English note: '{reason}'")
-                self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper[/]:")
-                self._write_markdown(resp)
-                self.update_radar_data(force=True)
-                return
-
-            if user_msg.startswith("/reject "):
-                parts = user_msg.split(maxsplit=2)
-                esc_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-                reason = parts[2] if len(parts) > 2 else "Rejected via TUI"
-                # Provenance split (INV-HO-1): persist the human's raw opinion
-                # BEFORE the gatekeeper LLM call so it survives an LLM outage.
-                # Non-fatal — an opinion write failure must not block the flow.
-                try:
-                    if esc_id:
-                        record_human_opinion(esc_id, reason)
-                except Exception:
-                    pass
-                resp = await self.agent.send_message(f"Reject escalation #{esc_id} with English reason: '{reason}'")
-                self._write(f"{self._timestamp()} 🤖 [bold cyan]Gatekeeper[/]:")
-                self._write_markdown(resp)
                 self.update_radar_data(force=True)
                 return
 
@@ -3205,6 +3210,50 @@ class SchengenTUIApp(App):
                     self._write(f"[bold red]❌ {e}[/]")
                     return
                 self._write(f"[bold green]✅ Allowlist rule added:[/] [white]{rich_escape(pat)}[/]")
+                self.update_radar_data(force=True)
+                return
+
+            if user_msg.startswith("/allow-url "):
+                parts = user_msg.split(maxsplit=2)
+                target = parts[1].strip() if len(parts) > 1 else ""
+                desc = parts[2].strip() if len(parts) > 2 else ""
+                try:
+                    hostname = add_url_to_allowlist(target, desc, created_by="human-tui")
+                except ValueError as e:
+                    self._write(f"[bold red]❌ {e}[/]")
+                    return
+                self._write(
+                    f"[bold green]✅ Read-only URL host policy added:[/] "
+                    f"[white]{rich_escape(hostname)}[/] [dim](exact host; curl GET/stdout only)[/]"
+                )
+                self.update_radar_data(force=True)
+                return
+
+            if user_msg.strip() == "/allow-url-list":
+                rules = list_url_allowlist()
+                if not rules:
+                    self._write("[dim]URL host allowlist is empty.[/]")
+                    return
+                lines = [f"[bold]Read-only URL hosts ({len(rules)} active rules):[/]"]
+                for rule in rules:
+                    lines.append(
+                        f"  [dim]#{rule['id']}[/] ✅ [white]{rich_escape(rule['hostname'])}[/] "
+                        f"[dim]({rich_escape(rule['description'] or 'no description')})[/]"
+                    )
+                self._write("\n".join(lines))
+                return
+
+            if user_msg.startswith("/revoke-url "):
+                target = user_msg.split(maxsplit=1)[1].strip()
+                try:
+                    affected = revoke_url_allowlist(target, revoked_by="human-tui")
+                except ValueError as e:
+                    self._write(f"[bold red]❌ {e}[/]")
+                    return
+                if affected:
+                    self._write(f"[bold green]✅ URL host policy revoked:[/] [white]{rich_escape(target)}[/]")
+                else:
+                    self._write(f"[bold yellow]⚠️ No active URL host policy matched:[/] [white]{rich_escape(target)}[/]")
                 self.update_radar_data(force=True)
                 return
 
@@ -3265,23 +3314,6 @@ class SchengenTUIApp(App):
                     )
                 self._write("\n".join(lines))
                 return
-
-            # Free-text directive provenance (INV-HO-1 parity, edge-case-7):
-            # a NON-slash human directive ("yes, do it", "go ahead", "run it",
-            # "approve it", "no", "stop", …) must persist its raw opinion BEFORE
-            # the gatekeeper LLM call — the opinion survives an LLM outage or a
-            # hallucinated judge reading (the /approve /reject slash handlers
-            # above already do this). Anchored regex on the stripped message,
-            # user-authored only; non-fatal — an opinion write failure must
-            # never break the chat flow.
-            if author == "user" and not trimmed.startswith("/"):
-                if _HUMAN_DIRECTIVE_RE.match(trimmed):
-                    try:
-                        esc_now = get_current_command_escalation()
-                        if esc_now:
-                            record_human_opinion(esc_now["id"], user_msg)
-                    except Exception:
-                        pass
 
             def on_tool(chunk: str):
                 self._write_markdown(chunk)

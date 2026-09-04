@@ -596,14 +596,7 @@ class TestTUIFeatureAndSelection(unittest.IsolatedAsyncioTestCase):
 
 
 class TestTUIFreeTextDirectiveProvenance(unittest.IsolatedAsyncioTestCase):
-    """Free-text human directive → record_human_opinion BEFORE send_message.
-
-    INV-HO-1 free-text parity (edge-case-7): a NON-slash human directive such
-    as "yes, do it" must persist its raw opinion before the gatekeeper LLM
-    call, so the opinion survives an LLM outage or a hallucinated judge
-    reading. Detection is an anchored regex on the stripped user message; a
-    non-directive free-text message must NOT record an opinion.
-    """
+    """Explicit directives execute deterministically with human provenance."""
 
     _ACTIVE_ESC = {"id": 4242, "pane_id": "w1D:p1", "agent_kind": "codex"}
 
@@ -616,24 +609,29 @@ class TestTUIFreeTextDirectiveProvenance(unittest.IsolatedAsyncioTestCase):
             get_current_command_escalation,
             record_human_opinion,
         )
+        app.is_controller = True
         with (
             patch("cmd.schengen_tui.get_current_command_escalation", return_value=dict(self._ACTIVE_ESC)),
             patch("cmd.schengen_tui.record_human_opinion") as mock_opinion,
-            patch.object(SchengenAgentChat, "send_message", new=AsyncMock(return_value="ok")),
+            patch("cmd.schengen_tui.execute_tool_call", return_value='{"status":"success"}') as mock_execute,
+            patch.object(SchengenAgentChat, "send_message", new=AsyncMock(return_value="ok")) as mock_send,
             patch.object(app, "update_radar_data"),
         ):
             async with app.run_test() as pilot:
                 w = app.process_user_chat(msg)
                 await w.wait()
                 await pilot.pause()
-        return mock_opinion
+        return mock_opinion, mock_execute, mock_send
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
     async def test_free_text_directive_records_opinion(self):
         app = self._make_app()
         try:
-            mock_opinion = await self._run_directive(app, "yes, do it")
+            mock_opinion, mock_execute, mock_send = await self._run_directive(app, "yes, do it")
             mock_opinion.assert_called_once_with(self._ACTIVE_ESC["id"], "yes, do it")
+            mock_execute.assert_called_once()
+            self.assertTrue(mock_execute.call_args.args[1]["directive"])
+            mock_send.assert_not_awaited()
         finally:
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
@@ -642,8 +640,10 @@ class TestTUIFreeTextDirectiveProvenance(unittest.IsolatedAsyncioTestCase):
     async def test_free_text_directive_approve_it_records_opinion(self):
         app = self._make_app()
         try:
-            mock_opinion = await self._run_directive(app, "approve it, that's fine")
+            mock_opinion, mock_execute, mock_send = await self._run_directive(app, "approve it, that's fine")
             mock_opinion.assert_called_once_with(self._ACTIVE_ESC["id"], "approve it, that's fine")
+            mock_execute.assert_called_once()
+            mock_send.assert_not_awaited()
         finally:
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
@@ -652,8 +652,10 @@ class TestTUIFreeTextDirectiveProvenance(unittest.IsolatedAsyncioTestCase):
     async def test_non_directive_message_does_not_record_opinion(self):
         app = self._make_app()
         try:
-            mock_opinion = await self._run_directive(app, "why was this command blocked?")
+            mock_opinion, mock_execute, mock_send = await self._run_directive(app, "why was this command blocked?")
             mock_opinion.assert_not_called()
+            mock_execute.assert_not_called()
+            mock_send.assert_awaited_once()
         finally:
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
@@ -664,8 +666,23 @@ class TestTUIFreeTextDirectiveProvenance(unittest.IsolatedAsyncioTestCase):
         # their own record_human_opinion); the free-text path must skip them.
         app = self._make_app()
         try:
-            mock_opinion = await self._run_directive(app, "/custom-command xyz")
+            mock_opinion, mock_execute, mock_send = await self._run_directive(app, "/custom-command xyz")
             mock_opinion.assert_not_called()
+            mock_execute.assert_not_called()
+            mock_send.assert_awaited_once()
+        finally:
+            if app.tui_lock_fd:
+                app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_korean_directive_executes_without_llm(self):
+        app = self._make_app()
+        try:
+            mock_opinion, mock_execute, mock_send = await self._run_directive(app, "승인해주세요")
+            mock_opinion.assert_called_once_with(self._ACTIVE_ESC["id"], "승인해주세요")
+            self.assertEqual(mock_execute.call_args.args[0], "approve_escalation")
+            self.assertEqual(mock_execute.call_args.args[1]["escalation_id"], self._ACTIVE_ESC["id"])
+            mock_send.assert_not_awaited()
         finally:
             if app.tui_lock_fd:
                 app.tui_lock_fd.close()
