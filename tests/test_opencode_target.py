@@ -76,7 +76,7 @@ class TestCodexAdapter(unittest.TestCase):
             "› 1. Yes, proceed (y)\n"
             "  Press enter to confirm or esc to cancel"
         )
-        self.assertEqual(self.adapter.parse_permission_request(text), "echo a && echo b && echo c")
+        self.assertEqual(self.adapter.parse_permission_request(text), "echo a && echo b &&\necho c")
 
     def test_parse_network_access(self):
         text = (
@@ -366,9 +366,9 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         text = "Permission required\n$0.93 spent\n422,651 tokens\nAllow once"
         self.assertIsNone(self.adapter.parse_permission_request(text))
 
-    def test_parse_bash_joins_wrapped_multiline_command(self):
-        # Regression: a long command soft-wrapped by the TUI renders with real newlines.
-        # A first-line-only capture would drop the "rm -rf /" suffix -> fail-open.
+    def test_parse_bash_preserves_multiline_command(self):
+        # The parser preserves newlines. Herdr recent-unwrapped removes only
+        # terminal soft wraps before this parser sees canonical input.
         text = (
             "Permission required\n"
             "  # Shell command\n"
@@ -378,17 +378,15 @@ class TestOpenCodeDialogParsing(unittest.TestCase):
         )
         self.assertEqual(
             self.adapter.parse_permission_request(text),
-            "git status; rm -rf /some/dir",
+            "git status; rm -rf\n/some/dir",
         )
 
-    def test_parse_bash_normalizes_literal_newline_command(self):
-        # Multi-line command bodies render with literal backslash-n (see the
-        # external-directory "Patterns" case). Normalize to a separator space so
-        # word-boundary evaluator patterns still match the trailing dangerous token.
+    def test_parse_bash_preserves_literal_backslash_n(self):
+        # A literal backslash-n may be quoted executable data; do not rewrite it.
         text = "Permission required\n" "$ git status\\nrm -rf /tmp/foo\n" "Allow once  Allow always  Reject\n"
         self.assertEqual(
             self.adapter.parse_permission_request(text),
-            "git status rm -rf /tmp/foo",
+            "git status\\nrm -rf /tmp/foo",
         )
 
     def test_parse_anchors_to_latest_dialog_not_history(self):

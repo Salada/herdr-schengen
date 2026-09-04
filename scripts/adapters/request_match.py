@@ -26,10 +26,10 @@ directory or a same-depth glob expression of the approved path matches — never
 root / grandparent / deeper ancestors, which would grant MORE scope than the
 gatekeeper evaluated.
 
-The pure normalization ``norm_req_cmd`` stays SURGICAL (strip leading ``$ ``
-prompt + collapse whitespace ONLY — issue #23/#1910, pinned by
-TestNormReqCmd); the prefix / directory / glob tolerance lives HERE, not
-inside ``norm_req_cmd``.
+The pure normalization ``norm_req_cmd`` stays SURGICAL: it strips a leading
+``$ `` prompt and collapses layout whitespace only outside quotes/heredocs.
+The prefix / directory / glob tolerance lives HERE, not inside
+``norm_req_cmd``.
 
 Stdlib only (os, re, fnmatch): importable by any adapter / coordinator without
 pulling the evaluator or herdr_client (keeps the INV-AA-9 layering invariant —
@@ -39,6 +39,7 @@ the adapter layer never imports the evaluator).
 import fnmatch
 import os
 import re
+import textwrap
 
 # Minimum length of the APPROVED (full) command for prefix-truncation
 # tolerance: a command shorter than this fits on a single viewport line, so a
@@ -51,19 +52,95 @@ MIN_PREFIX_LEN = int(os.environ.get("SCHENGEN_PREFIX_MATCH_MIN_LEN", "16"))
 _ACCESS_DIR_RE = re.compile(r"^access_directory\s+(.+)$", re.IGNORECASE)
 
 
+def preserve_executable_payload(payload: str, prompt_margin: str = "") -> str:
+    """Remove only verified TUI indentation from an executable payload.
+
+    Herdr's ``recent-unwrapped`` source already removes terminal soft wraps.
+    The adapter must therefore preserve every remaining newline.  For prompt
+    layouts (``$ command``), continuation rows carry the same visual margin as
+    the prompt; remove exactly that prefix and retain relative indentation.
+    For unprompted command blocks, ``textwrap.dedent`` removes only their common
+    visual margin and likewise preserves relative indentation (notably Python).
+    """
+    payload = (payload or "").replace("\r\n", "\n").replace("\r", "\n")
+    if prompt_margin:
+        lines = payload.split("\n")
+        for index in range(1, len(lines)):
+            if lines[index].startswith(prompt_margin):
+                lines[index] = lines[index][len(prompt_margin):]
+        payload = "\n".join(lines)
+    else:
+        payload = textwrap.dedent(payload)
+    return payload.strip()
+
+
+def _norm_shell_spacing(s: str) -> str:
+    """Collapse layout whitespace outside quotes, preserving quoted content."""
+    out = []
+    quote = None
+    escaped = False
+    pending_space = False
+    for char in s:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            out.append(char)
+            escaped = True
+            continue
+        if char in ("'", '"'):
+            if quote is None:
+                quote = char
+            elif quote == char:
+                quote = None
+            if pending_space:
+                out.append(" ")
+                pending_space = False
+            out.append(char)
+            continue
+        if char.isspace():
+            if quote is not None:
+                out.append(char)
+            else:
+                pending_space = bool(out)
+            continue
+        if pending_space:
+            out.append(" ")
+            pending_space = False
+        out.append(char)
+    return "".join(out).strip()
+
+
 def norm_req_cmd(s) -> str:
-    """Canonicalize a request-command for equality comparison (issue #23/#1910).
+    """Canonicalize layout whitespace without erasing quoted/heredoc content.
 
     A channel-sourced raw_command and a pane-text re-parse of the SAME dialog can
     differ by a leading shell-prompt '$ ' or by whitespace (soft-wrap / extra
-    spaces). Strip a leading '$ ' prompt and collapse whitespace ONLY. Do NOT use
+    spaces). Strip a leading '$ ' prompt and collapse only non-semantic layout
+    whitespace. Quoted and heredoc content is preserved. Do NOT use
     normalize_command: it collapses security-relevant fields (paths, quoted
     payloads, hashes, versions) to placeholders, which would weaken the
     INJECT_SKIP_CHANGED guard and approve a DIFFERENT command.
     """
-    s = (s or "").strip()
+    s = (s or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     s = re.sub(r"^\$\s+", "", s)
-    return re.sub(r"\s+", " ", s)
+
+    # A heredoc body is data/program text, not shell layout. Preserve it byte
+    # for byte (after newline normalization), including Python indentation.
+    opener = re.search(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1[^\n]*\n", s)
+    if opener:
+        delimiter = re.escape(opener.group(2))
+        closer = re.search(rf"(?m)^\t*{delimiter}[ \t]*$", s[opener.end():])
+        if closer:
+            body_start = opener.end()
+            body_end = body_start + closer.end()
+            prefix = _norm_shell_spacing(s[: opener.end() - 1])
+            body = s[body_start:body_end]
+            suffix = _norm_shell_spacing(s[body_end:])
+            return prefix + "\n" + body + ((" " + suffix) if suffix else "")
+
+    return _norm_shell_spacing(s)
 
 
 def _is_prefix_truncated(approved: str, screen: str) -> bool:

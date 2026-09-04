@@ -20,7 +20,11 @@ from adapters.agent_adapters.base import INJECT_SKIP_CHANGED, AgentAdapter, foot
 # Surgical normalization + directional same-request matcher (AGENTS.md rule 14,
 # incidents #3143/#3219). Re-exported under the legacy alias so existing imports
 # (TestNormReqCmd, gatekeeper wiring) keep resolving _norm_req_cmd unchanged.
-from adapters.request_match import norm_req_cmd as _norm_req_cmd, same_request as _same_request
+from adapters.request_match import (
+    norm_req_cmd as _norm_req_cmd,
+    preserve_executable_payload,
+    same_request as _same_request,
+)
 
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*(\x07|\x1b\\)")
 
@@ -409,18 +413,13 @@ class OpenCodeAdapter(AgentAdapter):
         #    sidebar cost "$0.93 spent" — no whitespace after '$' — is not matched).
         #
         #    Capture the FULL command to the end of the region (which terminates at
-        #    "Allow once"), not just the first line. The TUI soft-wraps long commands
-        #    onto multiple screen lines (real newlines in the captured pane text), so a
-        #    first-line-only capture would silently drop a dangerous suffix — e.g.
-        #    "git status; rm -rf /" wrapped after the space becomes "git status;" and the
-        #    "rm -rf /" tail is lost, a fail-open. Rejoin real newlines with single
-        #    spaces; literal backslash-n sequences (multi-line command bodies, see the
-        #    external-directory "Patterns" case) are not whitespace and are normalized to
-        #    a separator space so word-boundary evaluator patterns still match.
-        m = re.search(r"\$\s+([\s\S]+)", region)
+        #    "Allow once"), not just the first line. Herdr recent-unwrapped has already
+        #    removed terminal soft wraps; every newline left here is semantic. Remove
+        #    only the prompt's verified visual margin and preserve command content,
+        #    quoted strings, and heredoc/Python indentation.
+        m = re.search(r"(?m)^([ \t]*)\$\s+([\s\S]+)", region)
         if m:
-            cmd = m.group(1).replace("\\n", " ")
-            cmd = re.sub(r"\s+", " ", cmd).strip()
+            cmd = preserve_executable_payload(m.group(2), prompt_margin=m.group(1))
             if cmd and not _looks_like_cost_metadata(cmd):
                 return cmd
 

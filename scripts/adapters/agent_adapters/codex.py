@@ -18,6 +18,7 @@ import re
 import subprocess
 
 from adapters.herdr_client import run_cmd
+from adapters.request_match import preserve_executable_payload
 
 from adapters.agent_adapters.base import AgentAdapter, footer_is_live, register
 
@@ -147,23 +148,24 @@ class CodexAdapter(AgentAdapter):
         # present in the tail, so a cleared dialog lingering in the terminal
         # scrollback is not re-parsed as a pending request. The question dialog is
         # handled above with its own footer ("enter to submit answer").
-        if not footer_is_live(visible_text, "Press enter to confirm or esc to cancel"):
+        region = _latest_dialog_region(visible_text)
+        if not footer_is_live(region, "Press enter to confirm or esc to cancel"):
             return None
 
         # Exec (shell): the "$ <command>" body before the "1. Yes" option row.
-        m = re.search(r"\$\s+([\s\S]*?)\n\s*[›>]?\s*1\.\s*Yes", visible_text)
+        m = re.search(r"(?m)^([ \t]*)\$\s+([\s\S]*?)\n[ \t]*[›>]?\s*1\.\s*Yes", region)
         if m:
-            cmd = re.sub(r"\s+", " ", m.group(1)).strip()
+            cmd = preserve_executable_payload(m.group(2), prompt_margin=m.group(1))
             if cmd:
                 return cmd
 
         # Network access: Do you want to approve network access to "<host>"?
-        m = re.search(r'network access to\s*"([^"]+)"', visible_text)
+        m = re.search(r'network access to\s*"([^"]+)"', region)
         if m:
             return f"network_access {m.group(1)}"
 
         # Write to stdin: Would you like to send input to terminal <id>?
-        m = re.search(r"send input to terminal\s+(\d+)", visible_text)
+        m = re.search(r"send input to terminal\s+(\d+)", region)
         if m:
             return f"stdin_terminal {m.group(1)}"
 
