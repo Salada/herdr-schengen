@@ -1020,6 +1020,7 @@ class DecisionLayer(str, Enum):
     PACKAGE_GUARD = "PACKAGE_GUARD"  # Package-manager 3-tuple classifier (MUTATING vs READ_ONLY)
     COMPLEXITY_TAX = "COMPLEXITY_TAX"  # Structural complexity deferral (never auto-approves)
     ORIGIN_GUARD = "ORIGIN_GUARD"  # Origin-based hard-escalate (INJECTED/EMERGENT never auto-approve)
+    NORMALIZATION_AMBIGUOUS = "NORMALIZATION_AMBIGUOUS"  # Rendered/canonical identity is unavailable or lossy
     FAST_TRACK_WORKSPACE_ALLOWLIST = "FAST_TRACK_WORKSPACE_ALLOWLIST"  # Repo-local .schengen/ allowlist fast-track (issue #7207)
 
 
@@ -2444,6 +2445,9 @@ def derive_taxonomy(
     elif layer == DecisionLayer.ORIGIN_GUARD:
         consequence = Consequence.NONE
         mechanism = "origin-hard-escalate"
+    elif layer == DecisionLayer.NORMALIZATION_AMBIGUOUS:
+        consequence = Consequence.NONE
+        mechanism = "normalization-ambiguous"
     elif layer == DecisionLayer.COMPLEXITY_TAX:
         consequence = Consequence.NONE
         mechanism = "complexity-tax"

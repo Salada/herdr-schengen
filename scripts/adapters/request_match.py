@@ -167,6 +167,22 @@ def _is_prefix_truncated(approved: str, screen: str) -> bool:
     )
 
 
+def _is_soft_wrap_equivalent(approved_raw: str, screen_raw: str) -> bool:
+    """Match a full canonical line to rendered newline artifacts only.
+
+    ``recent-unwrapped`` proves that the canonical request contains no hard
+    newline. A visible newline can therefore be either a word-boundary wrap
+    (replace with one space) or a token/path/operator wrap (remove it). No
+    non-whitespace character may be added, removed, or reordered.
+    """
+    if "\n" in approved_raw or "\r" in approved_raw or not re.search(r"[\r\n]", screen_raw):
+        return False
+    joined = re.sub(r"[\r\n][ \t]*", "", screen_raw)
+    spaced = re.sub(r"[\r\n][ \t]*", " ", screen_raw)
+    approved = norm_req_cmd(approved_raw)
+    return approved in (norm_req_cmd(joined), norm_req_cmd(spaced))
+
+
 def _has_glob(p: str) -> bool:
     """True if the path expression contains a glob metacharacter (* ? [)."""
     return any(ch in p for ch in "*?[")
@@ -265,6 +281,8 @@ def same_request(approved_cmd, screen_cmd) -> bool:
     if not approved or not screen:
         return False
     if approved == screen:
+        return True
+    if _is_soft_wrap_equivalent(approved_cmd or "", screen_cmd or ""):
         return True
     if _is_prefix_truncated(approved, screen):
         return True

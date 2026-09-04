@@ -1,0 +1,138 @@
+[
+  {
+    "id": "screenshot-1-docker-config-read",
+    "raw_input": "docker exec agentsview sh -c test -f /data/config.toml",
+    "canonical_input": "docker exec agentsview sh -c test -f /data/config.toml",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "screenshot-2-rg-encryption-names",
+    "raw_input": "rg -i age\\|gpg\\|encryption /repo",
+    "canonical_input": "rg -i age\\|gpg\\|encryption /repo",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "FAST_TRACK_AST",
+    "expected_outcome": "approve"
+  },
+  {
+    "id": "screenshot-3-agent-skill-list",
+    "raw_input": "find /Users/user/.codex/skills -mindepth 1 -maxdepth 1 -print",
+    "canonical_input": "find /Users/user/.codex/skills -mindepth 1 -maxdepth 1 -print",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "FAST_TRACK_AST",
+    "expected_outcome": "approve"
+  },
+  {
+    "id": "screenshot-4-git-c-status",
+    "raw_input": "git -C /Users/user/Documents/iwe-base status --short",
+    "canonical_input": "git -C /Users/user/Documents/iwe-base status --short",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "screenshot-5-git-c-diff",
+    "raw_input": "git -C /Users/user/Documents/iwe-base diff --check",
+    "canonical_input": "git -C /Users/user/Documents/iwe-base diff --check",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "screenshot-6-openai-docs-fetch",
+    "raw_input": "curl -fsSL https://developers.openai.com/codex/mcp.md | sed -n 1,180p",
+    "canonical_input": "curl -fsSL https://developers.openai.com/codex/mcp.md | sed -n 1,180p",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "screenshot-7-feature-push-chain",
+    "raw_input": "git diff --check && git add BACKLOG.md && git commit -m docs && git push origin mac",
+    "canonical_input": "git diff --check && git add BACKLOG.md && git commit -m docs && git push origin mac",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "split-rm-token",
+    "raw_input": "rm -\n  rf /tmp/example",
+    "canonical_input": "rm -rf /tmp/example",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "SHELL_CRITICAL",
+    "expected_outcome": "block"
+  },
+  {
+    "id": "split-force-flag",
+    "raw_input": "git push --for\n  ce origin main",
+    "canonical_input": "git push --force origin main",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "SHELL_CRITICAL",
+    "expected_outcome": "block"
+  },
+  {
+    "id": "split-secret-path",
+    "raw_input": "cat /repo/.en\n  v",
+    "canonical_input": "cat /repo/.env",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "SECRET_GUARD",
+    "expected_outcome": "block"
+  },
+  {
+    "id": "true-shell-newline",
+    "raw_input": "echo alpha\necho beta",
+    "canonical_input": "echo alpha\necho beta",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "FAST_TRACK_AST",
+    "expected_outcome": "approve"
+  },
+  {
+    "id": "single-quoted-newline",
+    "raw_input": "printf 'left\nright'",
+    "canonical_input": "printf 'left\nright'",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "python-indentation-and-socket",
+    "raw_input": "python3 - <<'PY'\nimport socket\nsocket.create_connection(('example.com',80))\nPY",
+    "canonical_input": "python3 - <<'PY'\nimport socket\nsocket.create_connection(('example.com',80))\nPY",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "PYTHON_AST",
+    "expected_outcome": "block"
+  },
+  {
+    "id": "tab-stripping-heredoc",
+    "raw_input": "python3 - <<-'PY'\n\tif True:\n\t    print('ok')\n\tPY",
+    "canonical_input": "python3 - <<-'PY'\n\tif True:\n\t    print('ok')\n\tPY",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "structured-rendered-directory-variance",
+    "raw_input": "access_directory /repo/src",
+    "canonical_input": "access_directory /repo/src/file.py",
+    "normalization_provenance": "structured-event",
+    "expected_layer": "FAST_TRACK_AST",
+    "expected_outcome": "approve"
+  },
+  {
+    "id": "sidebar-contamination-mismatch",
+    "raw_input": "git status 106,830 tokens",
+    "canonical_input": "git status",
+    "normalization_provenance": "visible-mismatch",
+    "expected_layer": "NORMALIZATION_AMBIGUOUS",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "question-dialog",
+    "raw_input": "question: Choose a deployment target",
+    "canonical_input": "question: Choose a deployment target",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "QUESTION",
+    "expected_outcome": "non-adjudicating"
+  }
+]

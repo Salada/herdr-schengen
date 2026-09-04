@@ -45,6 +45,7 @@ import core.gray_zone_evaluator as gray_zone_evaluator
 import core.guard_db as guard_db
 import core.security_evaluator as security_evaluator
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, canonical_request, get_adapter, target_agent_kinds
+from adapters.capture_evaluator import evaluate_capture_pair
 from core.cloud_judge import DEFAULT_REASONING_EFFORT
 from core.redaction import redact_for_cloud
 from core.guard_db import (
@@ -1474,6 +1475,7 @@ def main():
                 agent_status = pane_info.get("agent_status", "")
 
                 visible_text = get_pane_text(pane_id, lines=80)
+                raw_req_cmd = adapter.parse_permission_request(visible_text)
                 req_cmd, _capture_source = canonical_request(adapter, pane_id, visible_text)
 
                 if not req_cmd:
@@ -1598,19 +1600,41 @@ def main():
                 visible_text, req_cmd, truncated_unrecoverable = maybe_expand_truncated_dialog(
                     adapter, pane_id, visible_text, req_cmd
                 )
+                raw_req_cmd = adapter.parse_permission_request(visible_text)
 
                 # INV-CONC-1/2: submit silently; approval/escalation is handled
                 # only from the completion drain at the next poll.
-                def evaluate(req=req_cmd, cwd=target_cwd, kind=agent_kind, scope=pane_id):
-                    if truncated_unrecoverable:
+                def evaluate(
+                    req=req_cmd,
+                    raw_req=raw_req_cmd,
+                    capture_source=_capture_source,
+                    cwd=target_cwd,
+                    kind=agent_kind,
+                    scope=pane_id,
+                    truncated=truncated_unrecoverable,
+                ):
+                    if truncated:
                         return truncated_evaluate_result()  # INV-EX-3: fail-closed
-                    is_whitelisted, wl_reason = check_persisted_allowlist(req)
+                    result = evaluate_capture_pair(
+                        raw_req,
+                        req,
+                        capture_source,
+                        use_llm_judge=args.use_gpt_oss,
+                        reasoning_effort=args.reasoning,
+                        origin=Origin.AGENT if kind != "human" else Origin.HUMAN,
+                        cwd=cwd,
+                        scope=scope,
+                        agent_id=kind,
+                        audit_func=audit_shell_command_with_taxonomy,
+                    )
+                    if not result[0] and result[2] == DecisionLayer.NOT_ALLOWLISTED:
+                        is_whitelisted, wl_reason = check_persisted_allowlist(req)
+                    else:
+                        is_whitelisted, wl_reason = False, None
                     if is_whitelisted:
                         tax = derive_taxonomy(req, DecisionLayer.ALLOWLIST, True, wl_reason or "", origin=Origin.HUMAN)
                         return True, wl_reason, DecisionLayer.ALLOWLIST, tax
-                    return audit_shell_command_with_taxonomy(req, use_llm_judge=args.use_gpt_oss,
-                        reasoning_effort=args.reasoning, origin=Origin.AGENT if kind != "human" else Origin.HUMAN,
-                        cwd=cwd, scope=scope, agent_id=kind)
+                    return result
                 inspector.submit(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), evaluate)
                 continue
 
