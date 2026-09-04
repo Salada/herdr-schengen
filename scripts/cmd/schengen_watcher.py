@@ -44,7 +44,7 @@ import importlib
 import core.gray_zone_evaluator as gray_zone_evaluator
 import core.guard_db as guard_db
 import core.security_evaluator as security_evaluator
-from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
+from adapters.agent_adapters import INJECT_SKIP_CHANGED, canonical_request, get_adapter, target_agent_kinds
 from core.cloud_judge import DEFAULT_REASONING_EFFORT
 from core.redaction import redact_for_cloud
 from core.guard_db import (
@@ -1093,7 +1093,11 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
         req_cmd, state_seq, agent_status, pane_info, visible_text = request
         live_info = get_pane_info(pane_id)
         adapter = get_adapter(live_info.get("agent", "")) if live_info else None
-        live_cmd = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) if adapter else None
+        if adapter:
+            live_text = get_pane_text(pane_id, lines=80)
+            live_cmd, _ = canonical_request(adapter, pane_id, live_text)
+        else:
+            live_cmd = None
         if not live_info or live_cmd != req_cmd:
             inspector.release(pane_id, request)
             continue
@@ -1123,20 +1127,25 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
                     deadline = time.monotonic() + 2.5
                     while time.monotonic() < deadline:
                         time.sleep(0.5)
-                        if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                        current_text = get_pane_text(pane_id, lines=80)
+                        current_req, _ = canonical_request(adapter, pane_id, current_text)
+                        if current_req is None:
                             break
                     else:
                         print(
                             f"⚠️  [CHANNEL_FALLBACK] Pane {pane_id}: permission.reply not confirmed; falling back to keystroke injection.",
                             flush=True,
                         )
-                    if adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) is None:
+                    current_text = get_pane_text(pane_id, lines=80)
+                    current_req, _ = canonical_request(adapter, pane_id, current_text)
+                    if current_req is None:
                         print(f"🚀 Auto-approving {live_info.get('agent', 'unknown')} via permission.reply for {pane_id}...", flush=True)
                 if ch_reason == INJECT_SKIP_CHANGED:
                     deferred = True
                     print(f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.", flush=True)
             if not deferred:
-                current_req = adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80))
+                current_text = get_pane_text(pane_id, lines=80)
+                current_req, _ = canonical_request(adapter, pane_id, current_text)
                 if current_req == req_cmd:
                     approved, inject_reason = adapter.inject_approval(pane_id, req_cmd)
                     if not approved and inject_reason == INJECT_SKIP_CHANGED:
@@ -1360,7 +1369,11 @@ def main():
             def human_request_is_live(pane_id, command):
                 info = get_pane_info(pane_id)
                 adapter = get_adapter(info.get("agent", "")) if info else None
-                return bool(adapter and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == command)
+                if not adapter:
+                    return False
+                visible = get_pane_text(pane_id, lines=80)
+                request, _ = canonical_request(adapter, pane_id, visible)
+                return request == command
 
             cancelled = inspector.evict_stale_human_requests(human_request_is_live)
             if cancelled:
@@ -1370,7 +1383,9 @@ def main():
                 queued = inspector.human_queue.popleft()
                 pane_id, pane_info, req_cmd, reason, layer, visible_text, state_seq, agent_status = queued
                 adapter = get_adapter(pane_info.get("agent", ""))
-                if adapter and adapter.get_pending_request(pane_id, get_pane_text(pane_id, lines=80)) == req_cmd:
+                visible = get_pane_text(pane_id, lines=80)
+                canonical, _ = canonical_request(adapter, pane_id, visible) if adapter else (None, "")
+                if adapter and canonical == req_cmd:
                     escalate_request(pane_id, pane_info, req_cmd, reason, layer, pane_info.get("agent", "unknown"), visible_text)
                     inspector.active_human = (pane_id, req_cmd)
                     inspector.set_state(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), "active")
@@ -1459,7 +1474,7 @@ def main():
                 agent_status = pane_info.get("agent_status", "")
 
                 visible_text = get_pane_text(pane_id, lines=80)
-                req_cmd = adapter.get_pending_request(pane_id, visible_text)
+                req_cmd, _capture_source = canonical_request(adapter, pane_id, visible_text)
 
                 if not req_cmd:
                     # Prompt is no longer active; reset last_processed_prompt for this pane

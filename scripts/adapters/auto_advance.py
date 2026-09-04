@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter
+from adapters.agent_adapters import INJECT_SKIP_CHANGED, canonical_request, get_adapter
 from adapters.herdr_client import get_pane_text
 from adapters.request_match import same_request
 from core.security_evaluator import DecisionLayer, Origin, audit_shell_command_with_taxonomy
@@ -102,7 +102,7 @@ def auto_advance_once(
         )
 
     try:
-        new_req = adapter.get_pending_request(pane_id, text)
+        new_req, _ = canonical_request(adapter, pane_id, text)
     except Exception as exc:
         # INV-AA-5: re-parse failure -> fail-closed.
         return AutoAdvanceResult(outcome="parse_failed", is_safe=False, reason=f"dialog re-parse failed (fail-closed): {exc}")

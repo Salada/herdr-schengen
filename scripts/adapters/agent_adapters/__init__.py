@@ -10,6 +10,12 @@ schengen_watcher.py (Open/Closed Principle).
 import adapters.agent_adapters.agy  # noqa: F401
 import adapters.agent_adapters.codex  # noqa: F401
 import adapters.agent_adapters.opencode  # noqa: F401
-from adapters.agent_adapters.base import AgentAdapter, INJECT_SKIP_CHANGED, get_adapter, target_agent_kinds
+from adapters.agent_adapters.base import (
+    AgentAdapter,
+    INJECT_SKIP_CHANGED,
+    canonical_request,
+    get_adapter,
+    target_agent_kinds,
+)
 
-__all__ = ["AgentAdapter", "get_adapter", "target_agent_kinds", "INJECT_SKIP_CHANGED"]
+__all__ = ["AgentAdapter", "get_adapter", "target_agent_kinds", "INJECT_SKIP_CHANGED", "canonical_request"]
