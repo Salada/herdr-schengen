@@ -43,7 +43,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 2) **Pending Queue 4단계 상태 배지** (`🔍 Gatekeeper Checking`, `🚨 Action Required`, `⏳ Deferred (Slot #N)`, `⚡ Approved`).
    - 3) **AuditFullscreenModal 교환 뷰(`get_adjudication_exchange`) 전면 연동** 및 `scope_context`(Session vs Global) 메타데이터 감사 레저 반영.
    - 4) **동적 URL / WebSearch (curl, wget) 듀얼 정책(Allowlist & Denylist) 관리** (SQLite `url_policy_rules` + Tool Call + TUI 탭/정렬 뷰).
-   - 5) **반복적 고위험 동기화/미러링 명령어 화이트리스트(`command_allowlist`) 체계** (`rsync` skill mirror 등 안전 패턴 영속 등록 및 TUI 관리).
+   - 5) **유저 구성 기반 Fast-Track 확장(`chezmoi status` 등) 및 TUI 자연어 해석 Tool-Call 추가 엔진** (`~/.config/herdr-schengen/fast_track_rules.json` + `add_command_allowlist_rule` 툴).
    - 6) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
 
 4. 🔬 **[Track 4 — 딥 리서치 & 장기 안정성 (Research & Hardening)]**:
@@ -236,30 +236,43 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     5. **보안 평가기 연동 (`security_evaluator.py`)**:
        - `evaluate_network_calls` 및 `webfetch` 단계에서 `url_policy_rules`를 선행 조회하여 Deny 우선 차단 및 Allow 고속 패스트트랙 집행.
 
-[] [Idea/Policy] 반복적 고위험 동기화/미러링 명령어(rsync skill mirror 등)의 전역 패턴 화이트리스트(Command Allowlist) 관리 체계:
-  - Context & Motivation (OpenCode 실제 반복 사례):
-    • 사례: `rsync -a /Users/kyjbusan/code/herdr-schengen/scripts/ ~/.agents/skills/herdr-schengen/scripts/ && rsync -a /Users/kyjbusan/code/herdr-schengen/scripts/ ~/.gemini/skills/herdr-schengen/scripts/ && echo "scripts mirror OK"`
-    • `rsync`는 임의 파일 덮어쓰기/삭제 위험이 있는 변이 명령이자, 복합 체인(`&&`) 및 다중 경로로 인해 정적 평가기에서 높은 복잡도와 위험 레이어(`GRAY_ZONE / COMPLEXITY_TAX`)로 판정되어 매번 인간 승인을 요구함.
-    • 그러나 위 명령은 개발 환경에서 스킬 스크립트를 글로벌 에이전트 경로(`~/.agents`, `~/.gemini`)로 미러링하는 **완전히 정형화되고 검증된 일상 워크플로우**임.
-    • 이처럼 "본질적으로는 위험하지만, 특정 소스/타깃 경로 조합에 한해 반복적으로 안전함이 입증된 명령"을 글로벌하게 자율 승인할 수 있는 화이트리스트 체계 필요.
-  - Architecture & Whitelist Management Ideas:
-    1. **정규화 패턴 기반 명령어 화이트리스트 테이블 (`command_allowlist`)**:
-       - `id INTEGER PRIMARY KEY AUTOINCREMENT`
-       - `normalized_pattern TEXT UNIQUE NOT NULL` (예: `rsync -a <WORKSPACE>/scripts/ <AGENTS_DIR>/skills/<NAME>/scripts/ && ...`)
-       - `exact_command TEXT` (또는 파라미터화된 템플릿 정규식: source/dest 경로 앵커링)
-       - `scope TEXT DEFAULT 'global'` (`global` 전역 vs `repo` 특정 워크스페이스 한정)
-       - `risk_acknowledged INTEGER DEFAULT 1` (위험성 인지 플래그: 비가역 변이 허용 승인)
-       - `reason TEXT` (예: "Herdr-Schengen skill mirror to ~/.agents and ~/.gemini")
-       - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
-    2. **TUI 원클릭 "Always Allow This Pattern (전역 화이트리스트 등록)" 액션**:
-       - 에스컬레이션 모달에서 인간이 단순히 1회 승인(`Allow once`)하는 것을 넘어, **"Always Allow Pattern (`a`)"** 키를 누르면:
-         • 현재 명령의 소스/타깃 경로를 추상화한 정규화 패턴 또는 원문을 `command_allowlist`에 즉시 등록.
-         • 이후 동일 패턴의 `rsync` 미러링 명령 발생 시 Gatekeeper가 개입하지 않고 **Fast-Track AST / Allowlist Bypass로 즉시 자율 승인**.
-    3. **엄격한 바운딩 가드레일 (Safety Invariants)**:
-       - **Strict Source/Dest Anchoring**: 아무 rsync나 풀리는 것이 아니라, 소스가 현재 신뢰 저장소(`~/code/...`)이고 목적지가 공인된 에이전트 스킬 디렉터리(`~/.agents/...`, `~/.gemini/...`)인 경우에만 패턴 매칭 허용.
-       - **Destructive Flag 금지**: `--delete`, `rm`, `sudo` 등 파괴적 플래그가 추가된 변형 체인은 동일 패턴으로 인정하지 않고 차단 (Fail-Closed).
-    4. **TUI 화이트리스트 매니저 뷰 (`CommandAllowlistModal`)**:
-       - `url_policy_rules`와 유사하게 등록된 명령어 패턴 목록을 대소문자 무시 알파벳순/카테고리별로 열람, 검색, 삭제(Revoke)할 수 있는 관리 화면 제공.
+[] [Feature/Policy] 유저 구성 기반 Fast-Track 확장(`chezmoi status` 등), 에이전트별 Pattern Auto-Allow 룰 및 TUI 자연어 해석 Tool-Call 추가 엔진:
+  - Context & Motivation:
+    • 사례 1: `chezmoi status`, `chezmoi diff` 등 개인화된 도트파일 도구는 읽기/진단 성격이 명확하나 고정된 내장 allowlist에 없어 매번 불필요한 인간 승인을 유발함.
+    • 사례 2: `rsync skill mirror` 등 개발 환경에서 검증된 정형화 동기화 체인.
+    • Codex, Claude Code, OpenCode의 설정(`config.json`, `settings.json`, `rules`)처럼, 사용자가 `~/.config/herdr-schengen/` 내 설정 파일(`fast_track_allowlist.json` 또는 `rules.yaml`)을 통해 안전 명령어 및 패턴별 Auto-Allow 규칙을 직접 선언·보강할 수 있는 구조 필요.
+    • 특히 TUI 채팅에서 인간이 "chezmoi status는 항상 통과시켜줘", "skill rsync 패턴은 앞으로 자동 승인해"와 같이 자연어로 지시했을 때, **Inspector 또는 Gatekeeper(적격 Agent)가 지시 의도를 정확히 추론하여 tool call을 통해 규칙을 동적으로 추가/갱신**할 수 있어야 함.
+  - Core Architecture & Reference Design:
+    1. **`~/.config/herdr-schengen/` 기반 Fast-Track & Pattern 룰 설정 파일**:
+       - `~/.config/herdr-schengen/fast_track_rules.json` (또는 YAML):
+         ```json
+         {
+           "exact_commands": ["chezmoi status", "chezmoi diff", "brew list --formula"],
+           "prefix_commands": ["chezmoi status ", "chezmoi cat "],
+           "pattern_rules": [
+             {
+               "id": "rsync-skill-mirror",
+               "pattern": "rsync -a <WORKSPACE>/scripts/ <AGENTS_DIR>/skills/<NAME>/scripts/ && ...",
+               "agents": ["opencode", "agy", "codex"],
+               "action": "AUTO_ALLOW",
+               "reason": "Skill synchronization"
+             }
+           ]
+         }
+         ```
+       - 보안 평가기(`security_evaluator.py`)가 기동/리로드 시 해당 파일을 로드하여 정적 `FAST_TRACK_SAFE_COMMANDS`와 매끄럽게 결합(Zero-latency In-Memory Lookup).
+    2. **인간 지시 해석 및 동적 룰 추가 Tool (`add_command_allowlist_rule`)**:
+       - TUI 채팅에서 인간 지휘관의 의도(자연어)를 해석하여 적격 Agent(Inspector / Gatekeeper)가 호출하는 신규 Tool:
+         • `tool: add_command_allowlist_rule(command_or_pattern, match_type='exact'|'prefix'|'regex', scope='global'|'repo', reason=str)`
+         • `tool: remove_command_allowlist_rule(rule_id_or_pattern)`
+         • `tool: query_command_allowlist()`
+       - 동작 방식:
+         - 인간이 "chezmoi status 허용해줘" 입력 ➔ Gatekeeper/Inspector가 자연어 파싱 후 `add_command_allowlist_rule(command_or_pattern="chezmoi status", match_type="exact", reason="Human requested in TUI")` 도구 호출 ➔ 파일(`fast_track_rules.json`) 및 DB(`command_allowlist`)에 즉시 영속 반영 ➔ Watcher에 SIGHUP 또는 인메모리 리로드 통지.
+    3. **엄격한 안전 불변식 (Security Guardrails & Invariants)**:
+       - **Denylist Immiscibility (불변 방어선)**: `rm -rf`, `sudo`, `mkfs`, `git push --force` 등 Tier A Denylist에 속하는 위험 명령은 파일에 직접 적거나 Tool Call로 추가를 시도하더라도 **로더 및 도구 레벨에서 원천 거부(Reject/Error)**.
+       - **Confirmation & Provenance**: 도구를 통해 룰이 추가되었을 때 TUI 채팅창에 `[Auto-Allow Rule Added: chezmoi status (by human intent)]` 명시적 피드백 출력.
+    4. **TUI 화이트리스트 매니저 뷰 (`CommandAllowlistModal`) 연동**:
+       - 알파벳순(Case-Insensitive) 정렬, 등록된 커스텀 룰/패턴 목록 열람 및 삭제(Revoke) 지원.
 
 [] [Deferred/OpenCode] OpenCode 보조 지침 전달 큐, 다이얼로그 디바운스 및 배치 Defer UX 개선 (#3615/#3623/#3636 후속):
   - 1) **지침 전달 큐 (Instruction Queue)**: Bubble Tea 모달 상태에서 `send-text` 무효화 대응을 위해 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
