@@ -30,6 +30,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 2) **#4027 Heredoc 본문 마스킹 & 시맨틱 복잡도(Multi-Factor) 완화** (커밋 메시지 과도한 복잡도 패널티 제거)
    - 3) **#3143 / #3219 OpenCode Prefix & 상하위 디렉터리 경로 매칭** (화면 절단으로 인한 키 주입 실패 방어, `ctrl+f`는 신중 모드)
    - 4) **TUI SettingsModal UI 토글 연동** (`approve_advisory`, `Approval Bias`, `Fast-Track Mode`) & `get_complexity_tax_config` TTL 캐시 무효화.
+   - 5) **[P1 Urgent] 자율적 Context Compaction & 내부 토큰 절감 엔진** (Inspector 자율 트리거, Caveman 영문 압축 표기, 한글/TUI 렌더링 레이어 분리).
 
 2. ⚙️ **[Track 2 — Sprint 4 대형 동시성 엔진 (EPIC Concurrency)]**:
    - **Parallel Silent Inspection & Single-Slot Deferred UI (M1 ~ M4)**:
@@ -52,7 +53,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 2) **LLM Base URL 엔드포인트 서버 장애 감지·서킷 브레이커 & 자동 복구(Auto-Restart)** 메커니즘.
    - 3) **비가역적 상태 변경 명령 리서치** (`make`, `kubectl`, `magick` 에셋 생성 등 Fast-Track/Sandbox 정책).
    - 4) **Codex 지원 잔여 과제** (network/edit 템플릿 live 검증, reject 경로, Ctrl+A fullscreen).
-   - 5) **Context Compact 및 Python 관례 기반 테스트 코드 디렉터리 재배치**.
+   - 5) **Python 관례 기반 테스트 코드 디렉터리 재배치**.
 
 ---
 
@@ -142,6 +143,28 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 [] [Deferred/ConfigCache] `get_complexity_tax_config()` 프로세스-로컬 캐시 무효화 및 런타임 동기화 (#171 후속 피어리뷰 제안):
   - Context: PR #171에서 적용된 read-once 메모리 캐시는 프로세스 단위로 동작하여, TUI에서 임계치(Threshold)를 변경하더라도 Watcher 데몬 프로세스가 SIGHUP 리로드 전까지 변경사항을 즉시 인지하지 못함.
   - Solution: 짧은 TTL (예: 5~10s) 도입, SIGHUP/인메모리 invalidate 연동 또는 동기화 문서화. (Non-blocking Deferred)
+
+[] [Feature/Optimization/P1] 자율적 Context Compaction 및 내부 토큰 절감(Caveman 압축 & 영한 렌더링 분리) 엔진:
+  - Context & Motivation:
+    • 세션이 지속될수록 이전 심사 툴콜 결과(`investigate_pane_history`, 긴 스크립트 덤프, AST 덤프)가 `self.history`에 누적되어 In-Token이 수만 단위로 폭증 ➔ 지연 시간(Latency) 및 API 비용 폭증, 로컬 LLM 컨텍스트 오버플로우 초래.
+    • Claude, Codex, OpenCode와 같은 주력 에이전트들이 공통 채택하는 **Compaction(압축/요약) 메커니즘**을 Herdr-Schengen에 맞춤형으로 구현.
+    • 핵심 철학: **"TUI는 토큰을 아끼기 위한 인터페이스이다. 화면에 렌더링되는 장문/한글 텍스트가 내부 LLM 히스토리 토큰으로 고스란히 누적되어서는 안 된다."**
+  - Core Architecture & Token Minimization Dimensions:
+    1. **에이전트 자율 판단형 Compaction (`tool: compact_context` 또는 Inspector 트리거)**:
+       - 고정 턴 카운트 강제 트리거 대신, Inspector/Gatekeeper가 토큰 임계치(예: 8k / 16k tokens) 초과 감지 시 **자체 판단하에 자율적으로 Compaction 실행**.
+       - 과거의 상세 툴콜 관측 결과(Observation Raw Payloads)를 1~2줄의 핵심 사실 요약(Verdict Synopsis)으로 축약 치환.
+       - 에스컬레이션 전환 경계(Escalation Boundary)에서 이전 건의 디테일 툴콜 로그를 메모리로 flush하고 히스토리 슬롯을 클린 리셋.
+    2. **내부 영문 압축 표기(Caveman Style) 누적 체계**:
+       - [https://github.com/juliusbrussee/caveman](https://github.com/juliusbrussee/caveman) 스타일의 압축 문법 차용.
+       - 조사, 불필요한 공백, 장황한 서술어를 배제하고 핵심 토큰 위주로 내부 히스토리 보관 (예: `"Approved: cd safe && pytest ok. No egress, no mut"`).
+       - 한국어 토큰은 영문 대비 Byte-Pair Encoding(BPE) 비용이 2~3배 높으므로, **내부 추론 및 히스토리 컨텍스트는 영문/Caveman 형태로 고도로 압축하여 누적**.
+    3. **표현 계층(Display Layer) 분리 렌더링**:
+       - TUI 화면에 한국어로 친절하게 브리핑을 띄우는 작업은 무거운 메인 컨텍스트를 오염시키지 않고, 가벼운 단발성 포맷팅 템플릿(Lightweight Rendering Prompt / Mini Call)을 통해 화면에만 출력.
+       - TUI 렌더링 버퍼와 LLM Context Buffer를 1:1 결합하지 않고 분리(Decoupled Buffer)하여, 뷰포트 장식(`┃`, 테두리, ANSI, 비용 텍스트)이 LLM 프롬프트로 재유입되는 결함 원천 차단.
+    4. **Action Items & Milestones**:
+       - M1: `dialog_snapshot` TUI 노이즈(Border, Cost) 정규식 전처리 스트리퍼 구현.
+       - M2: `schengen_agent_llm.py` 내 에스컬레이션 종료 시 Observation Auto-Truncate & Caveman 요약기 연동.
+       - M3: Inspector의 자율 판단 `compact_context` 도구 호출 지원.
 
 ---
 
@@ -370,7 +393,5 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   • 기획 분석: 생성 활동(이미지 변환, 리사이징 등)은 기본적으로 생산적이나, 임의 파일 덮어쓰기(Overwrite) 및 델리게이트 취약점(MSL/HTTPS/Ghostscript) 리스크 상존.
   • 권장 방안: 전역 무조건 Fast-Track 대신, (1) 안전 확장자(.png/.webp/.svg 등) 한정 (2) 민감 파일 Denylist(INV-SENS-1/2) 가드 (3) 프로토콜 델리게이트 차단 조건부 패턴 또는 `#7207 Workspace .schengen/` 자동 프로모션 활용.
 - 그외에 이런 ruleset을 잘 관리할수있는 별도 파일 포맷으로 체계를 가지고 조사하는게 좋을지 조사.
-
-[] context compact 구현
 
 [] test code를 source code와 동일한 folder구조를 가지거나, (Most recommended) Python 관례상 가장 best practice가 되도록 테스트 코드 위치가 수정되도록 refactor
