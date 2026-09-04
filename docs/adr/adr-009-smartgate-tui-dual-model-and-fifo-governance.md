@@ -1,6 +1,6 @@
 # ADR-009: SmartGate TUI, Dual-Model Phase Routing, and Strict Sequential FIFO Escalation Governance
 
-- **Status**: Active
+- **Status**: Evolved (extended by ADR-011 model defaults + ADR-015 tiered reject)
 - **Date**: 2026-08-26
 - **Authors**: Security Team & Autonomous Coding Agents (AGY / OpenCode / Hermes)
 - **Supersedes / Extends**: [ADR-002](./adr-002-dynamic-substitution-tool-calling-inspector.md), [ADR-005](./adr-005-autonomous-orchestration-and-deadlock-defense.md), [ADR-008](./adr-008-opencode-alternative-host-runtime.md)

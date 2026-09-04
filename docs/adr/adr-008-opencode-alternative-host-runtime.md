@@ -1,6 +1,6 @@
 # ADR-008: OpenCode as Alternative Host Runtime (Agent-Agnostic Session-Bound Governance)
 
-- **Status**: Evolved (extended by ADR-009 TUI ownership; plugin daemon-spawn tools removed per Issue #114)
+- **Status**: Superseded (by ADR-009 + ADR-013; plugin host-spawn removed per Issue #114)
 - **Date**: 2026-08-24
 - **Context**: Herdr Schengen (SmartGate) watcher host runtime
 - **Authors**: `bot-opencode-default <bot-opencode-default@salada.mail.home.arpa>`
