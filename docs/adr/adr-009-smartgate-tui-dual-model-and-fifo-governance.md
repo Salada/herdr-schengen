@@ -27,7 +27,7 @@ As multi-agent concurrency increased across Herdr workspaces (Antigravity/AGY, O
 - **Mac Clipboard Integration**: `Ctrl+Y` copies plain-text chat history directly to the macOS clipboard via `pbcopy`.
 
 ### D2: Dual-Model Phase Routing Architecture
-- **Inspector Phase (Tool Calling)**: Configured via `SCHENGEN_INSPECTOR_API_KEY`, `SCHENGEN_INSPECTOR_BASE_URL`, and `SCHENGEN_INSPECTOR_MODEL` (default: `deepseek-chat`). Discretionary tool invocation for `investigate_path_details`, `investigate_pane_history`, and `read_file_snippet`.
+- **Inspector Phase (Tool Calling)**: Configured via `SCHENGEN_INSPECTOR_API_KEY`, `SCHENGEN_INSPECTOR_BASE_URL`, and `SCHENGEN_INSPECTOR_MODEL` (default: `gpt-5.6-luna`). Discretionary tool invocation for `investigate_path_details`, `investigate_pane_history`, and `read_file_snippet`.
 - **Judge Phase (Final Adjudication)**: Configured via `SCHENGEN_JUDGE_API_KEY`, `SCHENGEN_JUDGE_BASE_URL`, and `SCHENGEN_JUDGE_MODEL`. Executes once tool calls settle.
 - **Worker Independence**: Supervised workers (e.g., OpenCode, AGY) are purely the subjects of governance; the Judge is an independent LLM phase and does not rely on worker runtimes.
 

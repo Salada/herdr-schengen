@@ -65,7 +65,7 @@ This repository serves as the single source of truth (SSOT) for the Schengen Sec
 | :--- | :--- | :--- |
 | **[ADR-001](./docs/adr/adr-001-runtime-architecture-python-vs-go.md)** | Active | Runtime & Architecture Selection (Python In-Process AST vs Go Binary) |
 | **[ADR-002](./docs/adr/adr-002-dynamic-substitution-tool-calling-inspector.md)** | Evolved | Dynamic Tool-Calling Semantic Inspector for Subshell Substitutions |
-| **[ADR-003](./docs/adr/adr-003-agy-native-ta[REDACTED:api-key].md)** | Superseded | AGY Native Streaming Task Integration & Proactive Watcher Recovery (superseded by ADR-008/009) |
+| **[ADR-003](./docs/adr/adr-003-agy-native-task-integration-and-singleton-governance.md)** | Superseded | AGY Native Streaming Task Integration & Proactive Watcher Recovery (superseded by ADR-008/009) |
 | **[ADR-004](./docs/adr/adr-004-non-vcs-irreversible-mutation-governance.md)** | Active | Non-VCS Irreversible Mutation Governance & Filesystem Gray-Zone Evaluation |
 | **[ADR-005](./docs/adr/adr-005-autonomous-orchestration-and-deadlock-defense.md)** | Evolved | Autonomous Multi-Agent Orchestration & Deadlock Defense Protocol |
 | **[ADR-006](./docs/adr/adr-006-destructive-intent-taxonomy-and-sast-pre-execution-gate.md)** | Evolved | Destructive Intent Taxonomy & Hybrid SAST Pre-Execution Security Gate |
