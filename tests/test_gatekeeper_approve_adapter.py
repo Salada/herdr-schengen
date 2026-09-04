@@ -306,6 +306,24 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
         called = [c.args[0] for c in mock_run.call_args_list]
         self.assertTrue(any("escape" in c for c in called), f"expected bare escape, got {called}")
 
+    def test_reject_instruction_enter_uses_agent_send_keys(self):
+        """Regression: the reject instruction-delivery Enter must be injected via
+        `herdr agent send-keys` (agent keymap-aware), NOT `herdr pane send-keys`
+        — the pane variant did not press Enter, so the codex reject message was
+        never submitted."""
+        self._seed_escalation()
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=None), patch(
+            "tools.schengen_agent_llm.resolve_escalation"
+        ), patch("tools.schengen_agent_llm.record_adjudication"), patch(
+            "tools.schengen_agent_llm.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = None
+            reject_batch_escalations("batch no")
+        enter_calls = [c.args[0] for c in mock_run.call_args_list if c.args[0] and c.args[0][-1] == "enter"]
+        self.assertTrue(enter_calls, "expected an enter key injection")
+        for call in enter_calls:
+            self.assertEqual(call[:3], ["herdr", "agent", "send-keys"], f"enter must use herdr agent send-keys, got {call}")
+
     def test_reject_batch_real_failure_defers_fail_closed(self):
         """M7 item 4: a REAL inject_reject failure (dialog changed / CLI error,
         NOT 'not implemented') defers the item — no bare escape, no CANCELLED,

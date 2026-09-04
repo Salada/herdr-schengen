@@ -528,7 +528,7 @@ def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dic
                     subprocess.run(["herdr", "agent", "send-keys", pane, "escape"], capture_output=True, timeout=5.0)
                     if send_instruction and safe_feedback:
                         subprocess.run(["herdr", "pane", "send-text", pane, f"# [SECURITY GATEKEEPER]: {safe_feedback}"], capture_output=True, timeout=5.0)
-                        subprocess.run(["herdr", "pane", "send-keys", pane, "enter"], capture_output=True, timeout=5.0)
+                        subprocess.run(["herdr", "agent", "send-keys", pane, "enter"], capture_output=True, timeout=5.0)
             resolve_escalation(
                 pane_id=pane, escalation_id=esc_id, resolution_status="CANCELLED", approver="human-tui"
             )
@@ -735,7 +735,7 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
 
             if send_instruction and feedback:
                 subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
-                subprocess.run(["herdr", "pane", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
+                subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
 
             return json.dumps({
                 "status": "success",
@@ -781,7 +781,7 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
                 subprocess.run(["herdr", "agent", "send-keys", target_pane, "escape"], capture_output=True, timeout=5.0)
                 if send_instruction and feedback:
                     subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
-                    subprocess.run(["herdr", "pane", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
+                    subprocess.run(["herdr", "agent", "send-keys", target_pane, "enter"], capture_output=True, timeout=5.0)
 
             return json.dumps({
                 "status": "success",
