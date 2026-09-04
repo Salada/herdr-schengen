@@ -28,16 +28,16 @@
     "raw_input": "git -C /Users/user/Documents/iwe-base status --short",
     "canonical_input": "git -C /Users/user/Documents/iwe-base status --short",
     "normalization_provenance": "recent-unwrapped",
-    "expected_layer": "NOT_ALLOWLISTED",
-    "expected_outcome": "defer"
+    "expected_layer": "FAST_TRACK_AST",
+    "expected_outcome": "approve"
   },
   {
     "id": "screenshot-5-git-c-diff",
     "raw_input": "git -C /Users/user/Documents/iwe-base diff --check",
     "canonical_input": "git -C /Users/user/Documents/iwe-base diff --check",
     "normalization_provenance": "recent-unwrapped",
-    "expected_layer": "NOT_ALLOWLISTED",
-    "expected_outcome": "defer"
+    "expected_layer": "FAST_TRACK_AST",
+    "expected_outcome": "approve"
   },
   {
     "id": "screenshot-6-openai-docs-fetch",
@@ -52,8 +52,8 @@
     "raw_input": "git diff --check && git add BACKLOG.md && git commit -m docs && git push origin mac",
     "canonical_input": "git diff --check && git add BACKLOG.md && git commit -m docs && git push origin mac",
     "normalization_provenance": "recent-unwrapped",
-    "expected_layer": "NOT_ALLOWLISTED",
-    "expected_outcome": "defer"
+    "expected_layer": "FAST_TRACK_AST",
+    "expected_outcome": "approve"
   },
   {
     "id": "split-rm-token",

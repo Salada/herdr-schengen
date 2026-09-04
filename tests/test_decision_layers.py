@@ -115,13 +115,13 @@ class TestDecisionLayers(unittest.TestCase):
             'echo "use ps eww to dump env vars"',
             # `|` in a quoted grep pattern is regex alternation, not a pipe.
             "grep -rn 'auxe|eww|wwE|axeww|launchctl|/proc/|getenv|ps e' tests/",
+            "git commit -m 'fix ps eww false positive in heredoc'",
         ]
         escalated_not_denylisted = [
             "ps -e",
             "ps aux",
             "ps auxww",
             "ps -ef",
-            "git commit -m 'fix ps eww false positive in heredoc'",
             "cat > /tmp/handoff.txt <<'EOF'\n## Issue #51 — ps eww 프로세스 env 키 노출 수정\nEOF",
         ]
         for cmd in fast_track_allowed:
@@ -142,12 +142,11 @@ class TestDecisionLayers(unittest.TestCase):
 
     def test_gpt_model_name_not_disk_command(self):
         # Regression: "gpt-4o-mini" (OpenAI model name) must not match the `gpt`
-        # disk-partitioning tool. `git commit` is a write op, so it is no longer
-        # auto-approved — it escalates via NOT_ALLOWLISTED (fail-closed), but
-        # must NOT be flagged as SHELL_CRITICAL (no disk-tool false positive).
+        # disk-partitioning tool. An explicit-message routine commit fast-tracks
+        # and must not be flagged as a disk-tool false positive.
         safe, reason, layer = audit_shell_command('git commit -m "use gpt-4o-mini model"')
-        self.assertFalse(safe, f"Expected git commit to escalate (fail-closed): {reason}")
-        self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
+        self.assertTrue(safe, reason)
+        self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
         safe, reason, layer = audit_shell_command("gpt destroy /dev/disk0")
         self.assertFalse(safe)
         self.assertEqual(layer, DecisionLayer.SHELL_CRITICAL)
@@ -251,13 +250,18 @@ class TestDecisionLayers(unittest.TestCase):
             # the `:branch` remote-delete refspec, so a normal push stays safe.
             "cd ~/x && git push -u origin fix/27-28-cloud-judge-config-cache 2>&1 | tail -15 ~/code/herdr-schengen:main",
         ]
-        # 1. Safe Feature branch pushes: NOT blocked by the push denylist, but
-        #    `git push` is a write op absent from the read-only closed allowlist
-        #    -> escalates via NOT_ALLOWLISTED (fail-closed), never SHELL_CRITICAL.
+        # 1. Explicit non-protected feature branch pushes are a deterministic
+        #    routine Git fast-track; no LLM or human escalation is required.
         for cmd in safe_pushes:
             safe, reason, layer = audit_shell_command(cmd)
-            self.assertFalse(safe, f"Expected '{cmd}' to escalate (fail-closed), got safe=True: {reason}")
-            self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED, f"Expected NOT_ALLOWLISTED for '{cmd}', got {layer}")
+            # A leading cd plus diagnostic pipe remains outside the narrow Git
+            # workflow grammar and therefore stays human-gated.
+            if cmd.startswith("cd "):
+                self.assertFalse(safe, f"Expected '{cmd}' to remain human-gated, got safe=True: {reason}")
+                self.assertEqual(layer, DecisionLayer.NOT_ALLOWLISTED)
+            else:
+                self.assertTrue(safe, f"Expected '{cmd}' to fast-track: {reason}")
+                self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
 
         # 2. Blocked Dangerous Git Push scenarios -> SHELL_CRITICAL
         blocked_pushes = [

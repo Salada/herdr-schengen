@@ -89,7 +89,7 @@ class TestNoveltyGate(unittest.TestCase):
     # --- E2E: evaluator integration ---
 
     def test_e2e_human_approved_layer(self):
-        cmd = "git push origin feat/novelty-test"
+        cmd = "git push --force-with-lease origin feat/novelty-test"
         record_human_approval_pattern(normalize_command(cmd), scope="w1D:p1")
 
         safe, reason, layer = audit_shell_command(cmd, cwd="/repo", scope="w1D:p1")
@@ -104,7 +104,7 @@ class TestNoveltyGate(unittest.TestCase):
     def test_e2e_human_approved_taxonomy(self):
         from core.security_evaluator import audit_shell_command_with_taxonomy
 
-        cmd = "git push origin feat/novelty-test"
+        cmd = "git push --force-with-lease origin feat/novelty-test"
         record_human_approval_pattern(normalize_command(cmd), scope="w1D:p1")
         safe, reason, layer, tax = audit_shell_command_with_taxonomy(cmd, cwd="/repo", scope="w1D:p1")
         self.assertTrue(safe)

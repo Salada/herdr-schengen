@@ -58,14 +58,14 @@ flowchart TD
 | **Layer 5** | `SECRET_GUARD` | Sensitive file access (`.env`, `id_rsa`, `hosts.yml`, `credentials.json`, exfiltration) |
 | **Layer 6** | `LLM_INSPECTOR` | L2 Private Tool-Calling Multi-turn Semantic Inspector for dynamic substitutions `$(cat ...)` |
 | **Layer 7** | `GRAY_ZONE_MATRIX` | Non-VCS Irreversible Mutation Matrix (ADR-004 / SOP-12) with structured decision guidance |
-| **Layer 8** | `FAST_TRACK_AST` | Static verified development workflows (`git status`, `mkdir`, `pytest`, `npm run dev`) |
+| **Layer 8** | `FAST_TRACK_AST` | Static verified development workflows (`git -C … status`, scoped `git add`, explicit-message `git commit`, non-protected `git push`, `pytest`) |
 
 ---
 
 ## 🛡️ Key Features
 
 1. **Deterministic 1ms Python AST & Shell Denylist**:
-   - Blocks privilege escalation (`sudo`, `su`, `chmod`), destructive file mutations (`rm -rf`, `mkfs`, `dd`), and unreviewed remote pushes (`git push`).
+   - Blocks privilege escalation (`sudo`, `su`, `chmod`), destructive file mutations (`rm -rf`, `mkfs`, `dd`), and dangerous pushes (force/delete/mirror/all/tags/protected branches); ordinary explicit non-protected branch pushes use the deterministic Git fast-track.
    - Protects sensitive files (`.env`, `id_rsa`, `credentials.json`, `hosts.yml`, `.aws/credentials`).
    - Protects Hermes sandbox paths (`~/.hermes/sandboxes/`) from unauthorized writes.
 2. **Multi-Turn Tool-Calling Semantic Inspection**:
