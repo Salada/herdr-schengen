@@ -54,7 +54,8 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 2) **LLM Base URL 엔드포인트 서버 장애 감지·서킷 브레이커 & 자동 복구(Auto-Restart)** 메커니즘.
    - 3) **비가역적 상태 변경 명령 리서치** (`make`, `kubectl`, `magick` 에셋 생성 등 Fast-Track/Sandbox 정책).
    - 4) **Codex 지원 잔여 과제** (network/edit 템플릿 live 검증, reject 경로, Ctrl+A fullscreen).
-   - 5) **Python 관례 기반 테스트 코드 디렉터리 재배치**.
+   - 5) **[EPIC/Research] 모던 에이전트 영감 기반 Gatekeeper 고급 도구군 (난이도별 역순 큐: `check_process_tree` -> `query_agent_memory` -> `diff_shadow_dryrun` -> `fetch_cve_package_advisory` -> `ask_human_clarification`)**.
+   - 6) **Python 관례 기반 테스트 코드 디렉터리 재배치**.
 
 ---
 
@@ -469,5 +470,38 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   • 기획 분석: 생성 활동(이미지 변환, 리사이징 등)은 기본적으로 생산적이나, 임의 파일 덮어쓰기(Overwrite) 및 델리게이트 취약점(MSL/HTTPS/Ghostscript) 리스크 상존.
   • 권장 방안: 전역 무조건 Fast-Track 대신, (1) 안전 확장자(.png/.webp/.svg 등) 한정 (2) 민감 파일 Denylist(INV-SENS-1/2) 가드 (3) 프로토콜 델리게이트 차단 조건부 패턴 또는 `#7207 Workspace .schengen/` 자동 프로모션 활용.
 - 그외에 이런 ruleset을 잘 관리할수있는 별도 파일 포맷으로 체계를 가지고 조사하는게 좋을지 조사.
+
+[] [EPIC/Research] 모던 에이전트(Codex, OpenCode, Claude, Pi) 영감 기반 Gatekeeper 고급 관측/판정 도구군 확장 (난이도 기반 우선순위 큐):
+  - Context & Background:
+    • Codex, OpenCode, Claude Code, Pi 등 최신 에이전트들이 사용하는 도구 철학을 Herdr-Schengen의 "보안 심사(Gatekeeping) 및 감사" 도메인에 이식하기 위한 연구 백로그.
+    • 각 도구는 독립적인 Epic 사이즈의 구현 공수가 소요되므로, **구현 난이도가 낮고 ROI가 높은 항목을 우선순위 상위로, 난이도가 극도로 높거나 복잡한 항목은 최하위(Backlog/Deferred)로 배치**하여 점진적 검토.
+  - 난이도별 도구 분석 및 우선순위 큐 (낮은 난이도 ➔ 높은 난이도 순):
+    1. 🟢 **[Priority: High / 난이도: Low] `check_process_tree` (런타임 프로세스 & 리스너 검사)**:
+       - 영감: Codex Sandbox / Environment Inspector.
+       - 역할: 워커 Pane 또는 타깃 환경에서 백그라운드로 실행 중인 프로세스 트리(`ps`, `pgrep`), 점유 포트(`lsof`, `netstat`), 좀비 프로세스 상태 조회.
+       - 심사 가치: `kill`, 포트 바인딩 스크립트 실행 시 어떤 데몬이 충돌하는지 사전 팩트체크 가능.
+       - 구현 난이도: 낮음 (기존 시스템 커맨드 래퍼 및 격리 서브프로세스로 수일 내 구현 가능).
+    2. 🟡 **[Priority: Medium / 난이도: Mid] `query_agent_memory` / `recall_prior_adjudication` (과거 판례/결정 기억 조회)**:
+       - 영감: Pi (`recall_memory`) / Mem0.
+       - 역할: "사용자가 과거에 비슷한 `make build`나 `rsync`를 승인했던 맥락/선호가 있는지" 기존 SQLite 감사 레저(`audit_logs`, `feature_requests`)에서 FTS5 기반으로 과거 판례를 의미론적으로 검색.
+       - 심사 가치: 일관된 심사 기준 유지, 동일 프로젝트 내 과거 인간의 승인 패턴 참조.
+       - 구현 난이도: 보통 (이미 FTS5 테이블 및 DB 인프라가 구축되어 있어 쿼리 래퍼 설계 수준).
+    3. 🟠 **[Priority: Low / 난이도: High] `diff_shadow_dryrun` (가상 실행 섀도우 Diff 관측)**:
+       - 영감: Codex Operator Sandbox.
+       - 역할: `rsync`, `sed -i`, 대량 복사/이동 명령 시 임시 섀도우 디렉터리(OverlayFS 또는 tmp clone)에서 명령을 Dry-run하고 실제 변경될 파일 Diff를 미리 추출하여 심사.
+       - 심사 가치: 파괴적 파일 변이 명령의 실제 변경 내용을 승인 전 100% 시각화.
+       - 구현 난이도: 높음 (OS별 파일시스템 격리, 임시 디렉터리 동기화 및 롤백 오버헤드 큼).
+    4. 🔴 **[Priority: Lowest / 난이도: High+] `fetch_cve_package_advisory` (외부 패키지/CVE 보안성 조회)**:
+       - 영감: Claude Code / Web Security Search.
+       - 역할: `npm install <pkg>` 또는 `pip install <lib>` 감지 시, 취약점 DB(OSV, PyPI/NPM Advisory)를 조회하여 Typosquatting(오탈자 악성코드)이나 알려진 CVE 탐지.
+       - 심사 가치: 서플라이 체인 공격 사전 방어.
+       - 구현 난이도: 높음 (외부 네트워크 요청 허용/차단 정책 충돌, 로컬 캐시 DB 관리 복잡도).
+    5. ⚪ **[Idea / Priority: Dormant / UI-UX] `ask_human_clarification` (인간 대화형 의도 확인 모달)**:
+       - 영감: Pi (`clarify_intent`).
+       - 역할: 애매한 Gray-zone 명령에 대해 Gatekeeper가 TUI 상에 직접 다지선다/선택형 질문 모달을 띄워 인간의 의도를 명확화.
+       - **[Stale 주의 및 구현 유보 경고]**:
+         • 본질적으로 TUI 렌더링/상태 머신을 대대적으로 뜯어고쳐야 하는 순수 UI/UX 개선 작업임.
+         • 현재의 "간단한 텍스트 브리핑 + 인간의 `/approve`, `/reject` 또는 일반 텍스트 지시" 구조만으로도 충분히 목적이 달성되고 있음.
+         • **복잡도 대비 실익이 낮아 장기적으로 미착수된 채 Stale(폐기/방치)될 가능성이 매우 높음**. 아이디어 풀(Idea Pool) 차원에서만 기록 보존하고 구현 우선순위는 최하위 동결.
 
 [] test code를 source code와 동일한 folder구조를 가지거나, (Most recommended) Python 관례상 가장 best practice가 되도록 테스트 코드 위치가 수정되도록 refactor
