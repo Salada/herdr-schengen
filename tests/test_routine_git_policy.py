@@ -64,6 +64,7 @@ class TestRoutineGitPolicy(unittest.TestCase):
             "git commit --no-verify -m fix",
             "git push",
             "git push origin HEAD",
+            "git push origin feat/x:HEAD",
             "git push https://example.com/repo.git feat/x",
             "git push --force-with-lease origin feat/x",
             "git push --force-if-includes origin feat/x",
@@ -88,6 +89,10 @@ class TestRoutineGitPolicy(unittest.TestCase):
             "git -C repo push origin :feat/x",
             "git -C repo push origin main",
             "git -C repo push origin feat/x:refs/heads/main",
+            "git -C repo push origin heads/main",
+            "git -C repo push origin heads/master",
+            "git -C repo push origin heads/develop",
+            "git -C repo push origin heads/release/1",
             "git -C repo push origin refs/tags/v1.0.0",
         ):
             with self.subTest(command=command):

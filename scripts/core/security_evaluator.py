@@ -1184,7 +1184,7 @@ _GIT_READ_SUBCOMMANDS = {
     "ls-files", "blame", "shortlog", "grep",
 }
 _GIT_PROTECTED_BRANCH_RE = re.compile(
-    r"^(?:refs/heads/)?(?:main|master|develop|prod|production|release(?:[/_-].*)?)$",
+    r"^(?:(?:refs/)?heads/)?(?:main|master|develop|prod|production|release(?:[/_-].*)?)$",
     re.IGNORECASE,
 )
 _GIT_REF_RE = re.compile(r"(?:HEAD|[A-Za-z0-9][A-Za-z0-9._/-]*)$")
@@ -1313,7 +1313,7 @@ def _classify_git_push(args: list[str]) -> tuple[str, str]:
     target = _push_target(positional[1])
     if target is None:
         return "DANGEROUS", "destructive or malformed push refspec"
-    if target == "HEAD" and ":" not in positional[1]:
+    if target == "HEAD":
         return "GATED", "push target must name the remote branch explicitly"
     if target.startswith(("refs/tags/", "tags/")):
         return "DANGEROUS", "remote tag push"
