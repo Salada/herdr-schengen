@@ -135,7 +135,7 @@ CRITICAL_SHELL_PATTERNS = [
     (r"\bchmod\s+[0-7x+rw-]+", "Permission modification (chmod)"),
     (r"\bchown\b", "Ownership modification (chown)"),
     # Git Remote Push Safeguards (Allows non-force feature branch pushes, blocks force/delete/mirror/protected branch push)
-    (r"\bgit\s+push\b.*(--force\b|-f\b|\+[\w/.-]+)", "Destructive Git force push / overwrite (--force / -f / +ref)"),
+    (r"\bgit\s+push\b.*(--force(?!-)\b|-f\b|\+[\w/.-]+)", "Destructive Git force push / overwrite (--force / -f / +ref)"),
     (r"\bgit\s+push\b.*(--delete\b|(?<!\S):\w+)", "Destructive Git remote branch deletion (--delete)"),
     (
         r"\bgit\s+push\b.*(--all\b|--mirror\b|--tags\b)",
@@ -1179,6 +1179,206 @@ def _is_safe_cd_segment(seg: str) -> bool:
     return False
 
 
+_GIT_READ_SUBCOMMANDS = {
+    "status", "diff", "log", "show", "rev-parse", "rev-list", "describe",
+    "ls-files", "blame", "shortlog", "grep",
+}
+_GIT_PROTECTED_BRANCH_RE = re.compile(
+    r"^(?:(?:refs/)?heads/)?(?:main|master|develop|prod|production|release(?:[/_-].*)?)$",
+    re.IGNORECASE,
+)
+_GIT_REF_RE = re.compile(r"(?:HEAD|[A-Za-z0-9][A-Za-z0-9._/-]*)$")
+
+
+def _parse_git_invocation(tokens: list[str]) -> Optional[tuple[Optional[str], str, list[str]]]:
+    """Parse the closed global-option prefix used by routine Git workflows."""
+    if not tokens or tokens[0] != "git":
+        return None
+    index, repo = 1, None
+    if index < len(tokens) and tokens[index] == "-C":
+        if index + 1 >= len(tokens) or not _is_safe_cd_target(tokens[index + 1]):
+            return None
+        repo = tokens[index + 1]
+        index += 2
+    if index >= len(tokens) or tokens[index].startswith("-"):
+        return None
+    return repo, tokens[index].lower(), tokens[index + 1:]
+
+
+def _is_safe_git_ref(value: str) -> bool:
+    return bool(
+        _GIT_REF_RE.fullmatch(value)
+        and ".." not in value
+        and "//" not in value
+        and "@{" not in value
+        and not value.endswith(("/", ".", ".lock"))
+    )
+
+
+def _is_scoped_git_path(value: str) -> bool:
+    if not value or value in {".", "./", ":/"} or value.startswith(("/", "~", ":")):
+        return False
+    if any(part == ".." for part in Path(value).parts) or any(ch in value for ch in "*?["):
+        return False
+    return not (SENSITIVE_FILE_PATTERN.search(value) or SENSITIVE_DIRECTORY_PATTERN.search(value))
+
+
+def _classify_git_read(subcommand: str, args: list[str]) -> bool:
+    if subcommand in _GIT_READ_SUBCOMMANDS:
+        forbidden = {
+            "--no-index", "--ext-diff", "--textconv", "--exec", "--output",
+            "--paginate", "--exec-path", "--html-path", "--man-path", "--info-path",
+            "--open-files-in-pager",
+        }
+        return not any(
+            arg in forbidden
+            or any(arg.startswith(f"{flag}=") for flag in forbidden)
+            or (arg.startswith("--") and any(flag.startswith(arg) for flag in forbidden))
+            for arg in args
+        )
+    if subcommand == "remote":
+        return not args or args == ["-v"] or args == ["--verbose"] or (
+            len(args) == 2 and args[0] == "get-url" and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args[1]))
+        )
+    if subcommand == "branch":
+        return not args or all(arg in {"-a", "--all", "-r", "--remotes", "--show-current"} for arg in args)
+    if subcommand == "tag":
+        return not args or args in (["-l"], ["--list"])
+    return False
+
+
+def _classify_git_add(args: list[str]) -> bool:
+    if not args:
+        return False
+    paths = args[1:] if args[0] == "--" else args
+    return bool(paths) and all(not path.startswith("-") and _is_scoped_git_path(path) for path in paths)
+
+
+def _classify_git_commit(args: list[str]) -> bool:
+    """Allow a new local commit only when its message is explicit."""
+    if not args:
+        return False
+    index, has_message = 0, False
+    while index < len(args):
+        arg = args[index]
+        if arg in {"-q", "--quiet", "--no-gpg-sign"}:
+            index += 1
+        elif arg in {"-m", "--message"}:
+            if index + 1 >= len(args) or not args[index + 1]:
+                return False
+            has_message = True
+            index += 2
+        elif arg.startswith("--message=") and len(arg) > len("--message="):
+            has_message = True
+            index += 1
+        elif arg.startswith("-m") and len(arg) > 2:
+            has_message = True
+            index += 1
+        else:
+            return False
+    return has_message
+
+
+def _push_target(refspec: str) -> Optional[str]:
+    if refspec.startswith("+") or refspec.startswith(":") or refspec.count(":") > 1:
+        return None
+    if ":" in refspec:
+        source, target = refspec.split(":", 1)
+        if not source or not target or not _is_safe_git_ref(source) or not _is_safe_git_ref(target):
+            return None
+        return target
+    return refspec if _is_safe_git_ref(refspec) else None
+
+
+def _classify_git_push(args: list[str]) -> tuple[str, str]:
+    """Classify one explicit remote/ref push without consulting network state."""
+    if any(arg in {"--force", "-f", "--delete", "--all", "--mirror", "--tags"} for arg in args) or any(
+        re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", arg) for arg in args
+    ):
+        return "DANGEROUS", "destructive push option"
+    if any(arg.startswith("+") for arg in args):
+        return "DANGEROUS", "force refspec"
+    if any(arg.startswith("--force-") for arg in args):
+        return "GATED", "lease/conditional force push requires human review"
+
+    positional = []
+    for arg in args:
+        if arg in {"-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "--porcelain", "--dry-run"}:
+            continue
+        if arg.startswith("-"):
+            return "GATED", "unrecognized push option"
+        positional.append(arg)
+    if len(positional) != 2 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", positional[0]):
+        return "GATED", "push requires one named remote and one explicit ref"
+    target = _push_target(positional[1])
+    if target is None:
+        return "DANGEROUS", "destructive or malformed push refspec"
+    if target == "HEAD":
+        return "GATED", "push target must name the remote branch explicitly"
+    if target.startswith(("refs/tags/", "tags/")):
+        return "DANGEROUS", "remote tag push"
+    if _GIT_PROTECTED_BRANCH_RE.fullmatch(target):
+        return "DANGEROUS", f"protected branch push: {target}"
+    return "SAFE", "ordinary explicit non-protected branch push"
+
+
+def _classify_routine_git_workflow(cmd_str: str) -> tuple[str, str]:
+    """Classify a bounded && chain of closed, routine Git operations."""
+    if any(char in cmd_str for char in ("$", "`", "\n", "\r")):
+        return "GATED", "dynamic or multiline Git command"
+    try:
+        lexer = shlex.shlex(cmd_str, posix=True, punctuation_chars="|;&<>")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return "GATED", "unparseable Git command"
+    if not tokens or tokens[0] != "git":
+        return "NOT_GIT", ""
+
+    segments, current = [], []
+    for token in tokens:
+        if token == "&&":
+            if not current:
+                return "GATED", "empty Git workflow segment"
+            segments.append(current)
+            current = []
+        elif token in {"|", "||", ";", "&", "<", ">", ">>", "<<"}:
+            return "GATED", "unsupported shell control in Git workflow"
+        else:
+            current.append(token)
+    if not current:
+        return "GATED", "empty Git workflow segment"
+    segments.append(current)
+    if len(segments) > 8:
+        return "GATED", "Git workflow exceeds eight segments"
+
+    repos, commits, pushes = set(), 0, 0
+    for segment in segments:
+        parsed = _parse_git_invocation(segment)
+        if parsed is None:
+            return "GATED", "unsupported Git global options or mixed command chain"
+        repo, subcommand, args = parsed
+        repos.add(repo or "")
+        if _classify_git_read(subcommand, args):
+            continue
+        if subcommand == "add" and _classify_git_add(args):
+            continue
+        if subcommand == "commit" and _classify_git_commit(args):
+            commits += 1
+            continue
+        if subcommand == "push":
+            pushes += 1
+            verdict, reason = _classify_git_push(args)
+            if verdict != "SAFE":
+                return verdict, reason
+            continue
+        return "GATED", f"unsupported Git operation: {subcommand}"
+    if len(repos) > 1 or commits > 1 or pushes > 1:
+        return "GATED", "Git workflow must stay in one repository with at most one commit and push"
+    return "SAFE", "bounded routine Git workflow"
+
+
 def _shell_structure_view(cmd_str: str) -> str:
     """Mask quoted or escaped argument data while preserving character offsets.
 
@@ -1236,23 +1436,21 @@ def _is_readonly_pipeline_segment(seg: str) -> bool:
     seg = seg.strip()
     if not seg:
         return False
-    tokens = seg.split()
-    cmd = tokens[0]
-    # git: only read-only subcommands (reuse the Milestone-1 git-pattern approach)
-    if cmd == "git":
-        for pat in FAST_TRACK_SAFE_GIT_PATTERNS:
-            m = re.match(pat, seg)
-            if m:
-                rest = seg[m.end():]
-                if re.search(r"(^|\s)-[dDfFmM]{1,2}(\s|$)|--(delete|force|set|add|unset|move|copy|tag)\b", rest):
-                    return False
-                # Sensitive/broad target in the git segment -> fail-closed (safety backstop)
-                if SENSITIVE_FILE_PATTERN.search(seg) or SENSITIVE_DIRECTORY_PATTERN.search(seg):
-                    return False
-                if _BROAD_WILDCARD_RE.search(seg):
-                    return False
-                return True
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
         return False
+    if not tokens:
+        return False
+    cmd = tokens[0]
+    # git: parse -C and accept only closed read-only subcommands.
+    if cmd == "git":
+        parsed = _parse_git_invocation(tokens)
+        if parsed is None or not _classify_git_read(parsed[1], parsed[2]):
+            return False
+        if SENSITIVE_FILE_PATTERN.search(seg) or SENSITIVE_DIRECTORY_PATTERN.search(seg):
+            return False
+        return not _BROAD_WILDCARD_RE.search(seg)
     # (issue #3670) `cd <specific-safe-dir>` is a read-only navigation segment —
     # allowed BEFORE the membership check so it can head a read-only chain, but
     # NEVER added to READONLY_PIPELINE_COMMANDS (bare `cd` stays fail-closed).
@@ -1300,6 +1498,21 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     if _FORENSIC_NETWORK_BIN_RE.search(cmd_str):
         return False          # forensic / network egress primitives
 
+    # Obvious-safe closed recognizer: bare `<bin> --version|-v|-V|--help|-h`.
+    if _is_obvious_safe_version_help(cmd_str):
+        return True
+
+    # A single or all-Git chain uses the closed parser exclusively. This prevents
+    # prefix regexes from treating mutations such as `git branch new-name` or
+    # `git tag v1` as read-only while preserving mixed read pipelines/chains.
+    if cmd_str.lstrip().startswith("git "):
+        try:
+            git_segments = [shlex.split(segment) for segment in _split_shell_control_segments(cmd_str) if segment.strip()]
+        except ValueError:
+            return False
+        if git_segments and all(tokens and tokens[0] == "git" for tokens in git_segments):
+            return _classify_routine_git_workflow(cmd_str)[0] == "SAFE"
+
     # Pure read-only pipeline (segments joined by | && ;)
     if _PIPELINE_SEP_RE.search(structure):
         return _is_safe_readonly_pipeline(cmd_str)
@@ -1326,15 +1539,6 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     # Standalone read-only sed (issue #6935): `sed -n '<addr>p' <file>`
     if cmd_str.startswith("sed "):
         return _is_readonly_sed(cmd_str)
-
-    # Obvious-safe closed recognizer: bare `<bin> --version|-v|-V|--help|-h`
-    # for the enumerated interpreter/package CLIs. Consulted here — after every
-    # hard reject and the single-command allowlists above — so CRITICAL /
-    # SECRET_GUARD / gray-zone / SAST layers (which run in audit_shell_command
-    # BEFORE this function) always take precedence. Script args, pipes, and
-    # chained commands never match (see _is_obvious_safe_version_help gates).
-    if _is_obvious_safe_version_help(cmd_str):
-        return True
 
     tokens = cmd_str.split()
     if not tokens or tokens[0] not in FAST_TRACK_SAFE_COMMANDS:
@@ -2097,6 +2301,10 @@ def _audit_static_shell_command(
     if not sem_safe:
         return False, sem_reason, DecisionLayer.SAST_SEMGREP
 
+    git_workflow, git_reason = _classify_routine_git_workflow(cmd_str)
+    if git_workflow == "DANGEROUS":
+        return False, f"Critical Git risk detected: {git_reason}", DecisionLayer.SHELL_CRITICAL
+
     # 2. Check critical destructive patterns
     for pat, desc in CRITICAL_SHELL_PATTERNS:
         if re.search(pat, cmd_str, re.IGNORECASE):
@@ -2170,6 +2378,9 @@ def _audit_static_shell_command(
         if cloud_safe:
             return True, f"Gray-zone cleared by cloud judge: {cloud_reason}", DecisionLayer.CLOUD_JUDGE
         return False, f"Gray-zone deferred to human ({cloud_reason}):\n{guidance}", DecisionLayer.GRAY_ZONE_MATRIX
+
+    if git_workflow == "SAFE":
+        return True, f"Fast-track verified {git_reason}: '{cmd_str}'", DecisionLayer.FAST_TRACK_AST
 
     # issue #7207: workspace .schengen/ allowlist — persistent repo-local
     # fast-track. Runs AFTER the gray-zone BLOCK (and every denylist layer

@@ -86,6 +86,14 @@ The former `approve_advisory` switch was removed by ADR-015. Ordinary prose is
 still sent to the Gatekeeper as advice; only the closed directive grammar above
 can mutate an escalation without an LLM round trip.
 
+Routine Git approval is also deterministic and does not call an LLM. The closed
+grammar accepts read queries with an optional `git -C <specific-directory>`,
+explicit scoped paths for `git add`, an explicit `-m`/`--message` for
+`git commit`, and one named remote plus one explicit non-protected branch for
+`git push`. Force/delete/mirror/all/tags/protected-branch pushes are blocked;
+`--force-with-lease`, implicit targets, broad adds, and unknown options remain
+human-gated.
+
 ### Session-pattern removal (INTENTIONAL)
 
 The 2a gatekeeper-prompt rework removed the "Session Pattern Memory"
