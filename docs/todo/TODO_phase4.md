@@ -31,6 +31,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 3) **#3143 / #3219 OpenCode Prefix & 상하위 디렉터리 경로 매칭** (화면 절단으로 인한 키 주입 실패 방어, `ctrl+f`는 신중 모드)
    - 4) **TUI SettingsModal UI 토글 연동** (`approve_advisory`, `Approval Bias`, `Fast-Track Mode`) & `get_complexity_tax_config` TTL 캐시 무효화.
    - 5) **[P1 Urgent] 자율적 Context Compaction & 내부 토큰 절감 엔진** (Inspector 자율 트리거, Caveman 영문 압축 표기, 한글/TUI 렌더링 레이어 분리).
+   - 6) **[Feature/Tools/P1] Gatekeeper/Inspector 자율 심사용 Ripgrep (`grep_search`) 및 모던 에이전트 관측 도구 체계 (`find_by_name`, `git_diff_stat`) 구축**.
 
 2. ⚙️ **[Track 2 — Sprint 4 대형 동시성 엔진 (EPIC Concurrency)]**:
    - **Parallel Silent Inspection & Single-Slot Deferred UI (M1 ~ M4)**:
@@ -197,6 +198,49 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
        - M2: `scripts/tools/schengen_agent_llm.py` 내 `AVAILABLE_TOOLS`에 `compact_context` 도구 스키마 및 실행기(`compact_context`) 추가.
        - M3: In-Token 계산기 / 게이지 넛지 로직 및 에스컬레이션 종료 경계(`_run_llm_agent_loop` 종료 시점) Auto-Purge 연동.
        - M4: 회귀 검증 단위 테스트 작성 (`tests/test_context_compaction.py` - history 축약 전후 길이 및 필수 턴 보존 검증).
+
+[] [Feature/Tools/P1] Gatekeeper/Inspector 자율 심사용 Ripgrep (`grep_search`) 및 모던 에이전트 관측 도구 체계 확장:
+  - Context & Motivation:
+    • 현재 Gatekeeper/Inspector의 정적/동적 검증 도구는 `investigate_path_details`(경로 존재 여부/크기), `read_file_snippet`(단순 8KB 앞부분 읽기), `investigate_pane_history`(터미널 버퍼 덤프)에 국한됨.
+    • 명령어가 변경하려는 소스코드 내 민감 키워드(`.env`, `API_KEY`, `secret`, `DROP TABLE`, `rm -rf`)의 참조 여부나, 스크립트 실행 시 호출되는 내부 함수/종속성을 검증하기 위해서는 **프로젝트 전반을 고속 검색하는 능력**이 필수적임.
+    • `ripgrep`(rg)를 필두로 최신 코딩 에이전트(Codex, Claude Code, Cursor, OpenCode 등)가 채택하는 **표준 정밀 관측 도구 세트(Standard Investigation Toolkit)**를 도입하여 Gatekeeper가 인간에게 에스컬레이션하기 전 자율적으로 의심 요소를 팩트 체크(Fact-Check)할 수 있도록 권능 강화.
+  - Core Toolset Specification:
+    1. **`grep_search` (ripgrep / `rg` 래퍼)**:
+       - 스키마 정의 (`AVAILABLE_TOOLS`):
+         ```json
+         {
+           "type": "function",
+           "function": {
+             "name": "grep_search",
+             "description": "Fast regex search across files in the codebase using ripgrep (rg) to inspect sensitive patterns, references, or secrets.",
+             "parameters": {
+               "type": "object",
+               "properties": {
+                 "query": { "type": "string", "description": "Regex or literal pattern to search for." },
+                 "path": { "type": "string", "description": "Target directory or file path to search within." },
+                 "case_sensitive": { "type": "boolean", "description": "Case-sensitive search flag (default: false).", "default": false },
+                 "max_results": { "type": "integer", "description": "Max match lines to return to avoid context overflow (default: 20, max: 50).", "default": 20 }
+               },
+               "required": ["query", "path"]
+             }
+           }
+         }
+         ```
+       - 보안 가드:
+         • `.env`, `id_rsa`, `.ssh/` 등 차단 경로 직접 진입 시 패턴 마스킹 또는 접근 차단.
+         • Context Compaction과 연동하여 출력 결과는 최대 20~50줄로 캡(Cap) 적용.
+    2. **모던 에이전트 관측 도구군 선별 도입 (Modern Agent Investigation Toolkit)**:
+       - 🔍 **`find_by_name` (파일/디렉터리 트리 고속 탐색)**:
+         • 명령어가 삭제/수정하려는 타깃 경로가 실제로 어떤 파일 트리 구조를 가지는지 `fd` 또는 `find` 기반으로 안전하게 구조화된 트리 리스팅 (예: `build/`, `dist/`, `tmp/`의 실제 하위 구성 확인).
+       - 📊 **`git_diff_stat` (작업트리 변경 범위 검증)**:
+         • `git diff --stat` 또는 `git status --short`를 서브프로세스로 안전 격리 조회하여, 워커 에이전트의 커밋/푸시 명령 직전 실제 변경된 파일 수, 추가/삭제 라인 규모를 파악해 의도치 않은 대량 파괴(Mass Deletion/Mutation) 사전 감지.
+       - 📑 **`view_file_slice` (범위 지정 파일 정밀 뷰어)**:
+         • 단순 앞단 8KB 제한(`read_file_snippet`)을 탈피하여, `start_line` / `end_line` 슬라이스로 특정 코드 블록(예: 위험한 셸 실행 함수 호출부)을 타깃팅하여 읽는 경량 뷰어.
+  - Codex 작업 마일스톤 (Action Items & Milestones for Codex):
+    • M1: `scripts/tools/schengen_agent_llm.py` 내 `grep_search` 도구 스키마 및 `rg` 래퍼 안전 핸들러 구현 (바이너리 부재 시 `grep` fallback 고려).
+    • M2: `git_diff_stat` 및 `find_by_name` 보조 관측 툴 추가.
+    • M3: Gatekeeper 프롬프트에 `grep_search` 활용 지침 추가 ("명령어가 민감 환경변수나 파괴적 스크립트를 건드리는지 의심될 경우 `grep_search`로 선행 검증하라").
+    • M4: 단위 테스트 작성 (`tests/test_gatekeeper_investigation_tools.py`).
 
 ---
 
