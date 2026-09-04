@@ -43,7 +43,8 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 2) **Pending Queue 4단계 상태 배지** (`🔍 Gatekeeper Checking`, `🚨 Action Required`, `⏳ Deferred (Slot #N)`, `⚡ Approved`).
    - 3) **AuditFullscreenModal 교환 뷰(`get_adjudication_exchange`) 전면 연동** 및 `scope_context`(Session vs Global) 메타데이터 감사 레저 반영.
    - 4) **동적 URL / WebSearch (curl, wget) 듀얼 정책(Allowlist & Denylist) 관리** (SQLite `url_policy_rules` + Tool Call + TUI 탭/정렬 뷰).
-   - 5) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
+   - 5) **반복적 고위험 동기화/미러링 명령어 화이트리스트(`command_allowlist`) 체계** (`rsync` skill mirror 등 안전 패턴 영속 등록 및 TUI 관리).
+   - 6) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
 
 4. 🔬 **[Track 4 — 딥 리서치 & 장기 안정성 (Research & Hardening)]**:
    - 1) **LLM Base URL 엔드포인트 서버 장애 감지·서킷 브레이커 & 자동 복구(Auto-Restart)** 메커니즘.
@@ -233,6 +234,31 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
        - TUI 단축키/버튼: `Add Rule` (Allow/Deny 선택), `Delete Rule`, `Toggle Type` (Allow ↔ Deny 빠른 전환).
     5. **보안 평가기 연동 (`security_evaluator.py`)**:
        - `evaluate_network_calls` 및 `webfetch` 단계에서 `url_policy_rules`를 선행 조회하여 Deny 우선 차단 및 Allow 고속 패스트트랙 집행.
+
+[] [Idea/Policy] 반복적 고위험 동기화/미러링 명령어(rsync skill mirror 등)의 전역 패턴 화이트리스트(Command Allowlist) 관리 체계:
+  - Context & Motivation (OpenCode 실제 반복 사례):
+    • 사례: `rsync -a /Users/kyjbusan/code/herdr-schengen/scripts/ ~/.agents/skills/herdr-schengen/scripts/ && rsync -a /Users/kyjbusan/code/herdr-schengen/scripts/ ~/.gemini/skills/herdr-schengen/scripts/ && echo "scripts mirror OK"`
+    • `rsync`는 임의 파일 덮어쓰기/삭제 위험이 있는 변이 명령이자, 복합 체인(`&&`) 및 다중 경로로 인해 정적 평가기에서 높은 복잡도와 위험 레이어(`GRAY_ZONE / COMPLEXITY_TAX`)로 판정되어 매번 인간 승인을 요구함.
+    • 그러나 위 명령은 개발 환경에서 스킬 스크립트를 글로벌 에이전트 경로(`~/.agents`, `~/.gemini`)로 미러링하는 **완전히 정형화되고 검증된 일상 워크플로우**임.
+    • 이처럼 "본질적으로는 위험하지만, 특정 소스/타깃 경로 조합에 한해 반복적으로 안전함이 입증된 명령"을 글로벌하게 자율 승인할 수 있는 화이트리스트 체계 필요.
+  - Architecture & Whitelist Management Ideas:
+    1. **정규화 패턴 기반 명령어 화이트리스트 테이블 (`command_allowlist`)**:
+       - `id INTEGER PRIMARY KEY AUTOINCREMENT`
+       - `normalized_pattern TEXT UNIQUE NOT NULL` (예: `rsync -a <WORKSPACE>/scripts/ <AGENTS_DIR>/skills/<NAME>/scripts/ && ...`)
+       - `exact_command TEXT` (또는 파라미터화된 템플릿 정규식: source/dest 경로 앵커링)
+       - `scope TEXT DEFAULT 'global'` (`global` 전역 vs `repo` 특정 워크스페이스 한정)
+       - `risk_acknowledged INTEGER DEFAULT 1` (위험성 인지 플래그: 비가역 변이 허용 승인)
+       - `reason TEXT` (예: "Herdr-Schengen skill mirror to ~/.agents and ~/.gemini")
+       - `created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`
+    2. **TUI 원클릭 "Always Allow This Pattern (전역 화이트리스트 등록)" 액션**:
+       - 에스컬레이션 모달에서 인간이 단순히 1회 승인(`Allow once`)하는 것을 넘어, **"Always Allow Pattern (`a`)"** 키를 누르면:
+         • 현재 명령의 소스/타깃 경로를 추상화한 정규화 패턴 또는 원문을 `command_allowlist`에 즉시 등록.
+         • 이후 동일 패턴의 `rsync` 미러링 명령 발생 시 Gatekeeper가 개입하지 않고 **Fast-Track AST / Allowlist Bypass로 즉시 자율 승인**.
+    3. **엄격한 바운딩 가드레일 (Safety Invariants)**:
+       - **Strict Source/Dest Anchoring**: 아무 rsync나 풀리는 것이 아니라, 소스가 현재 신뢰 저장소(`~/code/...`)이고 목적지가 공인된 에이전트 스킬 디렉터리(`~/.agents/...`, `~/.gemini/...`)인 경우에만 패턴 매칭 허용.
+       - **Destructive Flag 금지**: `--delete`, `rm`, `sudo` 등 파괴적 플래그가 추가된 변형 체인은 동일 패턴으로 인정하지 않고 차단 (Fail-Closed).
+    4. **TUI 화이트리스트 매니저 뷰 (`CommandAllowlistModal`)**:
+       - `url_policy_rules`와 유사하게 등록된 명령어 패턴 목록을 대소문자 무시 알파벳순/카테고리별로 열람, 검색, 삭제(Revoke)할 수 있는 관리 화면 제공.
 
 [] [Deferred/OpenCode] OpenCode 보조 지침 전달 큐, 다이얼로그 디바운스 및 배치 Defer UX 개선 (#3615/#3623/#3636 후속):
   - 1) **지침 전달 큐 (Instruction Queue)**: Bubble Tea 모달 상태에서 `send-text` 무효화 대응을 위해 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
