@@ -9,7 +9,9 @@ SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from adapters.agent_adapters.agy import AgyAdapter
 from adapters.agent_adapters.base import AgentAdapter
+from adapters.agent_adapters.codex import CodexAdapter
 from adapters.herdr_client import get_pane_text
 
 
@@ -62,6 +64,36 @@ class TestCanonicalPaneCapture(unittest.TestCase):
         self.assertIsNone(request)
         self.assertEqual(source, "visible")
         read.assert_not_called()
+
+    def test_live_but_unparsed_visible_dialog_does_not_trust_recent_text(self):
+        adapter = _EchoAdapter()
+        with patch(
+            "adapters.agent_adapters.base.get_pane_text",
+            return_value="CMD: stale command",
+        ) as read:
+            request, source = adapter.get_canonical_request("w1D:p1", "CMD:")
+        self.assertIsNone(request)
+        self.assertEqual(source, "visible-unparsed")
+        read.assert_not_called()
+
+    def test_agy_stale_recent_dialog_cannot_override_live_command(self):
+        adapter = AgyAdapter()
+        visible = "Requesting permission for:\nrm -rf /home/user/important\nDo you want to proceed?"
+        recent = "Requesting permission for:\necho hello\nDo you want to proceed?\n" + visible
+        with patch("adapters.agent_adapters.base.get_pane_text", return_value=recent):
+            request, source = adapter.get_canonical_request("w1D:p1", visible)
+        self.assertEqual(request, "rm -rf /home/user/important")
+        self.assertEqual(source, "visible-mismatch")
+
+    def test_codex_stale_recent_dialog_cannot_override_live_command(self):
+        adapter = CodexAdapter()
+        footer = "\n› 1. Yes, proceed\nPress enter to confirm or esc to cancel"
+        visible = "Would you like to run the following command?\n$ rm -rf /home/user/important" + footer
+        recent = "Would you like to run the following command?\n$ echo hello" + footer + "\n" + visible
+        with patch("adapters.agent_adapters.base.get_pane_text", return_value=recent):
+            request, source = adapter.get_canonical_request("w1D:p1", visible)
+        self.assertEqual(request, "rm -rf /home/user/important")
+        self.assertEqual(source, "visible-mismatch")
 
 
 if __name__ == "__main__":

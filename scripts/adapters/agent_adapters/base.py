@@ -8,6 +8,7 @@ schengen_watcher.py (Open/Closed Principle).
 from typing import Optional
 
 from adapters.herdr_client import get_pane_text
+from adapters.request_match import same_request
 
 # Sentinel `reason` returned by `inject_approval` when the live permission dialog
 # trampolined to a DIFFERENT request than `req_cmd` while the caller was evaluating
@@ -77,11 +78,19 @@ class AgentAdapter:
         ):
             return None, "visible"
 
+        # A rolling recent buffer can contain an older, already-dismissed
+        # permission dialog. Never let that text select a different request
+        # merely because the visible pane proves *some* dialog is live.
+        if not visible_request:
+            return None, "visible-unparsed"
+
         command_text = get_pane_text(pane_id, lines=80, source="recent-unwrapped")
         if command_text:
             request = self.get_pending_request(pane_id, command_text)
-            if request:
+            if request and same_request(request, visible_request):
                 return request, "recent-unwrapped"
+            if request:
+                return visible_request, "visible-mismatch"
         return visible_request, "visible-fallback"
 
     def dialog_is_live(self, visible_text: str) -> bool:
