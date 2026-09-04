@@ -63,6 +63,8 @@ class TestUrlAllowlist(unittest.TestCase):
             "curl https://developers.openai.com https://example.com",
             "network_access api.developers.openai.com",
             "curl https://developers.openai.com.evil.example",
+            "curl https://developers.openai.com:8443/file",
+            "curl https://developers.openai.com:notaport/file",
         ):
             with self.subTest(command=command):
                 self.assertFalse(guard_db.check_url_allowlist(command)[0])

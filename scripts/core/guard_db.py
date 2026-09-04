@@ -798,6 +798,11 @@ def check_url_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
     parsed_urls = [urlsplit(url) for url in urls]
     if any(parsed.username or parsed.password for parsed in parsed_urls):
         return False, None
+    try:
+        if any(parsed.port is not None for parsed in parsed_urls):
+            return False, None
+    except ValueError:
+        return False, None
     hosts = {(parsed.hostname or "").rstrip(".").lower() for parsed in parsed_urls}
     if not hosts or "" in hosts or not hosts.issubset(allowed):
         return False, None
