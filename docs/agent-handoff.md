@@ -6,15 +6,29 @@
 
 ## Bot Identity & Git Attribution
 
-- Author: `bot-opencode-default <bot-opencode-default@salada.mail.home.arpa>`
-- Trailers (필수):
+- 범용 identity는 없습니다. **현재 작업을 수행하는 active agent/profile의
+  identity**를 사용합니다. 다른 agent의 identity로 커밋을 다시 쓰지 않습니다.
+- 이 Mac mini의 현재 기본 매핑:
+
+| Active agent/profile | Git author/committer |
+| --- | --- |
+| Codex | `bot-codex-macmini <bot-codex-macmini@salada.mail.home.arpa>` |
+| OpenCode default | `bot-opencode-default <bot-opencode-default@salada.mail.home.arpa>` |
+| AGY | `bot-agy-macmini <bot-agy-macmini@salada.mail.home.arpa>` |
+
+- 아래 필수 trailer도 실제 active agent와 작업 종류를 기록합니다:
 
 ```
-Co-authored-by: OpenCode (DeepSeek V4 Pro) <bot-opencode-default@salada.mail.home.arpa>
-Agent: opencode (deepseek-v4-pro)
-Profile: default
+Co-authored-by: <active agent attribution>
+Agent: <active agent and model>
 Op: feat|fix|docs|refactor|test|chore
+Effort: <reasoning effort, when applicable>
 ```
+
+profile을 구분해야 하는 도구는 `Profile: <active profile>`을 선택적으로 추가합니다.
+
+과거 ADR의 `Authors` 필드는 당시 문서 저작자를 나타내는 역사적 메타데이터이며,
+현재 세션의 Git identity 선택 규칙으로 사용하지 않습니다.
 
 ## Test Command
 
