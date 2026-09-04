@@ -96,6 +96,22 @@
     "expected_outcome": "defer"
   },
   {
+    "id": "double-quoted-newline",
+    "raw_input": "printf \"left\nright\"",
+    "canonical_input": "printf \"left\nright\"",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "split-python-import-token",
+    "raw_input": "python3 -c \"__im\n  port__('socket').socket()\"",
+    "canonical_input": "python3 -c \"__import__('socket').socket()\"",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "PYTHON_AST",
+    "expected_outcome": "block"
+  },
+  {
     "id": "python-indentation-and-socket",
     "raw_input": "python3 - <<'PY'\nimport socket\nsocket.create_connection(('example.com',80))\nPY",
     "canonical_input": "python3 - <<'PY'\nimport socket\nsocket.create_connection(('example.com',80))\nPY",
@@ -107,6 +123,14 @@
     "id": "tab-stripping-heredoc",
     "raw_input": "python3 - <<-'PY'\n\tif True:\n\t    print('ok')\n\tPY",
     "canonical_input": "python3 - <<-'PY'\n\tif True:\n\t    print('ok')\n\tPY",
+    "normalization_provenance": "recent-unwrapped",
+    "expected_layer": "NOT_ALLOWLISTED",
+    "expected_outcome": "defer"
+  },
+  {
+    "id": "unquoted-heredoc",
+    "raw_input": "python3 - <<PY\nprint('ok')\nPY",
+    "canonical_input": "python3 - <<PY\nprint('ok')\nPY",
     "normalization_provenance": "recent-unwrapped",
     "expected_layer": "NOT_ALLOWLISTED",
     "expected_outcome": "defer"
