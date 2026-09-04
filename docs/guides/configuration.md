@@ -80,7 +80,7 @@ approval:
 | `/approve [id] [reason]` / `/reject [id] [reason]` (single), or an exact English/Korean directive such as `approve`, `go ahead`, `승인`, `진행해`, `reject`, `거절` | **Deterministic and binding** for the current command FIFO head. Uses the verified adapter injection path without an LLM call. Broad or ambiguous chat (including `전체 승인`) remains advisory. | `approver="human-tui"` |
 | `/approve-batch` / `/reject-batch` | **Deterministic, unconditional**. Resolves the FIFO head batch directly (verified-inject path, no LLM gate) and seeds the human-approval trust window. | `approver="human-tui"` |
 | `/allow <pattern> [description]` (and `/allow-last`) | **Persistent allowlist**. A full-match regex rule reviewed by the human; applies from then on (revocable, never deleted). | `created_by="human-tui"` |
-| `/allow-url <hostname-or-origin> [description]` | **Persistent exact-host policy for read-only network access**. Applies to `network_access`, curl GET/stdout, and wget stdout fetches; upload/auth/output flags, mixed hosts, mutation, and non-read-only pipelines never match. Use `/allow-url-list` to inspect and `/revoke-url <id-or-host>` to revoke. | `created_by="human-tui"` |
+| `/allow-url <hostname-or-origin> [description]` | **Persistent exact-host policy for read-only network access**. Applies to `network_access` and curl GET/stdout; upload/auth/output/redirect flags, mixed hosts, mutation, and non-read-only pipelines never match. Use `/allow-url-list` to inspect and `/revoke-url <id-or-host>` to revoke. | `created_by="human-tui"` |
 
 The former `approve_advisory` switch was removed by ADR-015. Ordinary prose is
 still sent to the Gatekeeper as advice; only the closed directive grammar above

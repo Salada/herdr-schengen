@@ -44,6 +44,9 @@ class TestHumanDirectiveParser(unittest.TestCase):
             "/approve-batch",
             "/allow-url developers.openai.com",
             "please investigate why approval failed",
+            "승인, 하지마",
+            "승인, 아니야",
+            "yes, but actually no",
         ):
             with self.subTest(text=text):
                 self.assertIsNone(parse_human_directive(text, 45))

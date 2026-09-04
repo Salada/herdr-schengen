@@ -18,6 +18,7 @@ _APPROVE_PHRASES = frozenset(
     {
         "approve",
         "approve it",
+        "approve it that's fine",
         "allow",
         "allow it",
         "proceed",
@@ -78,6 +79,7 @@ _REJECT_PHRASES = frozenset(
 
 def _normalize_phrase(text: str) -> str:
     text = re.sub(r"[.!。！]+$", "", (text or "").strip().casefold())
+    text = re.sub(r"[,，]\s*", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -98,11 +100,8 @@ def parse_human_directive(text: str, active_escalation_id: Optional[int] = None)
         return HumanDirective(action, escalation_id, feedback, "slash")
 
     phrase = _normalize_phrase(stripped)
-    head, separator, _tail = phrase.partition(",")
-    candidate = head.strip() if separator else phrase.replace(",", " ")
-    candidate = re.sub(r"\s+", " ", candidate)
-    if candidate in _APPROVE_PHRASES:
+    if phrase in _APPROVE_PHRASES:
         return HumanDirective("approve", active_escalation_id, stripped, "free-text")
-    if candidate in _REJECT_PHRASES:
+    if phrase in _REJECT_PHRASES:
         return HumanDirective("reject", active_escalation_id, stripped, "free-text")
     return None

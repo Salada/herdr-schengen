@@ -587,20 +587,69 @@ def check_persisted_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
 
 
 _URL_READ_PIPE_COMMANDS = frozenset({"grep", "head", "rg", "sed", "tail"})
-_CURL_EGRESS_FLAGS = frozenset({
-    "-d", "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode",
+_CURL_SAFE_SHORT_FLAGS = frozenset("fsSIi46q")
+_CURL_SAFE_LONG_FLAGS = frozenset({
+    "--compressed", "--fail", "--fail-with-body", "--head", "--http1.1",
+    "--http2", "--http2-prior-knowledge", "--include", "--ipv4", "--ipv6",
+    "--no-progress-meter", "--show-error", "--silent",
 })
-_CURL_EGRESS_PREFIXES = (
-    "--data=", "--data-ascii=", "--data-binary=", "--data-raw=", "--data-urlencode=",
-    "--form=", "--form-string=", "--upload-file=", "--request=", "--header=",
-    "--user=", "--cookie=", "--cert=", "--key=", "--output=", "--config=", "--netrc-file=",
-)
-_CURL_OTHER_EGRESS_FLAGS = frozenset({
-    "-F", "--form", "--form-string", "-T", "--upload-file", "-X", "--request",
-    "-H", "--header", "-u", "--user", "-b", "--cookie", "--cert", "--key",
-    "-o", "--output", "-O", "--remote-name", "-K", "--config", "--netrc",
+_CURL_SAFE_VALUE_FLAGS = frozenset({
+    "--connect-timeout", "--max-time", "--retry", "--retry-delay",
+    "--retry-max-time", "--url",
 })
-_WGET_EGRESS_PREFIXES = ("--post-data", "--post-file", "--method", "--header", "--user", "--password", "--certificate", "--private-key")
+
+
+def _readonly_curl_urls(tokens: list[str]) -> Optional[list[str]]:
+    """Parse a narrow curl GET/stdout argv; unknown flags fail closed."""
+    urls, index = [], 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            urls.extend(tokens[index + 1:])
+            break
+        if token.startswith("--"):
+            option, equals, value = token.partition("=")
+            if option in _CURL_SAFE_LONG_FLAGS and not equals:
+                index += 1
+                continue
+            if option in _CURL_SAFE_VALUE_FLAGS:
+                if not equals:
+                    index += 1
+                    if index >= len(tokens):
+                        return None
+                    value = tokens[index]
+                if option == "--url":
+                    urls.append(value)
+                index += 1
+                continue
+            return None
+        if token.startswith("-") and token != "-":
+            flags = token[1:]
+            if flags.startswith("m") and flags[1:].replace(".", "", 1).isdigit():
+                index += 1
+                continue
+            if not flags or any(flag not in _CURL_SAFE_SHORT_FLAGS for flag in flags):
+                return None
+            index += 1
+            continue
+        urls.append(token)
+        index += 1
+    return urls
+
+
+def _is_readonly_url_pipe_segment(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name
+    if executable not in _URL_READ_PIPE_COMMANDS:
+        return False
+    if executable == "sed":
+        return len(tokens) == 3 and tokens[1] == "-n" and bool(
+            re.fullmatch(r"\d+(?:,\d+)?p", tokens[2])
+        )
+    if executable == "rg" and any(token == "--pre" or token.startswith("--pre=") for token in tokens[1:]):
+        return False
+    return True
 
 
 def normalize_url_hostname(host_or_url: str) -> str:
@@ -699,13 +748,15 @@ def revoke_url_allowlist(target, revoked_by: str = "human-tui") -> int:
 
 
 def check_url_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
-    """Allow only read-only curl/wget pipelines whose every URL host is listed."""
+    """Allow only narrow curl GET/stdout pipelines whose every host is listed."""
     init_db()
     with get_db_connection() as conn:
         allowed = {row["hostname"] for row in conn.execute("SELECT hostname FROM url_allowlist WHERE is_active = 1")}
     if not allowed:
         return False, None
 
+    if any(char in cmd_str for char in ("$", "`", "\n", "\r")):
+        return False, None
     try:
         lexer = shlex.shlex(cmd_str, posix=True, punctuation_chars="|;&<>")
         lexer.whitespace_split = True
@@ -735,31 +786,19 @@ def check_url_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
         return False, None
     segments.append(current)
     executable = Path(segments[0][0]).name
-    if executable not in {"curl", "wget"}:
+    if executable != "curl":
         return False, None
     for segment in segments[1:]:
-        if not segment or Path(segment[0]).name not in _URL_READ_PIPE_COMMANDS:
+        if not _is_readonly_url_pipe_segment(segment):
             return False, None
 
-    first = segments[0]
-    if executable == "curl":
-        for token in first[1:]:
-            if token in _CURL_EGRESS_FLAGS or token in _CURL_OTHER_EGRESS_FLAGS or token.startswith(_CURL_EGRESS_PREFIXES):
-                return False, None
-            if token.startswith("-") and not token.startswith("--") and any(flag in token[1:] for flag in "dFTXHuboOK"):
-                return False, None
-    else:
-        if any(token.startswith(_WGET_EGRESS_PREFIXES) for token in first[1:]):
-            return False, None
-        if not any(token == "--output-document=-" for token in first[1:]) and not any(
-            first[index:index + 2] == ["-O", "-"] for index in range(len(first) - 1)
-        ):
-            return False, None
-
-    urls = [token for token in first[1:] if re.match(r"(?i)^https?://", token)]
-    if not urls:
+    urls = _readonly_curl_urls(segments[0])
+    if not urls or any(not re.match(r"(?i)^https?://", url) for url in urls):
         return False, None
-    hosts = {(urlsplit(url).hostname or "").rstrip(".").lower() for url in urls}
+    parsed_urls = [urlsplit(url) for url in urls]
+    if any(parsed.username or parsed.password for parsed in parsed_urls):
+        return False, None
+    hosts = {(parsed.hostname or "").rstrip(".").lower() for parsed in parsed_urls}
     if not hosts or "" in hosts or not hosts.issubset(allowed):
         return False, None
     return True, f"Matched read-only URL host policy: {', '.join(sorted(hosts))}"

@@ -3224,7 +3224,7 @@ class SchengenTUIApp(App):
                     return
                 self._write(
                     f"[bold green]✅ Read-only URL host policy added:[/] "
-                    f"[white]{rich_escape(hostname)}[/] [dim](exact host; curl/wget GET only)[/]"
+                    f"[white]{rich_escape(hostname)}[/] [dim](exact host; curl GET/stdout only)[/]"
                 )
                 self.update_radar_data(force=True)
                 return
