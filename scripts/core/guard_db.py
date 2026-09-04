@@ -4,6 +4,7 @@ Stores:
 1. audit_logs: Every detected permission request, decision, safety check, and timestamp.
 2. pattern_stats: Aggregated frequency and approval count per normalized command template.
 3. user_allowlist: Persisted custom approval rules reviewed by human engineers.
+4. url_allowlist: Exact-host rules for explicit read-only network approval.
 
 Database location: ~/.local/state/herdr-schengen/schengen_history.db (XDG compliant, no skill pollution)
 """
@@ -11,6 +12,7 @@ Database location: ~/.local/state/herdr-schengen/schengen_history.db (XDG compli
 import json
 import os
 import re
+import shlex
 import sqlite3
 import threading
 import time
@@ -18,6 +20,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 DB_DIR = Path.home() / ".local" / "state" / "herdr-schengen"
 DB_PATH = DB_DIR / "schengen_history.db"
@@ -129,6 +132,17 @@ def init_db():
             is_active INTEGER DEFAULT 1,
             created_by TEXT DEFAULT 'human-tui', -- CUD provenance (issue #91)
             updated_at TEXT,
+            revoked_at TEXT,
+            revoked_by TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS url_allowlist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hostname TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_at TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            created_by TEXT DEFAULT 'human-tui',
             revoked_at TEXT,
             revoked_by TEXT
         );
@@ -570,6 +584,185 @@ def check_persisted_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
             if re.fullmatch(pat, cmd_str):
                 return True, f"Matched User Allowlist: {row['description'] or pat}"
     return False, None
+
+
+_URL_READ_PIPE_COMMANDS = frozenset({"grep", "head", "rg", "sed", "tail"})
+_CURL_EGRESS_FLAGS = frozenset({
+    "-d", "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode",
+})
+_CURL_EGRESS_PREFIXES = (
+    "--data=", "--data-ascii=", "--data-binary=", "--data-raw=", "--data-urlencode=",
+    "--form=", "--form-string=", "--upload-file=", "--request=", "--header=",
+    "--user=", "--cookie=", "--cert=", "--key=", "--output=", "--config=", "--netrc-file=",
+)
+_CURL_OTHER_EGRESS_FLAGS = frozenset({
+    "-F", "--form", "--form-string", "-T", "--upload-file", "-X", "--request",
+    "-H", "--header", "-u", "--user", "-b", "--cookie", "--cert", "--key",
+    "-o", "--output", "-O", "--remote-name", "-K", "--config", "--netrc",
+})
+_WGET_EGRESS_PREFIXES = ("--post-data", "--post-file", "--method", "--header", "--user", "--password", "--certificate", "--private-key")
+
+
+def normalize_url_hostname(host_or_url: str) -> str:
+    """Return a lower-case exact hostname, rejecting paths and wildcard scope."""
+    value = (host_or_url or "").strip()
+    if not value or "*" in value or any(ch.isspace() for ch in value):
+        raise ValueError("URL policy requires one exact hostname or URL origin")
+    parsed = urlsplit(value if "://" in value else f"//{value}")
+    if parsed.scheme and parsed.scheme.lower() not in {"http", "https"}:
+        raise ValueError("URL policy supports only HTTP(S) origins")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("URL policy accepts a hostname or URL origin, not credentials/query/fragment")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Invalid URL policy port") from exc
+    if port is not None:
+        raise ValueError("URL policy is hostname-scoped; omit the port")
+    if parsed.path not in ("", "/"):
+        raise ValueError("URL policy is hostname-scoped; omit the URL path")
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    labels = hostname.split(".")
+    if (
+        not hostname
+        or len(hostname) > 253
+        or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)
+    ):
+        raise ValueError("Invalid URL policy hostname")
+    return hostname
+
+
+def add_url_to_allowlist(host_or_url: str, description: str = "", created_by: str = "human-tui") -> str:
+    """Persist an explicit exact-host policy for read-only HTTP fetches."""
+    hostname = normalize_url_hostname(host_or_url)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    init_db()
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO url_allowlist (hostname, description, created_at, is_active, created_by)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(hostname) DO UPDATE SET
+                is_active = 1, description = excluded.description,
+                created_by = excluded.created_by, revoked_at = NULL, revoked_by = NULL
+            """,
+            (hostname, description, now_iso, created_by),
+        )
+        conn.commit()
+    record_audit_log(
+        pane_id="tui", raw_command=hostname, decision="ALLOWLIST_BYPASS",
+        safety_reason=f"Added read-only URL host rule: {hostname}",
+        agent_kind=str(created_by or "human-tui"), decision_layer="ALLOWLIST",
+        origin="H", consequence="NONE", mechanism="url-allowlist-create",
+        scope_context="GLOBAL_RULE",
+    )
+    return hostname
+
+
+def list_url_allowlist() -> list[dict]:
+    init_db()
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, hostname, description, created_by, created_at FROM url_allowlist WHERE is_active = 1 ORDER BY id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def revoke_url_allowlist(target, revoked_by: str = "human-tui") -> int:
+    """Soft-revoke an exact-host URL rule by id or hostname."""
+    init_db()
+    if str(target).isdigit():
+        where, value = "id = ?", int(target)
+    else:
+        where, value = "hostname = ?", normalize_url_hostname(str(target))
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db_connection() as conn:
+        row = conn.execute(
+            f"SELECT hostname FROM url_allowlist WHERE {where} AND is_active = 1", (value,)
+        ).fetchone()
+        if not row:
+            return 0
+        hostname = row["hostname"]
+        cursor = conn.execute(
+            f"UPDATE url_allowlist SET is_active = 0, revoked_at = ?, revoked_by = ? WHERE {where} AND is_active = 1",
+            (now_iso, revoked_by, value),
+        )
+        conn.commit()
+    record_audit_log(
+        pane_id="tui", raw_command=hostname, decision="MANUAL_DELEGATED",
+        safety_reason=f"Revoked read-only URL host rule: {hostname}",
+        agent_kind=str(revoked_by or "human-tui"), decision_layer="ALLOWLIST",
+        origin="H", consequence="NONE", mechanism="url-allowlist-revoke",
+        scope_context="GLOBAL_RULE",
+    )
+    return cursor.rowcount
+
+
+def check_url_allowlist(cmd_str: str) -> tuple[bool, Optional[str]]:
+    """Allow only read-only curl/wget pipelines whose every URL host is listed."""
+    init_db()
+    with get_db_connection() as conn:
+        allowed = {row["hostname"] for row in conn.execute("SELECT hostname FROM url_allowlist WHERE is_active = 1")}
+    if not allowed:
+        return False, None
+
+    try:
+        lexer = shlex.shlex(cmd_str, posix=True, punctuation_chars="|;&<>")
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return False, None
+    if not tokens or any(token in {"&&", "||", ";", "&", "<", ">", ">>", "<<"} for token in tokens):
+        return False, None
+
+    if len(tokens) == 2 and tokens[0] == "network_access":
+        try:
+            host = normalize_url_hostname(tokens[1])
+        except ValueError:
+            return False, None
+        return (True, f"Matched read-only URL host policy: {host}") if host in allowed else (False, None)
+
+    segments, current = [], []
+    for token in tokens:
+        if token == "|":
+            if not current:
+                return False, None
+            segments.append(current)
+            current = []
+        else:
+            current.append(token)
+    if not current:
+        return False, None
+    segments.append(current)
+    executable = Path(segments[0][0]).name
+    if executable not in {"curl", "wget"}:
+        return False, None
+    for segment in segments[1:]:
+        if not segment or Path(segment[0]).name not in _URL_READ_PIPE_COMMANDS:
+            return False, None
+
+    first = segments[0]
+    if executable == "curl":
+        for token in first[1:]:
+            if token in _CURL_EGRESS_FLAGS or token in _CURL_OTHER_EGRESS_FLAGS or token.startswith(_CURL_EGRESS_PREFIXES):
+                return False, None
+            if token.startswith("-") and not token.startswith("--") and any(flag in token[1:] for flag in "dFTXHuboOK"):
+                return False, None
+    else:
+        if any(token.startswith(_WGET_EGRESS_PREFIXES) for token in first[1:]):
+            return False, None
+        if not any(token == "--output-document=-" for token in first[1:]) and not any(
+            first[index:index + 2] == ["-O", "-"] for index in range(len(first) - 1)
+        ):
+            return False, None
+
+    urls = [token for token in first[1:] if re.match(r"(?i)^https?://", token)]
+    if not urls:
+        return False, None
+    hosts = {(urlsplit(url).hostname or "").rstrip(".").lower() for url in urls}
+    if not hosts or "" in hosts or not hosts.issubset(allowed):
+        return False, None
+    return True, f"Matched read-only URL host policy: {', '.join(sorted(hosts))}"
 
 
 # INV-PL-4: the "matches-everything" family is fully rejected at write time

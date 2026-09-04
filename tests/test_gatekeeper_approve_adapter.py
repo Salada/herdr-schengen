@@ -139,6 +139,24 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
         mock_resolve.assert_not_called()
         mock_rec.assert_not_called()
 
+    def test_reject_error_when_verified_injection_fails(self):
+        esc_id = self._seed_escalation()
+        fake_fail = _FakeAdapter(rej_ok=False, rej_reason="dialog changed")
+        with patch("tools.schengen_agent_llm.resolve_escalation") as mock_resolve, patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_rec, patch("tools.schengen_agent_llm._get_escalation_row", return_value=self._esc_row()), patch(
+            "tools.schengen_agent_llm.get_adapter", return_value=fake_fail
+        ):
+            out = json.loads(execute_tool_call(
+                "reject_escalation",
+                {"escalation_id": esc_id, "english_feedback": "no", "directive": True},
+            ))
+        self.assertEqual(out["status"], "error")
+        self.assertIn("rejection injection failed", out["error"])
+        mock_resolve.assert_not_called()
+        mock_rec.assert_not_called()
+        self.assertTrue(any(row["id"] == esc_id for row in guard_db.get_pending_escalations()))
+
     def test_approve_channel_approve_success_skips_keystroke(self):
         esc_id = self._seed_escalation()
         fake_ch = _FakeAdapter(ch_ok=True, ch_reason="permission.reply decision written")

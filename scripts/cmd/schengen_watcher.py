@@ -1629,6 +1629,8 @@ def main():
                     )
                     if not result[0] and result[2] == DecisionLayer.NOT_ALLOWLISTED:
                         is_whitelisted, wl_reason = check_persisted_allowlist(req)
+                        if not is_whitelisted:
+                            is_whitelisted, wl_reason = guard_db.check_url_allowlist(req)
                     else:
                         is_whitelisted, wl_reason = False, None
                     if is_whitelisted:
