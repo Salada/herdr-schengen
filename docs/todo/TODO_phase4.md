@@ -47,10 +47,11 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 6) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
 
 4. 🔬 **[Track 4 — 딥 리서치 & 장기 안정성 (Research & Hardening)]**:
-   - 1) **LLM Base URL 엔드포인트 서버 장애 감지·서킷 브레이커 & 자동 복구(Auto-Restart)** 메커니즘.
-   - 2) **비가역적 상태 변경 명령 리서치** (`make`, `kubectl`, `magick` 에셋 생성 등 Fast-Track/Sandbox 정책).
-   - 3) **Codex 지원 잔여 과제** (network/edit 템플릿 live 검증, reject 경로, Ctrl+A fullscreen).
-   - 4) **Context Compact 및 Python 관례 기반 테스트 코드 디렉터리 재배치**.
+   - 1) **[Priority: Mid-High] Gatekeeper 자가 개선(Self-Improving) 프롬프트 & 런타임 MEMORY.md 기반 편향성 동적 조절 엔진** (Hermes/Claude Code 스타일 벤치마킹, gpt-5.6-sol med+ 권장).
+   - 2) **LLM Base URL 엔드포인트 서버 장애 감지·서킷 브레이커 & 자동 복구(Auto-Restart)** 메커니즘.
+   - 3) **비가역적 상태 변경 명령 리서치** (`make`, `kubectl`, `magick` 에셋 생성 등 Fast-Track/Sandbox 정책).
+   - 4) **Codex 지원 잔여 과제** (network/edit 템플릿 live 검증, reject 경로, Ctrl+A fullscreen).
+   - 5) **Context Compact 및 Python 관례 기반 테스트 코드 디렉터리 재배치**.
 
 ---
 
@@ -269,6 +270,31 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 ---
 
 ### [Track 4] 딥 리서치 & 장기 안정성 (Research & Hardening)
+
+[] [Idea/Priority:Mid-High] Gatekeeper 자가 개선(Self-Improving) 프롬프트 및 런타임 MEMORY.md 기반 편향성 동적 조절 엔진 (Hermes 스타일):
+  - Model Requirement: **gpt-5.6-sol (medium 이상)** 깊은 추론 모델 기반 기획/설계 권장.
+  - Priority: **중상 (Medium-High)**.
+  - Context & Motivation:
+    • Hermes의 자가 개선 프롬프트/메모리 체계처럼, 게이트키퍼가 실시간 심사 과정에서 발생한 과잉 거절(Over-rejection)이나 과잉 완화(Rubber-stamping) 피드백을 학습하여 편향성(Approval Bias)을 스스로 정밀 보정할 수 있는 메커니즘 필요.
+    • 매번 하드코딩된 프롬프트나 ADR을 수정하는 대신, 런타임에 동적으로 로드되고 커스텀 가능한 지침 및 메모리 체계를 통해 게이트키퍼의 판단 기조를 유연하게 조율.
+  - Core Architecture & Reference Research Directions:
+    1. **런타임 편향성 조절용 `MEMORY.md` (또는 `BIAS_MEMORY.md`) 레퍼런스 및 아키텍처**:
+       - Claude Code 및 Mem0의 `MEMORY.md` / Policy 구조 레퍼런스 차용.
+       - 게이트키퍼 시스템 프롬프트 빌드(`build_system_prompt`) 시, 고정 정적 룰 하단에 사용자 맞춤 및 런타임 학습 지침(`~/.local/state/herdr-schengen/GATEKEEPER_MEMORY.md` 또는 워크스페이스 `.schengen/MEMORY.md`)을 동적으로 주입(Dynamic Context Injection).
+       - 내용 구성:
+         • 현재 편향성 지침 (e.g. "Approve-by-default on routine dev tasks", "Strict verification on external network egress")
+         • 인간 피드백/교정 학습 이력 (e.g. "User approved rsync to ~/.agents: treat as safe mirror in this workspace")
+         • 프로젝트별 선호 및 예외 규정 (Workspace-specific overrides)
+    2. **자가 개선(Self-Improvement) 툴 및 라이프사이클 도구 개발**:
+       - 게이트키퍼/심사 엔진이 호출할 수 있는 메타 도구 설계:
+         • `update_gatekeeper_memory(topic, observation, suggested_rule)`: 인간 지휘관의 오버라이드(`/approve` or `/reject` 전환) 발생 시 원인 분석 후 메모리 업데이트 제안.
+         • `reflect_and_tune_bias(incident_id)`: 인시던트 발생 후 피드백 루프를 돌아 자신의 심사 성향(과도한 깐깐함 vs 방심)을 자가 평가하고 메모리 가이드라인을 미세 조정.
+       - 안전 불변식(Security Guardrails):
+         • 자가 개선 도구가 Tier A Denylist(INV 불변식, `rm -rf`, `sudo` 등)를 무력화하는 룰을 생성하지 못하도록 스키마 검증 및 엄격한 샌드박싱 가드 적용.
+    3. **단계별 추진 계획 (Phase & Implementation)**:
+       - Phase 1 (Reference & Spec): Hermes, Claude Code MEMORY.md, Mem0 policy 추출 메커니즘 벤치마킹 및 포맷 정의.
+       - Phase 2 (Runtime Injection): `schengen_agent_llm.py` 내 `MEMORY.md` 런타임 읽기 및 프롬프트 주입 파이프라인 연결.
+       - Phase 3 (Tool & Curation): TUI에서 메모리 조회/수정 모달 연동 및 인간 승인 기반 자가 개선 툴콜(`propose_memory_update`) 구현.
 
 [] [Research/Stability] LLM Base URL 엔드포인트 서버 상태 이상(Unhealthy/Hang) 감지 및 재시작/복구(Auto-Restart) 로직 분석 및 강화
   - Context & Objective:
