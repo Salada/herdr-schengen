@@ -44,7 +44,8 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 3) **AuditFullscreenModal 교환 뷰(`get_adjudication_exchange`) 전면 연동** 및 `scope_context`(Session vs Global) 메타데이터 감사 레저 반영.
    - 4) **동적 URL / WebSearch (curl, wget) 듀얼 정책(Allowlist & Denylist) 관리** (SQLite `url_policy_rules` + Tool Call + TUI 탭/정렬 뷰).
    - 5) **유저 구성 기반 Fast-Track 확장(`chezmoi status` 등) 및 TUI 자연어 해석 Tool-Call 추가 엔진** (`~/.config/herdr-schengen/fast_track_rules.json` + `add_command_allowlist_rule` 툴).
-   - 6) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
+   - 6) **Herdr Agent Integration으로 Schengen TUI 등록** (Agent: `schengen`, Custom Status Labels & Semantic State Reporting).
+   - 7) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
 
 4. 🔬 **[Track 4 — 딥 리서치 & 장기 안정성 (Research & Hardening)]**:
    - 1) **[EPIC/Priority: Mid-High] Gatekeeper/Judge 프롬프트 외부 파일화 및 `*_PROMPT_OVERRIDE.md` 기반 프롬프트 증강/자가개선 체계** (하드코딩 분리, 3계층 오버라이드, gpt-5.6-sol med+ 권장).
@@ -273,6 +274,31 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
        - **Confirmation & Provenance**: 도구를 통해 룰이 추가되었을 때 TUI 채팅창에 `[Auto-Allow Rule Added: chezmoi status (by human intent)]` 명시적 피드백 출력.
     4. **TUI 화이트리스트 매니저 뷰 (`CommandAllowlistModal`) 연동**:
        - 알파벳순(Case-Insensitive) 정렬, 등록된 커스텀 룰/패턴 목록 열람 및 삭제(Revoke) 지원.
+
+[] [Feature/Herdr] Herdr Agent Integration으로 Schengen TUI 등록 (Agent Name: `schengen`, Custom Status Labels & Semantic Lifecycle Reporting):
+  - Context & Motivation:
+    • 현재 Schengen TUI(`schengen_tui.py`)는 Herdr 환경 내에서 구동되지만, Herdr 입장에서 공식 Agent로 인식되지 않아 Agent View / Workspace Rollup 상에서 전용 상태와 라벨이 노출되지 않음.
+    • Herdr의 공식 Integration 프로토콜([https://herdr.dev/docs/integrations/](https://herdr.dev/docs/integrations/))을 활용하여 Schengen TUI를 하나의 공식 1급 Agent(`schengen`)로 통합.
+    • Herdr Agent View에 `schengen`으로 명확히 식별되고, Gatekeeper/Inspector의 내부 상태에 맞춘 Custom Status Label 및 시맨틱 라이프사이클(`working`, `idle`, `blocked`)이 매끄럽게 브로드캐스트되도록 개선.
+  - Core Architecture & Herdr Integration Protocol:
+    1. **환경 감지 및 시맨틱 라이프사이클 리포팅 (`pane report-agent`)**:
+       - `HERDR_ENV=1` 및 `HERDR_PANE_ID`, `HERDR_BIN_PATH` 존재 시 활성화 (외부 실행 시 no-op 안전 보장).
+       - 시작 시 TUI가 `herdr pane report-agent "$HERDR_PANE_ID" --source custom:schengen --agent schengen --state idle` 등록.
+       - 종료 시 `herdr pane release-agent "$HERDR_PANE_ID" --source custom:schengen --agent schengen` 호출로 권한 해제.
+    2. **동적 상태 전이 (Semantic State & Message Mapping)**:
+       - `idle`: 심사 대기열이 비어 있거나 유휴 모니터링 상태 (`--state idle`).
+       - `working`: Gatekeeper / Cloud Judge 자율 검사 및 백그라운드 툴콜 수행 중 (`--state working`).
+       - `blocked`: 자율 승인 불가로 인간 지휘관의 에스컬레이션 모달 승인 대기 중 (`--state blocked --message "Escalation #ID awaiting human decision"`).
+    3. **Custom Status Labels & Metadata 부착 (`pane report-metadata`)**:
+       - Herdr 공식 메타데이터 API(`herdr pane report-metadata`)를 활용하여 TUI 뷰포트 및 Herdr UI에 커스텀 라벨 부착:
+         • `--display-agent "Schengen: SmartGate"`
+         • `--title "Herdr Schengen Security Gatekeeper"`
+         • `--state-label working="evaluating commands..."`
+         • `--state-label blocked="awaiting human approval"`
+         • `--state-label idle="guarding terminal"`
+         • `--token active_slot="#4313"` (현재 심사 대상 ID 등 메트릭 토큰 실시간 갱신)
+    4. **TUI 메인루프 및 이벤트 핸들러 연동 (`schengen_tui.py`)**:
+       - TUI의 상태 머신 전이(Active Escalation 인입, 큐 전환, 승인/거절 처리 완료) 시점에 비동기로 Herdr CLI 리포트 전송.
 
 [] [Deferred/OpenCode] OpenCode 보조 지침 전달 큐, 다이얼로그 디바운스 및 배치 Defer UX 개선 (#3615/#3623/#3636 후속):
   - 1) **지침 전달 큐 (Instruction Queue)**: Bubble Tea 모달 상태에서 `send-text` 무효화 대응을 위해 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
