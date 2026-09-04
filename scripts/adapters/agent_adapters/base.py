@@ -8,6 +8,7 @@ schengen_watcher.py (Open/Closed Principle).
 from typing import Optional
 
 from adapters.herdr_client import get_pane_text
+from adapters.request_match import same_request
 
 # Sentinel `reason` returned by `inject_approval` when the live permission dialog
 # trampolined to a DIFFERENT request than `req_cmd` while the caller was evaluating
@@ -62,6 +63,35 @@ class AgentAdapter:
         parsing. The default is the pane-text parser; adapters with a structured
         source override this."""
         return self.parse_permission_request(visible_text)
+
+    def get_canonical_request(self, pane_id: str, visible_text: str):
+        """Return ``(request, source)`` using Herdr's soft-wrap-aware text first.
+
+        ``visible_text`` remains authoritative for dialog liveness.  Command
+        parsing prefers ``recent-unwrapped`` because Herdr can distinguish a
+        terminal soft wrap from a real newline; adapters cannot recover that
+        distinction after a plain visible-buffer read.
+        """
+        visible_request = self.get_pending_request(pane_id, visible_text)
+        if not visible_request and not (
+            self.dialog_is_live(visible_text) or self.question_is_live(visible_text)
+        ):
+            return None, "visible"
+
+        # A rolling recent buffer can contain an older, already-dismissed
+        # permission dialog. Never let that text select a different request
+        # merely because the visible pane proves *some* dialog is live.
+        if not visible_request:
+            return None, "visible-unparsed"
+
+        command_text = get_pane_text(pane_id, lines=80, source="recent-unwrapped")
+        if command_text:
+            request = self.get_pending_request(pane_id, command_text)
+            if request and same_request(request, visible_request):
+                return request, "recent-unwrapped"
+            if request:
+                return visible_request, "visible-mismatch"
+        return visible_request, "visible-fallback"
 
     def dialog_is_live(self, visible_text: str) -> bool:
         """True only if the ACTIVE (bottom/focused) dialog anchor is present in the
@@ -120,6 +150,14 @@ class AgentAdapter:
         (keep PENDING, fail-closed).
         """
         return False, INJECT_REJECT_NOT_IMPLEMENTED
+
+
+def canonical_request(adapter, pane_id: str, visible_text: str):
+    """Compatibility wrapper for adapters and lightweight test doubles."""
+    reader = getattr(adapter, "get_canonical_request", None)
+    if callable(reader):
+        return reader(pane_id, visible_text)
+    return adapter.get_pending_request(pane_id, visible_text), "visible-fallback"
 
 
 _REGISTRY = {}
