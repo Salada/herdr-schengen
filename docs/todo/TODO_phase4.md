@@ -150,21 +150,53 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     • Claude, Codex, OpenCode와 같은 주력 에이전트들이 공통 채택하는 **Compaction(압축/요약) 메커니즘**을 Herdr-Schengen에 맞춤형으로 구현.
     • 핵심 철학: **"TUI는 토큰을 아끼기 위한 인터페이스이다. 화면에 렌더링되는 장문/한글 텍스트가 내부 LLM 히스토리 토큰으로 고스란히 누적되어서는 안 된다."**
   - Core Architecture & Token Minimization Dimensions:
-    1. **에이전트 자율 판단형 Compaction (`tool: compact_context` 또는 Inspector 트리거)**:
-       - 고정 턴 카운트 강제 트리거 대신, Inspector/Gatekeeper가 토큰 임계치(예: 8k / 16k tokens) 초과 감지 시 **자체 판단하에 자율적으로 Compaction 실행**.
-       - 과거의 상세 툴콜 관측 결과(Observation Raw Payloads)를 1~2줄의 핵심 사실 요약(Verdict Synopsis)으로 축약 치환.
-       - 에스컬레이션 전환 경계(Escalation Boundary)에서 이전 건의 디테일 툴콜 로그를 메모리로 flush하고 히스토리 슬롯을 클린 리셋.
-    2. **내부 영문 압축 표기(Caveman Style) 누적 체계**:
+    1. **에이전트 자율 판단형 Compaction (`tool: compact_context` 도구 스펙)**:
+       - `AVAILABLE_TOOLS`에 `compact_context` 도구 정의:
+         ```json
+         {
+           "type": "function",
+           "function": {
+             "name": "compact_context",
+             "description": "Prune old raw observation turns and synthesize accumulated investigation findings into concise Caveman-style English facts to prevent context overflow.",
+             "parameters": {
+               "type": "object",
+               "properties": {
+                 "findings_summary": {
+                   "type": "string",
+                   "description": "Dense Caveman-style English summary of verified facts, file states, and approvals from older turns (e.g. 'Turn1-4: repo clean, test suite passed, no egress leak, target file verified')."
+                 },
+                 "keep_last_n_turns": {
+                   "type": "integer",
+                   "description": "Number of most recent turn-pairs (user/assistant/tool) to retain verbatim. Defaults to 2.",
+                   "default": 2
+                 }
+               },
+               "required": ["findings_summary"]
+             }
+           }
+         }
+         ```
+       - `_execute_tool_call` 핸들러 구현:
+         • `self.history`에서 이전 턴들의 대형 payload(`investigate_pane_history`의 수백 줄 덤프 등)를 `findings_summary` 1줄의 `{"role": "system", "content": "[Context Compacted]: <findings_summary>"}` 단일 메시지로 치환.
+         • 최신 `keep_last_n_turns`는 보존하여 대화 연속성 및 직전 컨텍스트 보장.
+    2. **하이브리드 토큰 게이지 넛지 (Token Gauge Nudge & Auto-Boundary Reset)**:
+       - 순수 자율에만 의존할 경우 30k+ 토큰이 될 때까지 모델이 호출을 망각할 위험 방지.
+       - **Target Block Nudge**: In-Token 추정치가 임계치(예: 8,000 / 12,000 토큰)를 초과하면 시스템 인젝션 프롬프트 하단에 경고 넛지 삽입:
+         • `- Context Gauge: ~13.4k tokens [HIGH - Consider calling compact_context to prune older investigation dumps]`.
+       - **Escalation Boundary Auto-Reset**:
+         • `approve_escalation` 또는 `reject_escalation` 성공 시점(에스컬레이션 종료 경계)에서 이전 건의 상세 툴콜 observation들을 자동으로 purge하거나 최소 요약본만 남기고 클린스위프.
+    3. **내부 영문 압축 표기(Caveman Style) 누적 체계**:
        - [https://github.com/juliusbrussee/caveman](https://github.com/juliusbrussee/caveman) 스타일의 압축 문법 차용.
        - 조사, 불필요한 공백, 장황한 서술어를 배제하고 핵심 토큰 위주로 내부 히스토리 보관 (예: `"Approved: cd safe && pytest ok. No egress, no mut"`).
        - 한국어 토큰은 영문 대비 Byte-Pair Encoding(BPE) 비용이 2~3배 높으므로, **내부 추론 및 히스토리 컨텍스트는 영문/Caveman 형태로 고도로 압축하여 누적**.
-    3. **표현 계층(Display Layer) 분리 렌더링**:
+    4. **표현 계층(Display Layer) 분리 렌더링**:
        - TUI 화면에 한국어로 친절하게 브리핑을 띄우는 작업은 무거운 메인 컨텍스트를 오염시키지 않고, 가벼운 단발성 포맷팅 템플릿(Lightweight Rendering Prompt / Mini Call)을 통해 화면에만 출력.
        - TUI 렌더링 버퍼와 LLM Context Buffer를 1:1 결합하지 않고 분리(Decoupled Buffer)하여, 뷰포트 장식(`┃`, 테두리, ANSI, 비용 텍스트)이 LLM 프롬프트로 재유입되는 결함 원천 차단.
-    4. **Action Items & Milestones**:
-       - M1: `dialog_snapshot` TUI 노이즈(Border, Cost) 정규식 전처리 스트리퍼 구현.
-       - M2: `schengen_agent_llm.py` 내 에스컬레이션 종료 시 Observation Auto-Truncate & Caveman 요약기 연동.
-       - M3: Inspector의 자율 판단 `compact_context` 도구 호출 지원.
+    5. **Codex 작업 마일스톤 (Action Items & Milestones for Codex)**:
+       - M1: `dialog_snapshot` 및 `pane_history` TUI 노이즈(Border `┃`, Cost, Header) 정규식 전처리 스트리퍼 구현 (`strip_tui_decorations`).
+       - M2: `scripts/tools/schengen_agent_llm.py` 내 `AVAILABLE_TOOLS`에 `compact_context` 도구 스키마 및 실행기(`compact_context`) 추가.
+       - M3: In-Token 계산기 / 게이지 넛지 로직 및 에스컬레이션 종료 경계(`_run_llm_agent_loop` 종료 시점) Auto-Purge 연동.
+       - M4: 회귀 검증 단위 테스트 작성 (`tests/test_context_compaction.py` - history 축약 전후 길이 및 필수 턴 보존 검증).
 
 ---
 
