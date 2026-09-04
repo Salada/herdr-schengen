@@ -5,6 +5,7 @@ import subprocess
 from typing import Optional
 
 from adapters.herdr_client import get_pane_text, run_cmd
+from adapters.request_match import preserve_executable_payload
 
 from adapters.agent_adapters.base import AgentAdapter, footer_is_live, register
 
@@ -120,18 +121,25 @@ class AgyAdapter(AgentAdapter):
             q = m_q.group(1).strip()
             return f"question: {q}" if q else "question"
 
-        # Pattern 1: Standard AGY Requesting permission dialog
-        m1 = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", visible_text)
-        if m1:
-            return m1.group(1).strip()
+        # Standard/multi-line dialogs are anchored to the latest request so a
+        # rolling recent-unwrapped window cannot select a dismissed command.
+        request_idx = visible_text.rfind("Requesting permission for:")
+        request_region = visible_text[request_idx:] if request_idx != -1 else visible_text
 
-        # Pattern 2: Multi-line Command box with Requesting permission
+        # Pattern 1: Standard AGY Requesting permission dialog
+        m1 = re.search(r"Requesting permission for:\s*\n([\s\S]*?)\n\s*Do you want to proceed\?", request_region)
+        if m1:
+            return preserve_executable_payload(m1.group(1))
+
+        # Pattern 2: Multi-line Command box/menu variant. The slice already
+        # starts at the latest Requesting marker; a preceding decorative
+        # "Command" header is deliberately not needed for identity.
         m2 = re.search(
-            r"Command\s*\n[─-]+\s*\n\s*Requesting permission for:\s*\n([\s\S]*?)\n\s*(> 1\. Yes|Do you want to proceed)",
-            visible_text,
+            r"Requesting permission for:\s*\n([\s\S]*?)\n\s*(> 1\. Yes|Do you want to proceed)",
+            request_region,
         )
         if m2:
-            return m2.group(1).strip()
+            return preserve_executable_payload(m2.group(1))
 
         # Pattern 3: AGY File Edit Confirmation Dialog
         if (

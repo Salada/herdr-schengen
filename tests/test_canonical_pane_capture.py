@@ -83,7 +83,7 @@ class TestCanonicalPaneCapture(unittest.TestCase):
         with patch("adapters.agent_adapters.base.get_pane_text", return_value=recent):
             request, source = adapter.get_canonical_request("w1D:p1", visible)
         self.assertEqual(request, "rm -rf /home/user/important")
-        self.assertEqual(source, "visible-mismatch")
+        self.assertEqual(source, "recent-unwrapped")
 
     def test_codex_stale_recent_dialog_cannot_override_live_command(self):
         adapter = CodexAdapter()
@@ -93,7 +93,7 @@ class TestCanonicalPaneCapture(unittest.TestCase):
         with patch("adapters.agent_adapters.base.get_pane_text", return_value=recent):
             request, source = adapter.get_canonical_request("w1D:p1", visible)
         self.assertEqual(request, "rm -rf /home/user/important")
-        self.assertEqual(source, "visible-mismatch")
+        self.assertEqual(source, "recent-unwrapped")
 
 
 if __name__ == "__main__":

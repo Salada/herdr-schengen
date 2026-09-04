@@ -57,6 +57,17 @@ class TestNormReqCmdUnchanged(unittest.TestCase):
             norm_req_cmd('python3 -c "print(2)"'),
         )
 
+    def test_quoted_newline_is_not_collapsed_to_a_space(self):
+        self.assertNotEqual(
+            norm_req_cmd("printf 'left\nright'"),
+            norm_req_cmd("printf 'left right'"),
+        )
+
+    def test_heredoc_body_indentation_is_semantic(self):
+        indented = "python3 - <<'PY'\nif True:\n    print('ok')\nPY"
+        flattened = "python3 - <<'PY'\nif True:\nprint('ok')\nPY"
+        self.assertNotEqual(norm_req_cmd(indented), norm_req_cmd(flattened))
+
 
 class TestSameRequestBasic(unittest.TestCase):
     def test_exact_equal_matches(self):
