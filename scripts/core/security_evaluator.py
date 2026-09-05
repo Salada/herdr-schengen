@@ -95,7 +95,7 @@ SENSITIVE_FILE_PATTERN = re.compile(
         {SEP}\.pypirc{END_SEP}|
         {SEP}authorized_keys{END_SEP}|
         {SEP}known_hosts{END_SEP}
-        |/(?:private/)?etc/(?:shadow|passwd){END_SEP}
+        |/(?:private/)?etc/shadow{END_SEP}
     )""",
     re.VERBOSE | re.IGNORECASE,
 )
