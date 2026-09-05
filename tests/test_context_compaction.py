@@ -110,6 +110,14 @@ class TestContextCompaction(unittest.TestCase):
         self.assertEqual(stats["compacted_tool_results"], 3)
         self.assertEqual(stats["after_chars"], _message_chars(compacted))
 
+    def test_compacted_output_is_idempotent(self):
+        messages = _large_messages()
+        compacted, _ = _compact_tool_observations(messages)
+        compacted_again, stats = _compact_tool_observations(compacted)
+
+        self.assertIs(compacted_again, compacted)
+        self.assertEqual(stats["compacted_tool_results"], 0)
+
     def test_compaction_handles_malformed_tool_id_by_returning_original(self):
         messages = _large_messages()
         messages.insert(1, {"role": "tool", "tool_call_id": "orphan", "content": "Z" * 2_000})
@@ -134,6 +142,13 @@ class TestContextCompaction(unittest.TestCase):
 
         self.assertIs(compacted, messages)
         self.assertEqual(stats["warning"], "latest_tool_round_exceeds_compaction_budget")
+
+        chat = SchengenAgentChat(api_key="test")
+        self.assertIs(chat._compact_messages_for_request(messages), messages)
+        self.assertEqual(
+            chat.get_token_usage_stats()["compaction_last_warning"],
+            "latest_tool_round_exceeds_compaction_budget",
+        )
 
     def test_trigger_with_no_eligible_observation_is_noop(self):
         messages = [{"role": "system", "content": "S" * 51_000}, *_round("latest", "small")]

@@ -132,7 +132,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _message_chars(messages: List[Dict[str, Any]]) -> int:
-    """Return the deterministic prompt-size estimate used by compaction."""
+    """Return a stable lower-bound estimate, excluding fixed protocol/schema overhead."""
     return sum(
         len(str(message.get("content") or ""))
         + len(str(message.get("tool_calls") or ""))
@@ -1237,6 +1237,7 @@ class SchengenAgentChat:
         self.compaction_events = 0
         self.compacted_tool_results = 0
         self.compaction_chars_saved = 0
+        self.compaction_last_warning = ""
 
     def cancel(self) -> None:
         """Flag current in-flight LLM call to abort immediately."""
@@ -1264,10 +1265,13 @@ class SchengenAgentChat:
             "compaction_events": self.compaction_events,
             "compacted_tool_results": self.compacted_tool_results,
             "compaction_chars_saved": self.compaction_chars_saved,
+            "compaction_last_warning": self.compaction_last_warning,
         }
 
     def _compact_messages_for_request(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         compacted, stats = _compact_tool_observations(messages)
+        if stats["warning"]:
+            self.compaction_last_warning = str(stats["warning"])
         count = int(stats["compacted_tool_results"])
         if count:
             saved = int(stats["before_chars"]) - int(stats["after_chars"])
@@ -1282,7 +1286,11 @@ class SchengenAgentChat:
             )
             self._append_transcript(
                 role="system",
-                content={"event": "context_compaction", **stats},
+                content=json.dumps(
+                    {"event": "context_compaction", **stats},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             )
         return compacted
 
