@@ -13,6 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DIRECTORIES = ("config", "docs", "opencode", "scripts")
 FILES = ("AGENTS.md", "LICENSE", "README.md", "SKILL.md", "pyproject.toml")
 PROVENANCE_FILE = ".schengen-source.json"
+ALLOWED_TARGETS = frozenset(
+    {
+        (Path.home() / ".agents/skills/herdr-schengen").resolve(),
+        (Path.home() / ".gemini/skills/herdr-schengen").resolve(),
+    }
+)
 
 
 def source_revision() -> str:
@@ -24,15 +30,28 @@ def source_revision() -> str:
     ).stdout.strip()
 
 
+def source_is_clean() -> bool:
+    return not subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "--untracked-files=normal"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def install(target: Path) -> dict:
     """Copy the supported runtime surface and stamp its exact source revision."""
     target = target.expanduser().resolve()
-    if target.name != "herdr-schengen":
-        raise ValueError("runtime target must end in 'herdr-schengen'")
-    if target == REPO_ROOT or REPO_ROOT in target.parents:
-        raise ValueError("runtime target must be outside the source checkout")
+    if target not in ALLOWED_TARGETS:
+        allowed = ", ".join(str(path) for path in sorted(ALLOWED_TARGETS))
+        raise ValueError(f"runtime target is not allowlisted; expected one of: {allowed}")
+    if not source_is_clean():
+        raise ValueError("source checkout is dirty; commit or remove changes before installing")
     target.mkdir(parents=True, exist_ok=True)
     for name in DIRECTORIES:
+        managed_dir = target / name
+        if managed_dir.exists():
+            shutil.rmtree(managed_dir)
         shutil.copytree(REPO_ROOT / name, target / name, dirs_exist_ok=True)
     for name in FILES:
         shutil.copy2(REPO_ROOT / name, target / name)

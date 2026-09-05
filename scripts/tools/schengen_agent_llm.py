@@ -60,6 +60,7 @@ from core.guard_db import (
     get_recent_audit_logs,
     group_pending_escalations,
     has_human_opinion,
+    init_db,
     record_adjudication,
     record_audit_log,
     resolve_escalation,
@@ -1050,6 +1051,21 @@ def record_model_no_tool_call(active_esc: Dict[str, Any], phase: str) -> str:
         f"{phase} returned briefing text without an adjudication tool call; "
         "escalation remains pending for human review"
     )
+    started_at = active_esc.get("started_at")
+    if started_at:
+        init_db()
+        with get_db_connection() as conn:
+            duplicate = conn.execute(
+                """
+                SELECT 1 FROM audit_logs
+                WHERE pane_id = ? AND raw_command = ? AND decision = 'MODEL_NO_TOOL_CALL'
+                  AND timestamp >= ?
+                LIMIT 1
+                """,
+                (active_esc["pane_id"], active_esc["raw_command"], started_at),
+            ).fetchone()
+        if duplicate:
+            return reason
     record_audit_log(
         pane_id=active_esc["pane_id"],
         raw_command=active_esc["raw_command"],

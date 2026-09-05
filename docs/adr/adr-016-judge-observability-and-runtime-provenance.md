@@ -23,7 +23,9 @@ identify the exact source revision that produced an audit decision.
    `DEFERRED`, or `NORMALIZATION_AMBIGUOUS`. Final human/pane-direct resolutions
    override the displayed source without rewriting historical evaluation rows.
 4. Runtime mirrors are installed with `schengen_install.py`. The installer
-   writes `.schengen-source.json`; every new audit row records that revision.
+   accepts only the canonical agent/Gemini skill roots, refuses dirty source,
+   prunes stale files from managed directories, and writes
+   `.schengen-source.json`; every new audit row records that revision.
 
 ## Consequences
 

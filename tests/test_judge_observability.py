@@ -15,7 +15,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import core.guard_db as guard_db
-from cmd.schengen_install import install
+import cmd.schengen_install as schengen_install
 from tools.schengen_agent_llm import record_model_no_tool_call
 from tools.schengen_agent_llm import SchengenAgentChat
 
@@ -55,14 +55,21 @@ class TestJudgeObservability(unittest.TestCase):
             "agent_kind": "codex",
             "decision_layer": "NOT_ALLOWLISTED",
             "origin": "A",
+            "started_at": "2000-01-01T00:00:00+00:00",
         }
         reason = record_model_no_tool_call(esc, "Judge")
+        record_model_no_tool_call(esc, "Judge")
         self.assertIn("remains pending", reason)
         row = guard_db.get_recent_audit_logs(limit=1)[0]
         self.assertEqual(row["decision"], "MODEL_NO_TOOL_CALL")
         self.assertEqual(row["decision_source"], "LLM")
         self.assertEqual(row["decision_layer"], "NOT_ALLOWLISTED")
         self.assertTrue(row["source_revision"])
+        with guard_db.get_db_connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM audit_logs WHERE decision = 'MODEL_NO_TOOL_CALL'"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
 
     def test_legacy_tables_gain_observability_columns(self):
         conn = sqlite3.connect(self.db_path)
@@ -89,11 +96,34 @@ class TestJudgeObservability(unittest.TestCase):
 
     def test_installer_stamps_exact_revision(self):
         target = Path(self.temp_dir.name) / "herdr-schengen"
-        manifest = install(target)
+        with patch.object(schengen_install, "ALLOWED_TARGETS", frozenset({target.resolve()})), patch.object(
+            schengen_install, "source_is_clean", return_value=True
+        ):
+            manifest = schengen_install.install(target)
         stamped = json.loads((target / ".schengen-source.json").read_text(encoding="utf-8"))
         self.assertEqual(stamped["revision"], manifest["revision"])
         self.assertTrue((target / "scripts/core/security_evaluator.py").is_file())
         self.assertTrue((target / "AGENTS.md").is_file())
+
+    def test_installer_rejects_noncanonical_and_dirty_targets(self):
+        target = Path(self.temp_dir.name) / "herdr-schengen"
+        with self.assertRaisesRegex(ValueError, "not allowlisted"):
+            schengen_install.install(target)
+        with patch.object(schengen_install, "ALLOWED_TARGETS", frozenset({target.resolve()})), patch.object(
+            schengen_install, "source_is_clean", return_value=False
+        ), self.assertRaisesRegex(ValueError, "dirty"):
+            schengen_install.install(target)
+
+    def test_installer_prunes_stale_managed_files(self):
+        target = Path(self.temp_dir.name) / "herdr-schengen"
+        stale = target / "scripts/stale.py"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("stale", encoding="utf-8")
+        with patch.object(schengen_install, "ALLOWED_TARGETS", frozenset({target.resolve()})), patch.object(
+            schengen_install, "source_is_clean", return_value=True
+        ):
+            schengen_install.install(target)
+        self.assertFalse(stale.exists())
 
 
 class _Response:
@@ -126,6 +156,7 @@ class TestNoToolCallRoundTrip(unittest.IsolatedAsyncioTestCase):
             "decision_layer": "NOT_ALLOWLISTED",
             "safety_reason": "manual review",
             "origin": "A",
+            "started_at": "2000-01-01T00:00:00+00:00",
         }
         try:
             with patch.object(guard_db, "DB_PATH", db_path), patch(
