@@ -82,10 +82,11 @@ When `SCHENGEN_INSPECTOR_MODEL` is not explicitly set, SmartGate automatically r
 ### Install or update runtime skill mirrors
 
 Run the repository-owned installer from the tested source checkout. It copies
-the supported runtime surface, removes stale files from its managed
-directories, and stamps the exact Git revision. It accepts only the two runtime
-skill roots below and refuses a dirty source checkout. It does not start, stop,
-or reload the daemon.
+only Git-tracked files in the supported runtime surface, removes stale files
+from its managed directories, and stamps the exact Git revision. It accepts
+only the two runtime skill roots below, refuses a dirty source checkout, and
+rejects symlinks in the destination path. It does not start, stop, or reload
+the daemon.
 
 ```bash
 cd ~/code/herdr-schengen

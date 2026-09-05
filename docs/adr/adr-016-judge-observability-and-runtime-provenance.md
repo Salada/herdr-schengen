@@ -24,8 +24,9 @@ identify the exact source revision that produced an audit decision.
    override the displayed source without rewriting historical evaluation rows.
 4. Runtime mirrors are installed with `schengen_install.py`. The installer
    accepts only the canonical agent/Gemini skill roots, refuses dirty source,
-   prunes stale files from managed directories, and writes
-   `.schengen-source.json`; every new audit row records that revision.
+   rejects symlinked destination paths, copies only Git-tracked files, prunes
+   stale files from managed directories, and writes `.schengen-source.json`;
+   every new audit row records that revision.
 
 ## Consequences
 

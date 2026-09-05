@@ -95,8 +95,8 @@ class TestJudgeObservability(unittest.TestCase):
         )
 
     def test_installer_stamps_exact_revision(self):
-        target = Path(self.temp_dir.name) / "herdr-schengen"
-        with patch.object(schengen_install, "ALLOWED_TARGETS", frozenset({target.resolve()})), patch.object(
+        target = Path(self.temp_dir.name).resolve() / "herdr-schengen"
+        with patch.object(schengen_install, "CANONICAL_TARGETS", frozenset({target.absolute()})), patch.object(
             schengen_install, "source_is_clean", return_value=True
         ):
             manifest = schengen_install.install(target)
@@ -106,24 +106,41 @@ class TestJudgeObservability(unittest.TestCase):
         self.assertTrue((target / "AGENTS.md").is_file())
 
     def test_installer_rejects_noncanonical_and_dirty_targets(self):
-        target = Path(self.temp_dir.name) / "herdr-schengen"
+        target = Path(self.temp_dir.name).resolve() / "herdr-schengen"
         with self.assertRaisesRegex(ValueError, "not allowlisted"):
             schengen_install.install(target)
-        with patch.object(schengen_install, "ALLOWED_TARGETS", frozenset({target.resolve()})), patch.object(
+        with patch.object(schengen_install, "CANONICAL_TARGETS", frozenset({target.absolute()})), patch.object(
             schengen_install, "source_is_clean", return_value=False
         ), self.assertRaisesRegex(ValueError, "dirty"):
             schengen_install.install(target)
 
     def test_installer_prunes_stale_managed_files(self):
-        target = Path(self.temp_dir.name) / "herdr-schengen"
+        target = Path(self.temp_dir.name).resolve() / "herdr-schengen"
         stale = target / "scripts/stale.py"
         stale.parent.mkdir(parents=True)
         stale.write_text("stale", encoding="utf-8")
-        with patch.object(schengen_install, "ALLOWED_TARGETS", frozenset({target.resolve()})), patch.object(
+        with patch.object(schengen_install, "CANONICAL_TARGETS", frozenset({target.absolute()})), patch.object(
             schengen_install, "source_is_clean", return_value=True
         ):
             schengen_install.install(target)
         self.assertFalse(stale.exists())
+
+    def test_installer_rejects_symlinked_runtime_root(self):
+        temp_root = Path(self.temp_dir.name).resolve()
+        broad = temp_root / "broad"
+        broad.mkdir()
+        target = temp_root / "herdr-schengen"
+        target.symlink_to(broad, target_is_directory=True)
+        with patch.object(
+            schengen_install, "CANONICAL_TARGETS", frozenset({target.absolute()})
+        ), self.assertRaisesRegex(ValueError, "contains a symlink"):
+            schengen_install.install(target)
+
+    def test_installer_copies_only_tracked_files(self):
+        tracked = schengen_install.tracked_files()
+        self.assertTrue(tracked)
+        self.assertTrue(all((REPO_ROOT / path).is_file() for path in tracked))
+        self.assertFalse(any("__pycache__" in path.parts or path.suffix == ".pyc" for path in tracked))
 
 
 class _Response:

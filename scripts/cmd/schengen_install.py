@@ -13,10 +13,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DIRECTORIES = ("config", "docs", "opencode", "scripts")
 FILES = ("AGENTS.md", "LICENSE", "README.md", "SKILL.md", "pyproject.toml")
 PROVENANCE_FILE = ".schengen-source.json"
-ALLOWED_TARGETS = frozenset(
+CANONICAL_TARGETS = frozenset(
     {
-        (Path.home() / ".agents/skills/herdr-schengen").resolve(),
-        (Path.home() / ".gemini/skills/herdr-schengen").resolve(),
+        Path.home() / ".agents/skills/herdr-schengen",
+        Path.home() / ".gemini/skills/herdr-schengen",
     }
 )
 
@@ -39,12 +39,30 @@ def source_is_clean() -> bool:
     ).stdout.strip()
 
 
+def tracked_files() -> tuple:
+    selected = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", *DIRECTORIES, *FILES],
+        check=True,
+        capture_output=True,
+    ).stdout
+    return tuple(Path(raw.decode("utf-8")) for raw in selected.split(b"\0") if raw)
+
+
+def _reject_symlinked_path(target: Path) -> None:
+    current = Path(target.anchor)
+    for part in target.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"runtime target path contains a symlink: {current}")
+
+
 def install(target: Path) -> dict:
     """Copy the supported runtime surface and stamp its exact source revision."""
-    target = target.expanduser().resolve()
-    if target not in ALLOWED_TARGETS:
-        allowed = ", ".join(str(path) for path in sorted(ALLOWED_TARGETS))
+    target = target.expanduser().absolute()
+    if target not in CANONICAL_TARGETS:
+        allowed = ", ".join(str(path) for path in sorted(CANONICAL_TARGETS))
         raise ValueError(f"runtime target is not allowlisted; expected one of: {allowed}")
+    _reject_symlinked_path(target)
     if not source_is_clean():
         raise ValueError("source checkout is dirty; commit or remove changes before installing")
     target.mkdir(parents=True, exist_ok=True)
@@ -52,9 +70,10 @@ def install(target: Path) -> dict:
         managed_dir = target / name
         if managed_dir.exists():
             shutil.rmtree(managed_dir)
-        shutil.copytree(REPO_ROOT / name, target / name, dirs_exist_ok=True)
-    for name in FILES:
-        shutil.copy2(REPO_ROOT / name, target / name)
+    for relative in tracked_files():
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO_ROOT / relative, destination)
     manifest = {
         "revision": source_revision(),
         "source": str(REPO_ROOT),
