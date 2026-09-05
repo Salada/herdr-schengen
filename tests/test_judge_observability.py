@@ -179,7 +179,7 @@ class TestJudgeObservability(unittest.TestCase):
         real_replace = os.replace
 
         def fail_stage_activation(source, destination):
-            if Path(source).name.startswith(f".{target.name}.stage-"):
+            if Path(source).name.startswith(f".{target.name}.stage"):
                 raise OSError("activation failed")
             return real_replace(source, destination)
 
