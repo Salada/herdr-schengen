@@ -32,6 +32,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 4) **TUI SettingsModal UI 토글 연동** (`approve_advisory`, `Approval Bias`, `Fast-Track Mode`) & `get_complexity_tax_config` TTL 캐시 무효화.
    - 5) **[P1 Urgent] 자율적 Context Compaction & 내부 토큰 절감 엔진** (Inspector 자율 트리거, Caveman 영문 압축 표기, 한글/TUI 렌더링 레이어 분리).
    - 6) **[Feature/Tools/P1] Gatekeeper/Inspector 자율 심사용 Ripgrep (`grep_search`) 및 모던 에이전트 관측 도구 체계 (`find_by_name`, `git_diff_stat`) 구축**.
+   - 7) **[Feature/Herdr/P2] `herdr agent read` 기반 Agent Thread 고수준 컨텍스트 수집 최적화** (대상이 에이전트인 경우 `pane read` 대신 구조화된 `agent read` 우선 활용).
 
 2. ⚙️ **[Track 2 — Sprint 4 대형 동시성 엔진 (EPIC Concurrency)]**:
    - **Parallel Silent Inspection & Single-Slot Deferred UI (M1 ~ M4)**:
@@ -242,6 +243,25 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     • M2: `git_diff_stat` 및 `find_by_name` 보조 관측 툴 추가.
     • M3: Gatekeeper 프롬프트에 `grep_search` 활용 지침 추가 ("명령어가 민감 환경변수나 파괴적 스크립트를 건드리는지 의심될 경우 `grep_search`로 선행 검증하라").
     • M4: 단위 테스트 작성 (`tests/test_gatekeeper_investigation_tools.py`).
+
+[] [Feature/Herdr/P2] `herdr agent read` 기반 Agent Thread 컨텍스트 수집 최적화:
+  - Context & Motivation:
+    • 현재 `scripts/adapters/herdr_client.py`의 `get_pane_text` 및 LLM 도구 `investigate_pane_history`는 원시 터미널 덤프인 `herdr pane read <pane_id>`에 전적으로 의존함.
+    • 대상 pane에서 코딩 에이전트(Codex, OpenCode, Hermes, AGY 등)가 실행 중인 경우, 단순 원시 뷰포트/터미널 행(`pane read`) 대신 Herdr가 제공하는 **`herdr agent read <target>`**을 사용하면:
+      1) 에이전트 전용 대화 스레드/턴 단위의 의미론적 출력(`recent-unwrapped`)을 노이즈 없이 정밀하게 획득 가능.
+      2) 터미널 소프트랩(Soft-wrap)으로 인해 명령어 문자열이 강제로 쪼개지거나 공백이 왜곡되는 현상을 원천 방지.
+      3) `agent get` 메타데이터(세션 ID, 모델명, 에이전트 라이프사이클 상태)와 자연스럽게 결합하여 심사 품질 대폭 향상.
+  - Architecture & Specification:
+    1. **스마트 소스 라우팅 (Smart Buffer Routing in `herdr_client.py`)**:
+       - `get_pane_text(pane_id, ...)` 호출 시, 대상 pane이 Herdr 인식 에이전트(`agent_kind != 'unknown'`)인지 확인:
+         • 에이전트 Pane인 경우: `herdr agent read <pane_id> --source recent-unwrapped --lines <N>` 우선 호출.
+         • 실패하거나 일반 셸/비에이전트 Pane인 경우: 기존 `herdr pane read <pane_id> --source <source> --lines <N>`으로 Fallback.
+    2. **`investigate_pane_history` 툴 및 관측 레이어 연계**:
+       - Inspector/Gatekeeper가 `investigate_pane_history`를 호출했을 때, 대상이 에이전트 스레드인 경우 순수 대화/명령 컨텍스트를 우선 추출하여 전달 (불필요한 ANSI 제어문자 및 뷰포트 레이아웃 노이즈 자동 감소).
+  - Codex 작업 마일스톤 (Action Items & Milestones for Codex):
+    • M1: `scripts/adapters/herdr_client.py` 내 `get_agent_or_pane_text(pane_id, ...)` 래퍼 함수 추가 및 fallback 경로 구현.
+    • M2: `scripts/tools/schengen_agent_llm.py`의 `investigate_pane_history` 핸들러에서 에이전트 스레드 우선 읽기 적용.
+    • M3: 단위 테스트 추가 (`tests/test_herdr_agent_read_routing.py`).
 
 ---
 
