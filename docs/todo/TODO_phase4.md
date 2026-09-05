@@ -252,16 +252,19 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
       2) 터미널 소프트랩(Soft-wrap)으로 인해 명령어 문자열이 강제로 쪼개지거나 공백이 왜곡되는 현상을 원천 방지.
       3) `agent get` 메타데이터(세션 ID, 모델명, 에이전트 라이프사이클 상태)와 자연스럽게 결합하여 심사 품질 대폭 향상.
   - Architecture & Specification:
-    1. **스마트 소스 라우팅 (Smart Buffer Routing in `herdr_client.py`)**:
-       - `get_pane_text(pane_id, ...)` 호출 시, 대상 pane이 Herdr 인식 에이전트(`agent_kind != 'unknown'`)인지 확인:
-         • 에이전트 Pane인 경우: `herdr agent read <pane_id> --source recent-unwrapped --lines <N>` 우선 호출.
-         • 실패하거나 일반 셸/비에이전트 Pane인 경우: 기존 `herdr pane read <pane_id> --source <source> --lines <N>`으로 Fallback.
+    1. **스마트 소스 라우팅 및 세션 유효성 판정 (Smart Buffer Routing & Session Guard in `herdr_client.py`)**:
+       - `get_pane_text(pane_id, ...)` 호출 시, 대상 pane이 Herdr에 등록된 **유효한 실시간 에이전트 세션(`agent_session.value` 존재 & `agent_status != 'unknown'`)**인지 먼저 검증:
+         • **유효 Agent Session 확인 시**: `herdr agent read <pane_id> --source recent-unwrapped --lines <N>`을 호출하여 정제된 스레드 텍스트 획득.
+         • **Agent Session이 아닌 경우 (일반 대화형 셸, 백그라운드 작업, 세션 미식별/종료 상태)**:
+           - **주의 및 의사판단 규칙**: `agent read`는 유효 세션이 없으면 빈 결과나 에러를 반환할 뿐만 아니라 에이전트 외 명령(인간의 직접 셸 입력 등)의 시각적 맥락을 유실할 수 있음.
+           - 따라서 **"무조건 agent read를 고집하지 않고, 세션 비존재 시 즉시 원시 `pane read`로 전환하거나 심사 레이어에 'Non-Agent Raw Shell Session'임을 명시적으로 알리는 의사판단 분기"**를 강제 적용.
     2. **`investigate_pane_history` 툴 및 관측 레이어 연계**:
        - Inspector/Gatekeeper가 `investigate_pane_history`를 호출했을 때, 대상이 에이전트 스레드인 경우 순수 대화/명령 컨텍스트를 우선 추출하여 전달 (불필요한 ANSI 제어문자 및 뷰포트 레이아웃 노이즈 자동 감소).
   - Codex 작업 마일스톤 (Action Items & Milestones for Codex):
-    • M1: `scripts/adapters/herdr_client.py` 내 `get_agent_or_pane_text(pane_id, ...)` 래퍼 함수 추가 및 fallback 경로 구현.
-    • M2: `scripts/tools/schengen_agent_llm.py`의 `investigate_pane_history` 핸들러에서 에이전트 스레드 우선 읽기 적용.
-    • M3: 단위 테스트 추가 (`tests/test_herdr_agent_read_routing.py`).
+    • M1: `scripts/adapters/herdr_client.py` 내 에이전트 세션 존재 여부(`agent_session`) 정밀 판별 및 `get_agent_or_pane_text(pane_id, ...)` 래퍼 함수 추가.
+    • M2: 세션 미식별 시 원시 터미널(`pane read`) 의사판단 fallback 경로 및 로깅 강화.
+    • M3: `scripts/tools/schengen_agent_llm.py`의 `investigate_pane_history` 핸들러에서 에이전트 스레드 우선 읽기 적용.
+    • M4: 단위 테스트 추가 (`tests/test_herdr_agent_read_routing.py` - 유효 세션 vs 일반 셸 분기 테스트).
 
 ---
 
