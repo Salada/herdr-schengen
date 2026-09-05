@@ -212,6 +212,7 @@ Approved. All files verified safely."""
             "old-noise\n" * 2_000 + f"Authorization: Bearer {secret}\n",
             "agent:recent-unwrapped",
         )
+        self.assertIn(secret, mock_get_context.return_value[0])
 
         parsed = json.loads(execute_tool_call("investigate_pane_history", {
             "pane_id": "w1D:p1",
@@ -221,6 +222,7 @@ Approved. All files verified safely."""
         self.assertEqual(parsed["capture_source"], "agent:recent-unwrapped")
         self.assertLessEqual(len(parsed["pane_text_snippet"]), 12_000)
         self.assertNotIn(secret, parsed["pane_text_snippet"])
+        self.assertIn("[REDACTED:api-key]", parsed["pane_text_snippet"])
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual is required for TUI UI tests")

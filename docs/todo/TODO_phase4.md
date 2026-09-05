@@ -236,6 +236,9 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     • M3: `scripts/tools/schengen_agent_llm.py`의 `investigate_pane_history` 핸들러에서 에이전트 스레드 우선 읽기 적용.
     • M4: 단위 테스트 추가 (`tests/test_herdr_agent_read_routing.py` - 유효 세션 vs 일반 셸 분기 테스트).
 
+[] [Deferred/Hardening/Low] `herdr_client.run_cmd`의 `agent list`/`agent read` subprocess timeout 도입 (#219 피어리뷰 후속):
+  - 현재 공통 helper는 timeout이 없어 Herdr CLI hang 시 Inspector가 지연될 수 있다. 모든 기존 caller의 timeout 의미를 함께 검토한 별도 변경으로 처리한다.
+
 ---
 
 ### [Track 2] Sprint 4 대형 동시성 엔진 (Parallel Concurrency)

@@ -10,6 +10,8 @@ import os
 import subprocess
 
 
+# ``done`` retains a completed thread for post-hoc inspection; an expired
+# session returns empty and immediately falls back to the raw pane.
 AGENT_THREAD_READ_STATUSES = frozenset({"working", "idle", "done", "blocked"})
 
 
