@@ -3,6 +3,7 @@
 
 import fcntl
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -72,6 +73,50 @@ class TestInstallerCrashRecovery(unittest.TestCase):
         self.assertEqual((self.target / "unmanaged.txt").read_text(encoding="utf-8"), "keep")
         self.assertFalse(backup.exists())
         self.assertFalse(self.stage().exists())
+
+    def test_crash_after_first_rename_recovers_on_next_run(self):
+        self.write_install(self.target)
+        sentinel = self.target / "unmanaged.txt"
+        sentinel.write_text("keep", encoding="utf-8")
+        real_replace = os.replace
+
+        def crash_after_backup(source, destination):
+            result = real_replace(source, destination)
+            if Path(source) == self.target:
+                raise SystemExit("simulated hard crash")
+            return result
+
+        with self.installer(), patch.object(schengen_install.os, "replace", side_effect=crash_after_backup):
+            with self.assertRaisesRegex(SystemExit, "simulated hard crash"):
+                schengen_install.install(self.target)
+        self.assertFalse(self.target.exists())
+        self.assertEqual(len(tuple(self.target.parent.glob(".herdr-schengen.backup-*"))), 1)
+
+        with self.installer():
+            schengen_install.install(self.target)
+        self.assertEqual((self.target / "unmanaged.txt").read_text(encoding="utf-8"), "keep")
+        self.assertFalse(any(self.target.parent.glob(".herdr-schengen.backup-*")))
+
+    def test_crash_after_second_rename_finalizes_on_next_run(self):
+        self.write_install(self.target)
+        real_rmtree = schengen_install.shutil.rmtree
+
+        def crash_before_backup_cleanup(path, *args, **kwargs):
+            if Path(path).name.startswith(".herdr-schengen.backup-"):
+                raise SystemExit("simulated hard crash")
+            return real_rmtree(path, *args, **kwargs)
+
+        with self.installer(), patch.object(
+            schengen_install.shutil, "rmtree", side_effect=crash_before_backup_cleanup
+        ):
+            with self.assertRaisesRegex(SystemExit, "simulated hard crash"):
+                schengen_install.install(self.target)
+        self.assertTrue(self.target.exists())
+        self.assertEqual(len(tuple(self.target.parent.glob(".herdr-schengen.backup-*"))), 1)
+
+        with self.installer():
+            schengen_install.install(self.target)
+        self.assertFalse(any(self.target.parent.glob(".herdr-schengen.backup-*")))
 
     def test_activated_target_discards_single_backup_only_after_validation(self):
         self.write_install(self.target, "new-revision")
@@ -145,6 +190,21 @@ class TestInstallerCrashRecovery(unittest.TestCase):
         self.assertEqual(marker.read_text(encoding="utf-8"), "safe")
         self.assertTrue(self.stage().is_symlink())
 
+    def test_symlinked_backup_fails_closed_without_following(self):
+        outside = self.root / "outside-backup"
+        outside.mkdir()
+        marker = outside / "marker"
+        marker.write_text("safe", encoding="utf-8")
+        self.target.parent.mkdir(parents=True)
+        backup = self.backup()
+        backup.symlink_to(outside, target_is_directory=True)
+
+        with self.installer(), self.assertRaisesRegex(ValueError, "untrusted installer artifact"):
+            schengen_install.install(self.target)
+
+        self.assertEqual(marker.read_text(encoding="utf-8"), "safe")
+        self.assertTrue(backup.is_symlink())
+
     def test_near_miss_stage_is_warned_and_preserved(self):
         self.target.parent.mkdir(parents=True)
         near_miss = self.stage(".herdr-schengen.stage-not-the-emitted-shape")
@@ -156,6 +216,38 @@ class TestInstallerCrashRecovery(unittest.TestCase):
 
         self.assertTrue(near_miss.exists())
         self.assertTrue(any("unrecognized stage-like" in str(item.message) for item in caught))
+
+    def test_near_miss_backup_fails_closed(self):
+        self.target.parent.mkdir(parents=True)
+        near_miss = self.target.parent / ".herdr-schengen.backup-not-a-uuid"
+        near_miss.mkdir()
+
+        with self.installer(), self.assertRaisesRegex(ValueError, "unrecognized backup artifact"):
+            schengen_install.install(self.target)
+
+        self.assertTrue(near_miss.exists())
+
+    def test_regular_file_target_fails_closed(self):
+        self.target.parent.mkdir(parents=True)
+        self.target.write_text("not a directory", encoding="utf-8")
+
+        with self.installer(), self.assertRaisesRegex(ValueError, "not a genuine directory"):
+            schengen_install.install(self.target)
+
+        self.assertEqual(self.target.read_text(encoding="utf-8"), "not a directory")
+
+    @unittest.skipUnless(hasattr(os, "O_NOFOLLOW"), "O_NOFOLLOW is unavailable")
+    def test_symlinked_lockfile_is_rejected(self):
+        self.target.parent.mkdir(parents=True)
+        outside = self.root / "outside-lock"
+        outside.write_text("safe", encoding="utf-8")
+        lock_path = self.target.parent / ".herdr-schengen.install.lock"
+        lock_path.symlink_to(outside)
+
+        with self.installer(), self.assertRaisesRegex(ValueError, "lock path is a symlink"):
+            schengen_install.install(self.target)
+
+        self.assertEqual(outside.read_text(encoding="utf-8"), "safe")
 
     def test_concurrent_installer_fails_without_mutating_target(self):
         self.write_install(self.target)

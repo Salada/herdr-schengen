@@ -17,9 +17,9 @@ can also turn a recoverable state into ambiguous remnants.
    The kernel releases the lock when the process exits; the file is never
    treated as an installation artifact or deleted.
 2. Staging uses the deterministic `.{target.name}.stage` path while the lock is
-   held. Legacy stages with the exact eight-alphanumeric `mkdtemp` suffix are
-   reconstructable and may be removed under the lock. Stage-like near misses
-   are warned about and preserved.
+   held. Legacy stages with the exact eight-character lowercase-alphanumeric-
+   plus-underscore `mkdtemp` suffix are reconstructable and may be removed
+   under the lock. Stage-like near misses are warned about and preserved.
 3. A single backup may be restored only when it is a real directory with a
    parseable provenance manifest containing a non-empty revision. Multiple or
    invalid backups fail closed. When target and backup both exist, target

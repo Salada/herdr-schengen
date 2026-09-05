@@ -2,6 +2,7 @@
 """Synchronize the repository into an explicit runtime skill directory."""
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -111,7 +112,12 @@ def _remove_real_directory(path: Path) -> None:
 @contextmanager
 def _target_lock(target: Path):
     lock_path = target.parent / f".{target.name}.install.lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"installer lock path is a symlink: {lock_path}") from exc
+        raise
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -127,7 +133,7 @@ def _discover_installer_artifacts(target: Path) -> tuple:
     backup_pattern = re.compile(rf"{re.escape(backup_prefix)}[0-9a-f]{{32}}")
     fixed_stage_name = f".{target.name}.stage"
     legacy_stage_prefix = f"{fixed_stage_name}-"
-    legacy_stage_pattern = re.compile(rf"{re.escape(legacy_stage_prefix)}[A-Za-z0-9]{{8}}")
+    legacy_stage_pattern = re.compile(rf"{re.escape(legacy_stage_prefix)}[a-z0-9_]{{8}}")
     backups = []
     stages = []
     with os.scandir(target.parent) as entries:
@@ -137,13 +143,13 @@ def _discover_installer_artifacts(target: Path) -> tuple:
             is_stage = name == fixed_stage_name or name.startswith(legacy_stage_prefix)
             if not is_backup and not is_stage:
                 continue
+            if entry.is_symlink() or not stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode):
+                raise ValueError(f"untrusted installer artifact: {entry.path}")
             if is_stage and name != fixed_stage_name and not legacy_stage_pattern.fullmatch(name):
                 warnings.warn(f"leaving unrecognized stage-like entry untouched: {entry.path}", stacklevel=2)
                 continue
             if is_backup and not backup_pattern.fullmatch(name):
                 raise ValueError(f"unrecognized backup artifact: {entry.path}")
-            if entry.is_symlink() or not stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode):
-                raise ValueError(f"untrusted installer artifact: {entry.path}")
             (backups if is_backup else stages).append(Path(entry.path))
     return tuple(sorted(backups)), tuple(sorted(stages))
 
