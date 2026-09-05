@@ -47,7 +47,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 2) **Pending Queue 4단계 상태 배지** (`🔍 Gatekeeper Checking`, `🚨 Action Required`, `⏳ Deferred (Slot #N)`, `⚡ Approved`).
    - 3) **AuditFullscreenModal 교환 뷰(`get_adjudication_exchange`) 전면 연동** 및 `scope_context`(Session vs Global) 메타데이터 감사 레저 반영.
    - 4) **동적 URL / WebSearch (curl, wget) 듀얼 정책(Allowlist & Denylist) 관리** (SQLite `url_policy_rules` + Tool Call + TUI 탭/정렬 뷰).
-   - 5) **유저 구성 기반 Fast-Track 확장(`chezmoi status` 등) 및 TUI 자연어 해석 Tool-Call 추가 엔진** (`~/.config/herdr-schengen/fast_track_rules.json` + `add_command_allowlist_rule` 툴).
+   - 5) **[Resolved/Duplicate/Urgent-3] 유저 구성 기반 Fast-Track**: 전역 TUI/SQLite 규칙(PR #150)과 저장소 로컬 `.schengen/allowlist.json`(PR #145)을 정식 경로로 확정. 별도 홈 JSON은 self-authorization 위험으로 기각하고, 자연어 규칙 변경은 인터뷰 대기로 분리.
    - 6) **Herdr Agent Integration으로 Schengen TUI 등록** (Agent: `schengen`, Custom Status Labels & Semantic State Reporting).
    - 7) OpenCode 보조 지침 비동기 딜레이 큐 & 플러그인 IPC 확장 (#3615/#3623 후속).
 
@@ -333,43 +333,16 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     5. **보안 평가기 연동 (`security_evaluator.py`)**:
        - `evaluate_network_calls` 및 `webfetch` 단계에서 `url_policy_rules`를 선행 조회하여 Deny 우선 차단 및 Allow 고속 패스트트랙 집행.
 
-[] [Feature/Policy] 유저 구성 기반 Fast-Track 확장(`chezmoi status` 등), 에이전트별 Pattern Auto-Allow 룰 및 TUI 자연어 해석 Tool-Call 추가 엔진:
-  - Context & Motivation:
-    • 사례 1: `chezmoi status`, `chezmoi diff` 등 개인화된 도트파일 도구는 읽기/진단 성격이 명확하나 고정된 내장 allowlist에 없어 매번 불필요한 인간 승인을 유발함.
-    • 사례 2: `rsync skill mirror` 등 개발 환경에서 검증된 정형화 동기화 체인.
-    • Codex, Claude Code, OpenCode의 설정(`config.json`, `settings.json`, `rules`)처럼, 사용자가 `~/.config/herdr-schengen/` 내 설정 파일(`fast_track_allowlist.json` 또는 `rules.yaml`)을 통해 안전 명령어 및 패턴별 Auto-Allow 규칙을 직접 선언·보강할 수 있는 구조 필요.
-    • 특히 TUI 채팅에서 인간이 "chezmoi status는 항상 통과시켜줘", "skill rsync 패턴은 앞으로 자동 승인해"와 같이 자연어로 지시했을 때, **Inspector 또는 Gatekeeper(적격 Agent)가 지시 의도를 정확히 추론하여 tool call을 통해 규칙을 동적으로 추가/갱신**할 수 있어야 함.
-  - Core Architecture & Reference Design:
-    1. **`~/.config/herdr-schengen/` 기반 Fast-Track & Pattern 룰 설정 파일**:
-       - `~/.config/herdr-schengen/fast_track_rules.json` (또는 YAML):
-         ```json
-         {
-           "exact_commands": ["chezmoi status", "chezmoi diff", "brew list --formula"],
-           "prefix_commands": ["chezmoi status ", "chezmoi cat "],
-           "pattern_rules": [
-             {
-               "id": "rsync-skill-mirror",
-               "pattern": "rsync -a <WORKSPACE>/scripts/ <AGENTS_DIR>/skills/<NAME>/scripts/ && ...",
-               "agents": ["opencode", "agy", "codex"],
-               "action": "AUTO_ALLOW",
-               "reason": "Skill synchronization"
-             }
-           ]
-         }
-         ```
-       - 보안 평가기(`security_evaluator.py`)가 기동/리로드 시 해당 파일을 로드하여 정적 `FAST_TRACK_SAFE_COMMANDS`와 매끄럽게 결합(Zero-latency In-Memory Lookup).
-    2. **인간 지시 해석 및 동적 룰 추가 Tool (`add_command_allowlist_rule`)**:
-       - TUI 채팅에서 인간 지휘관의 의도(자연어)를 해석하여 적격 Agent(Inspector / Gatekeeper)가 호출하는 신규 Tool:
-         • `tool: add_command_allowlist_rule(command_or_pattern, match_type='exact'|'prefix'|'regex', scope='global'|'repo', reason=str)`
-         • `tool: remove_command_allowlist_rule(rule_id_or_pattern)`
-         • `tool: query_command_allowlist()`
-       - 동작 방식:
-         - 인간이 "chezmoi status 허용해줘" 입력 ➔ Gatekeeper/Inspector가 자연어 파싱 후 `add_command_allowlist_rule(command_or_pattern="chezmoi status", match_type="exact", reason="Human requested in TUI")` 도구 호출 ➔ 파일(`fast_track_rules.json`) 및 DB(`command_allowlist`)에 즉시 영속 반영 ➔ Watcher에 SIGHUP 또는 인메모리 리로드 통지.
-    3. **엄격한 안전 불변식 (Security Guardrails & Invariants)**:
-       - **Denylist Immiscibility (불변 방어선)**: `rm -rf`, `sudo`, `mkfs`, `git push --force` 등 Tier A Denylist에 속하는 위험 명령은 파일에 직접 적거나 Tool Call로 추가를 시도하더라도 **로더 및 도구 레벨에서 원천 거부(Reject/Error)**.
-       - **Confirmation & Provenance**: 도구를 통해 룰이 추가되었을 때 TUI 채팅창에 `[Auto-Allow Rule Added: chezmoi status (by human intent)]` 명시적 피드백 출력.
-    4. **TUI 화이트리스트 매니저 뷰 (`CommandAllowlistModal`) 연동**:
-       - 알파벳순(Case-Insensitive) 정렬, 등록된 커스텀 룰/패턴 목록 열람 및 삭제(Revoke) 지원.
+[x] [Resolved/Duplicate/Security/Urgent-3] 유저 구성 기반 Fast-Track 경로 정리 (Forgejo #221):
+  - 전역 사용자 규칙의 단일 source of truth는 PR #150의 SQLite `user_allowlist`다. TUI controller에서 인간이 `/allow`, `/allow-last`, `/allow-list`, `/revoke`로 관리하며 `created_by="human-tui"` provenance와 `re.fullmatch` 계약을 유지한다.
+  - 저장소 범위 규칙은 PR #145의 `<repo>/.schengen/allowlist.json`을 사용한다. 이 파일도 동일 OS uid의 에이전트가 쓸 수 있으므로 인간 전용 신뢰 저장소는 아니지만, 적용 범위가 해당 저장소로 제한되고 전역 denylist가 항상 우선한다. 자동 promotion은 명시적 `human-tui` 승인만 허용한다.
+  - 제안됐던 `~/.config/herdr-schengen/fast_track_rules.json`은 구현하지 않는다. 인간과 에이전트가 같은 OS uid를 공유하므로 에이전트가 전역 Auto-Allow 파일을 작성해 스스로 권한을 높일 수 있고, 기존 두 정책 저장소와 충돌하는 세 번째 source of truth가 된다.
+  - `exact`은 기존 `/allow-last`가 `re.escape`한 전체 일치 규칙으로 제공한다. 별도 `startswith` 또는 `re.search` 모드는 위험한 접미사를 허용할 수 있으므로 도입하지 않는다.
+  - `chezmoi status` 같은 반복 명령은 최초 인간 검토 뒤 `/allow-last`로 등록하고, 이후에도 `SHELL_CRITICAL`, `SECRET_GUARD`, `SANDBOX_GUARD`, `ORIGIN_GUARD` 등 상위 denylist가 우선한다.
+
+[] [Interview Required/Policy] 자연어 또는 LLM Tool-Call 기반 Fast-Track 규칙 변경:
+  - 인간의 일반 채팅 문장을 영속 권한 부여로 볼지, 별도 명시적 확인 문법을 요구할지 결정해야 한다.
+  - LLM이 규칙을 생성·추가·삭제하거나 global/repo scope를 선택하는 기능은 인간 인터뷰 전까지 구현하지 않는다. 현재의 명시적 TUI slash command만 binding authority다.
 
 [] [Feature/Herdr] Herdr Agent Integration으로 Schengen TUI 등록 (Agent Name: `schengen`, Custom Status Labels & Semantic Lifecycle Reporting):
   - Context & Motivation:
