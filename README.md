@@ -68,6 +68,7 @@ flowchart TD
    - Blocks privilege escalation (`sudo`, `su`, `chmod`), destructive file mutations (`rm -rf`, `mkfs`, `dd`), and dangerous pushes (force/delete/mirror/all/tags/protected branches); ordinary explicit non-protected branch pushes use the deterministic Git fast-track.
    - Protects sensitive files (`.env`, `id_rsa`, `credentials.json`, `hosts.yml`, `.aws/credentials`).
    - Protects Hermes sandbox paths (`~/.hermes/sandboxes/`) from unauthorized writes.
+   - Recursively verifies local `docker exec` payloads and fast-tracks only closed read-only diagnostics; inner mutation, egress, substitution, redirection, and credential targets remain closed.
 2. **Multi-Turn Tool-Calling Semantic Inspection**:
    - Inspects dynamic command substitution (`$(cat ...)`, `` `cat ...` ``, `$(<...)`).
    - Subagent reads referenced files via native Python I/O up to 8KB without spawning shell subprocesses.

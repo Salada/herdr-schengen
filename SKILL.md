@@ -119,6 +119,7 @@ flowchart TD
 | **Managed Git SCM** | All `GET` requests, `/issues/...`, `/pulls/...` interactions (POST, PATCH) | Destructive `DELETE` requests (`-X DELETE`, `method='DELETE'`) |
 | **Environment / System** | `export PATH="..."` environment variable definitions | Direct mutations to `/etc`, `/System`, `/usr/bin` (`rm`, `chmod`) |
 | **Shell Commands** | Git read queries (including `git -C`), scoped `git add`, explicit-message `git commit`, explicit non-protected branch `git push`; `mkdir`, `cd`, `ls`, file edits | `rm -rf`, `sudo`, `su`, `chmod`, `chown`, force/delete/mirror/all/tags/protected-branch pushes, `git reset --hard` |
+| **Docker diagnostics** | Local `docker exec` with recursively verified read-only payloads (`test`, reads, filters, redacting `sed s///`) | Privileged/env/detached exec, writes, network tools, substitutions, redirections, credential targets |
 | **Hermes Sandbox** | Read-only inspection (`cat`, `ls`) | Write mutations (`> .hermes/sandboxes/...`, `cp/mv`, `touch`, `rsync`) |
 | **Secrets & Keys** | Template handling (`.env.example`) | `cat .env`, `grep KEY .env`, `id_rsa`, `~/.aws`, `hosts.yml` access |
 | **Python AST** | Data processing, linters, `pytest`, allowed Managed Git APIs | External unverified networking, `eval()`, `exec()`, sandbox writes |

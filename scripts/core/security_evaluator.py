@@ -95,6 +95,7 @@ SENSITIVE_FILE_PATTERN = re.compile(
         {SEP}\.pypirc{END_SEP}|
         {SEP}authorized_keys{END_SEP}|
         {SEP}known_hosts{END_SEP}
+        |/(?:private/)?etc/shadow{END_SEP}
     )""",
     re.VERBOSE | re.IGNORECASE,
 )
@@ -244,6 +245,7 @@ READ_COMMANDS = {
     "head",
     "tail",
     "grep",
+    "rg",
     "less",
     "more",
     "awk",
@@ -1431,6 +1433,169 @@ def _split_shell_control_segments(cmd_str: str) -> list[str]:
     return segments
 
 
+def _search_target_tokens(tokens: list[str]) -> list[str]:
+    """Return grep/rg target operands, excluding pattern text and option values."""
+    if not tokens or Path(tokens[0]).name not in {"grep", "rg"}:
+        return tokens[1:]
+    executable = Path(tokens[0]).name
+    value_options = {
+        "-e", "--regexp", "-f", "--file", "-g", "--glob", "-t", "--type",
+        "-T", "--type-not", "-m", "--max-count", "--max-depth", "-A", "-B", "-C",
+        "--after-context", "--before-context", "--context", "--sort", "--sortr",
+        "--iglob", "--include", "--exclude", "--exclude-from",
+    }
+    pattern_from_option = False
+    positional, selectors = [], []
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            positional.extend(tokens[index + 1:])
+            break
+        if token in value_options:
+            if index + 1 >= len(tokens):
+                return tokens[1:]
+            value = tokens[index + 1]
+            if token in {"-e", "--regexp"}:
+                pattern_from_option = True
+            elif token in {"-f", "--file", "-g", "--glob", "--iglob", "--include", "--exclude", "--exclude-from"}:
+                selectors.append(value)
+            index += 2
+            continue
+        if len(token) > 2 and token[:2] in {"-e", "-f", "-g"}:
+            if token[:2] == "-e":
+                pattern_from_option = True
+            else:
+                selectors.append(token[2:])
+            index += 1
+            continue
+        if any(token.startswith(f"{option}=") for option in value_options if option.startswith("--")):
+            option, value = token.split("=", 1)
+            if option == "--regexp":
+                pattern_from_option = True
+            elif option in {"--file", "--glob", "--iglob", "--include", "--exclude", "--exclude-from"}:
+                selectors.append(value)
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        positional.append(token)
+        index += 1
+    if executable == "rg" and "--files" in tokens:
+        return selectors + positional
+    if executable == "grep" and any(flag in tokens for flag in {"-r", "-R", "--recursive"}) and len(positional) == 1:
+        return selectors + positional
+    return selectors + (positional if pattern_from_option else positional[1:])
+
+
+def _is_sensitive_target(value: str) -> bool:
+    """Check a path or glob selector after making glob boundaries explicit."""
+    glob_normalized = re.sub(r"[*?\[\]{}!,]+", "/", value)
+    return bool(
+        SENSITIVE_FILE_PATTERN.search(value)
+        or SENSITIVE_DIRECTORY_PATTERN.search(value)
+        or SENSITIVE_FILE_PATTERN.search(glob_normalized)
+        or SENSITIVE_DIRECTORY_PATTERN.search(glob_normalized)
+    )
+
+
+def _search_has_sensitive_target(seg: str) -> bool:
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
+        return True
+    targets = _search_target_tokens(tokens)
+    return any(_is_sensitive_target(target) for target in targets)
+
+
+def _is_readonly_substitution_script(script: str) -> bool:
+    """Accept one sed s/// print transformation, never e/w or extra commands."""
+    if len(script) < 4 or script[0] != "s" or script[1].isalnum() or script[1] in {"\\", "\n", "\r"}:
+        return False
+    delimiter, separators, escaped = script[1], 0, False
+    for index, char in enumerate(script[2:], start=2):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+        elif char == delimiter:
+            separators += 1
+            if separators == 2:
+                return bool(re.fullmatch(r"[gIp0-9]*", script[index + 1:]))
+    return False
+
+
+def _is_readonly_diagnostic_sed(tokens: list[str]) -> bool:
+    index = 1
+    while index < len(tokens) and tokens[index] in {"-E", "-r", "-n", "-En", "-nE", "-rn", "-nr"}:
+        index += 1
+    if index >= len(tokens) or not _is_readonly_substitution_script(tokens[index]):
+        return False
+    targets = tokens[index + 1:]
+    return bool(targets) and all(
+        not target.startswith("-")
+        and not _is_sensitive_target(target)
+        and not _BROAD_WILDCARD_RE.search(target)
+        for target in targets
+    )
+
+
+def _is_readonly_diagnostic_segment(seg: str, depth: int = 0) -> bool:
+    try:
+        tokens = shlex.split(seg)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    executable = Path(tokens[0]).name
+    if executable == "docker":
+        return _is_readonly_docker_exec(seg, depth=depth + 1)
+    if executable in {"true", "false"}:
+        return len(tokens) == 1
+    if executable == "test":
+        return len(tokens) == 3 and tokens[1] in {"-e", "-f", "-d", "-r", "-s", "-L"} and not _is_sensitive_target(tokens[2])
+    if executable == "sed" and _is_readonly_diagnostic_sed(tokens):
+        return True
+    return _is_readonly_pipeline_segment(seg)
+
+
+def _is_readonly_docker_exec(cmd_str: str, depth: int = 0) -> bool:
+    """Recursively verify a local docker exec payload as a read-only diagnostic."""
+    if depth >= 2 or any(char in cmd_str for char in ("$", "`", "\n", "\r")):
+        return False
+    structure = _shell_structure_view(cmd_str)
+    if re.search(r">>?|<<?", structure) or _FORENSIC_NETWORK_BIN_RE.search(cmd_str):
+        return False
+    try:
+        tokens = shlex.split(cmd_str)
+    except ValueError:
+        return False
+    if len(tokens) < 4 or tokens[:2] != ["docker", "exec"]:
+        return False
+    index = 2
+    while index < len(tokens) and re.fullmatch(r"-[it]+", tokens[index]):
+        index += 1
+    if index >= len(tokens) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", tokens[index]):
+        return False
+    payload = tokens[index + 1:]
+    if not payload:
+        return False
+    if Path(payload[0]).name in {"sh", "bash"}:
+        if len(payload) != 3 or payload[1] not in {"-c", "-lc"}:
+            return False
+        inner = payload[2]
+        inner_structure = _shell_structure_view(inner)
+        if re.search(r"\$\(|`|>>?|<<?", inner_structure) or _FORENSIC_NETWORK_BIN_RE.search(inner):
+            return False
+        segments = [segment.strip() for segment in _split_shell_control_segments(inner) if segment.strip()]
+        return bool(segments) and len(segments) <= 8 and all(
+            _is_readonly_diagnostic_segment(segment, depth=depth) for segment in segments
+        )
+    return _is_readonly_diagnostic_segment(shlex.join(payload), depth=depth)
+
+
 def _is_readonly_pipeline_segment(seg: str) -> bool:
     """True if a single pipeline segment is a pure read-only command with no sensitive target."""
     seg = seg.strip()
@@ -1443,6 +1608,8 @@ def _is_readonly_pipeline_segment(seg: str) -> bool:
     if not tokens:
         return False
     cmd = tokens[0]
+    if cmd == "docker":
+        return _is_readonly_docker_exec(seg)
     # git: parse -C and accept only closed read-only subcommands.
     if cmd == "git":
         parsed = _parse_git_invocation(tokens)
@@ -1458,6 +1625,15 @@ def _is_readonly_pipeline_segment(seg: str) -> bool:
         return _is_safe_cd_segment(seg)
     if cmd not in READONLY_PIPELINE_COMMANDS:
         return False
+    if cmd in {"grep", "rg"}:
+        if cmd == "rg" and any(token == "--pre" or token.startswith("--pre=") for token in tokens[1:]):
+            return False
+        targets = _search_target_tokens(tokens)
+        return not any(
+            _is_sensitive_target(target)
+            or _BROAD_WILDCARD_RE.search(target)
+            for target in targets
+        )
     # sed is a language: override the loose READONLY membership with the strict
     # read-only whitelist (_is_readonly_sed) so e/w/s///w/-i forms in a pipeline
     # never fast-track.
@@ -1502,6 +1678,9 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     if _is_obvious_safe_version_help(cmd_str):
         return True
 
+    if cmd_str.lstrip().startswith("docker "):
+        return _is_readonly_docker_exec(cmd_str)
+
     # A single or all-Git chain uses the closed parser exclusively. This prevents
     # prefix regexes from treating mutations such as `git branch new-name` or
     # `git tag v1` as read-only while preserving mixed read pipelines/chains.
@@ -1543,6 +1722,21 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     tokens = cmd_str.split()
     if not tokens or tokens[0] not in FAST_TRACK_SAFE_COMMANDS:
         return False
+    if tokens[0] in {"grep", "rg"}:
+        try:
+            search_tokens = shlex.split(cmd_str)
+        except ValueError:
+            return False
+        if tokens[0] == "rg" and any(
+            token == "--pre" or token.startswith("--pre=") for token in search_tokens[1:]
+        ):
+            return False
+        targets = _search_target_tokens(search_tokens)
+        return not any(
+            _is_sensitive_target(target)
+            or _BROAD_WILDCARD_RE.search(target)
+            for target in targets
+        )
     # INV-SENS-2: single-command broad/root-level or sensitive targets -> fail-closed
     if SENSITIVE_FILE_PATTERN.search(cmd_str) or SENSITIVE_DIRECTORY_PATTERN.search(cmd_str):
         return False
@@ -2334,7 +2528,7 @@ def _audit_static_shell_command(
                 f"Forbidden shell redirection WRITE to Hermes Sandbox: '{cmd_str}'",
                 DecisionLayer.SANDBOX_GUARD,
             )
-        sub_commands = re.split(r"[;&|]+", cmd_str)
+        sub_commands = _split_shell_control_segments(cmd_str)
         for sub_cmd in sub_commands:
             sub_cmd = sub_cmd.strip()
             for write_bin in SHELL_WRITE_COMMANDS:
@@ -2346,12 +2540,27 @@ def _audit_static_shell_command(
                     )
 
     # 4. Check sensitive file reading or network exfiltration
+    for sub_cmd in _split_shell_control_segments(cmd_str):
+        try:
+            executable = Path(shlex.split(sub_cmd)[0]).name
+        except (ValueError, IndexError):
+            continue
+        if executable in {"grep", "rg"} and _search_has_sensitive_target(sub_cmd):
+            return False, f"Attempting to READ sensitive file: '{sub_cmd.strip()}'", DecisionLayer.SECRET_GUARD
     if SENSITIVE_FILE_PATTERN.search(cmd_str) and not FORGEJO_HOST_PATTERN.search(cmd_str):
-        sub_commands = re.split(r"[;&|]+", cmd_str)
+        sub_commands = _split_shell_control_segments(cmd_str)
         for sub_cmd in sub_commands:
             sub_cmd = sub_cmd.strip()
             for read_bin in READ_COMMANDS:
                 if re.search(rf"\b{read_bin}\b", sub_cmd, re.IGNORECASE) and SENSITIVE_FILE_PATTERN.search(sub_cmd):
+                    try:
+                        executable = Path(shlex.split(sub_cmd)[0]).name
+                    except (ValueError, IndexError):
+                        executable = ""
+                    if executable in {"grep", "rg"} and not _search_has_sensitive_target(sub_cmd):
+                        continue
+                    if executable == "docker" and _is_readonly_docker_exec(sub_cmd):
+                        continue
                     return False, f"Attempting to READ sensitive file: '{sub_cmd}'", DecisionLayer.SECRET_GUARD
             for net_bin in NETWORK_EXFIL_COMMANDS:
                 if re.search(rf"\b{net_bin}\b", sub_cmd, re.IGNORECASE) and SENSITIVE_FILE_PATTERN.search(sub_cmd):

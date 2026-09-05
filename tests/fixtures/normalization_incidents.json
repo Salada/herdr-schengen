@@ -1,11 +1,11 @@
 [
   {
     "id": "screenshot-1-docker-config-read",
-    "raw_input": "docker exec agentsview sh -c test -f /data/config.toml",
-    "canonical_input": "docker exec agentsview sh -c test -f /data/config.toml",
+    "raw_input": "docker exec agentsview sh -c 'test -f /data/config.toml'",
+    "canonical_input": "docker exec agentsview sh -c 'test -f /data/config.toml'",
     "normalization_provenance": "recent-unwrapped",
-    "expected_layer": "NOT_ALLOWLISTED",
-    "expected_outcome": "defer"
+    "expected_layer": "FAST_TRACK_AST",
+    "expected_outcome": "approve"
   },
   {
     "id": "screenshot-2-rg-encryption-names",
