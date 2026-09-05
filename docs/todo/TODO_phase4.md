@@ -162,59 +162,13 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - Context: PR #171에서 적용된 read-once 메모리 캐시는 프로세스 단위로 동작하여, TUI에서 임계치(Threshold)를 변경하더라도 Watcher 데몬 프로세스가 SIGHUP 리로드 전까지 변경사항을 즉시 인지하지 못함.
   - Solution: 짧은 TTL (예: 5~10s) 도입, SIGHUP/인메모리 invalidate 연동 또는 동기화 문서화. (Non-blocking Deferred)
 
-[] [Feature/Optimization/P1] 자율적 Context Compaction 및 내부 토큰 절감(Caveman 압축 & 영한 렌더링 분리) 엔진:
-  - Context & Motivation:
-    • 세션이 지속될수록 이전 심사 툴콜 결과(`investigate_pane_history`, 긴 스크립트 덤프, AST 덤프)가 `self.history`에 누적되어 In-Token이 수만 단위로 폭증 ➔ 지연 시간(Latency) 및 API 비용 폭증, 로컬 LLM 컨텍스트 오버플로우 초래.
-    • Claude, Codex, OpenCode와 같은 주력 에이전트들이 공통 채택하는 **Compaction(압축/요약) 메커니즘**을 Herdr-Schengen에 맞춤형으로 구현.
-    • 핵심 철학: **"TUI는 토큰을 아끼기 위한 인터페이스이다. 화면에 렌더링되는 장문/한글 텍스트가 내부 LLM 히스토리 토큰으로 고스란히 누적되어서는 안 된다."**
-  - Core Architecture & Token Minimization Dimensions:
-    1. **에이전트 자율 판단형 Compaction (`tool: compact_context` 도구 스펙)**:
-       - `AVAILABLE_TOOLS`에 `compact_context` 도구 정의:
-         ```json
-         {
-           "type": "function",
-           "function": {
-             "name": "compact_context",
-             "description": "Prune old raw observation turns and synthesize accumulated investigation findings into concise Caveman-style English facts to prevent context overflow.",
-             "parameters": {
-               "type": "object",
-               "properties": {
-                 "findings_summary": {
-                   "type": "string",
-                   "description": "Dense Caveman-style English summary of verified facts, file states, and approvals from older turns (e.g. 'Turn1-4: repo clean, test suite passed, no egress leak, target file verified')."
-                 },
-                 "keep_last_n_turns": {
-                   "type": "integer",
-                   "description": "Number of most recent turn-pairs (user/assistant/tool) to retain verbatim. Defaults to 2.",
-                   "default": 2
-                 }
-               },
-               "required": ["findings_summary"]
-             }
-           }
-         }
-         ```
-       - `_execute_tool_call` 핸들러 구현:
-         • `self.history`에서 이전 턴들의 대형 payload(`investigate_pane_history`의 수백 줄 덤프 등)를 `findings_summary` 1줄의 `{"role": "system", "content": "[Context Compacted]: <findings_summary>"}` 단일 메시지로 치환.
-         • 최신 `keep_last_n_turns`는 보존하여 대화 연속성 및 직전 컨텍스트 보장.
-    2. **하이브리드 토큰 게이지 넛지 (Token Gauge Nudge & Auto-Boundary Reset)**:
-       - 순수 자율에만 의존할 경우 30k+ 토큰이 될 때까지 모델이 호출을 망각할 위험 방지.
-       - **Target Block Nudge**: In-Token 추정치가 임계치(예: 8,000 / 12,000 토큰)를 초과하면 시스템 인젝션 프롬프트 하단에 경고 넛지 삽입:
-         • `- Context Gauge: ~13.4k tokens [HIGH - Consider calling compact_context to prune older investigation dumps]`.
-       - **Escalation Boundary Auto-Reset**:
-         • `approve_escalation` 또는 `reject_escalation` 성공 시점(에스컬레이션 종료 경계)에서 이전 건의 상세 툴콜 observation들을 자동으로 purge하거나 최소 요약본만 남기고 클린스위프.
-    3. **내부 영문 압축 표기(Caveman Style) 누적 체계**:
-       - [https://github.com/juliusbrussee/caveman](https://github.com/juliusbrussee/caveman) 스타일의 압축 문법 차용.
-       - 조사, 불필요한 공백, 장황한 서술어를 배제하고 핵심 토큰 위주로 내부 히스토리 보관 (예: `"Approved: cd safe && pytest ok. No egress, no mut"`).
-       - 한국어 토큰은 영문 대비 Byte-Pair Encoding(BPE) 비용이 2~3배 높으므로, **내부 추론 및 히스토리 컨텍스트는 영문/Caveman 형태로 고도로 압축하여 누적**.
-    4. **표현 계층(Display Layer) 분리 렌더링**:
-       - TUI 화면에 한국어로 친절하게 브리핑을 띄우는 작업은 무거운 메인 컨텍스트를 오염시키지 않고, 가벼운 단발성 포맷팅 템플릿(Lightweight Rendering Prompt / Mini Call)을 통해 화면에만 출력.
-       - TUI 렌더링 버퍼와 LLM Context Buffer를 1:1 결합하지 않고 분리(Decoupled Buffer)하여, 뷰포트 장식(`┃`, 테두리, ANSI, 비용 텍스트)이 LLM 프롬프트로 재유입되는 결함 원천 차단.
-    5. **Codex 작업 마일스톤 (Action Items & Milestones for Codex)**:
-       - M1: `dialog_snapshot` 및 `pane_history` TUI 노이즈(Border `┃`, Cost, Header) 정규식 전처리 스트리퍼 구현 (`strip_tui_decorations`).
-       - M2: `scripts/tools/schengen_agent_llm.py` 내 `AVAILABLE_TOOLS`에 `compact_context` 도구 스키마 및 실행기(`compact_context`) 추가.
-       - M3: In-Token 계산기 / 게이지 넛지 로직 및 에스컬레이션 종료 경계(`_run_llm_agent_loop` 종료 시점) Auto-Purge 연동.
-       - M4: 회귀 검증 단위 테스트 작성 (`tests/test_context_compaction.py` - history 축약 전후 길이 및 필수 턴 보존 검증).
+[x] [Feature/Optimization/P1/Urgent-1] Deterministic In-Flight Tool Observation Compaction (Zero-LLM Inspector/Judge Token Reduction) — Forgejo #217:
+  - 실제 비용 원인은 영구 `self.history`가 아니라 단일 `send_message` 안에서 최대 4회 Inspector 루프와 Judge로 재전송되는 대형 tool observation이다.
+  - 총 메시지 50,000자 초과 시 이전 round의 1,500자 초과 tool 결과만 결정론적으로 축약한다. 별도 LLM 요약 호출은 하지 않는다.
+  - 최신 multi-tool round 전체, 모든 assistant/tool-call 구조, 현재 요청, 시스템·보안 지침은 원문 그대로 보존한다.
+  - 축약 레코드는 post-redaction 원문의 tool 이름, call ID, 문자 수, SHA-256, head/tail 각 300자를 보존하며 전체 원문은 JSONL 감사 로그에 남긴다.
+  - ID pairing 이상, 내부 오류, 최신 round 단독 예산 초과 시 원본 메시지를 그대로 사용한다. 이는 증거 보존 fallback이며 승인 fallback이 아니다.
+  - 합성 60k+ 관측에서 55% 이상 입력 크기 절감과 불변식 회귀 테스트를 통과해야 한다.
 
 [] [Feature/Tools/P1] Gatekeeper/Inspector 자율 심사용 Ripgrep (`grep_search`) 및 모던 에이전트 관측 도구 체계 확장:
   - Context & Motivation:
@@ -438,7 +392,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     4. **TUI 메인루프 및 이벤트 핸들러 연동 (`schengen_tui.py`)**:
        - TUI의 상태 머신 전이(Active Escalation 인입, 큐 전환, 승인/거절 처리 완료) 시점에 비동기로 Herdr CLI 리포트 전송.
 
-[] [Deferred/OpenCode] OpenCode 보조 지침 전달 큐, 다이얼로그 디바운스 및 배치 Defer UX 개선 (#3615/#3623/#3636 후속):
+[] [Stale/Priority:Lowest/OpenCode] OpenCode 보조 지침 전달 큐, 다이얼로그 디바운스 및 배치 Defer UX 개선 (#3615/#3623/#3636 후속):
   - 1) **지침 전달 큐 (Instruction Queue)**: Bubble Tea 모달 상태에서 `send-text` 무효화 대응을 위해 모달 닫힘 이후(실행 재개/명령 완료 시점) 지침 주입 비동기 딜레이 큐 연동.
   - 2) **플러그인 IPC 확장**: OpenCode 플러그인 레벨에서의 지침 전달 채널 확장 (`opencode_permissions` IPC 연계).
   - 3) **다이얼로그 디바운스**: 연쇄 명령 다이얼로그 연속 발생 시 뷰포트 안정화 디바운스.

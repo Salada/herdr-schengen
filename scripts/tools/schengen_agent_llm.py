@@ -13,7 +13,10 @@ Core Capabilities:
 """
 
 import asyncio
+import copy
+import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -116,6 +119,132 @@ JUDGE_MODEL    = os.environ.get("SCHENGEN_JUDGE_MODEL")    or resolve_subagent_m
 
 SESSIONS_DIR = Path.home() / ".local" / "state" / "herdr-schengen" / "sessions"
 SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Deterministic in-flight context compaction. These limits intentionally use
+# characters instead of a model-specific tokenizer so behavior is stable
+# across Inspector/Judge providers.
+COMPACTION_TRIGGER_TOTAL_CHARS = 50_000
+COMPACTION_TOOL_RESULT_THRESHOLD = 1_500
+COMPACTION_HEAD_EXCERPT_CHARS = 300
+COMPACTION_TAIL_EXCERPT_CHARS = 300
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def _message_chars(messages: List[Dict[str, Any]]) -> int:
+    """Return the deterministic prompt-size estimate used by compaction."""
+    return sum(
+        len(str(message.get("content") or ""))
+        + len(str(message.get("tool_calls") or ""))
+        for message in messages
+    )
+
+
+def _compact_tool_observations(
+    messages: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Compact old large tool results while preserving the latest tool round.
+
+    Any malformed tool-call relationship or internal error returns the exact
+    original list. This is evidence-preserving fallback, never adjudication.
+    """
+    before_chars = _message_chars(messages)
+    stats: Dict[str, Any] = {
+        "before_chars": before_chars,
+        "after_chars": before_chars,
+        "compacted_tool_results": 0,
+        "warning": "",
+    }
+    if before_chars <= COMPACTION_TRIGGER_TOTAL_CHARS:
+        return messages, stats
+
+    try:
+        tool_names: Dict[str, str] = {}
+        tool_result_indices: Dict[str, int] = {}
+        assistant_rounds: List[Tuple[int, List[str]]] = []
+
+        for index, message in enumerate(messages):
+            role = message.get("role")
+            if role == "assistant" and message.get("tool_calls"):
+                call_ids: List[str] = []
+                for call in message["tool_calls"]:
+                    call_id = call.get("id")
+                    function = call.get("function") or {}
+                    name = function.get("name")
+                    if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
+                        return messages, stats
+                    if call_id in tool_names:
+                        return messages, stats
+                    tool_names[call_id] = name
+                    call_ids.append(call_id)
+                assistant_rounds.append((index, call_ids))
+            elif role == "tool":
+                call_id = message.get("tool_call_id")
+                if not isinstance(call_id, str) or call_id not in tool_names or call_id in tool_result_indices:
+                    return messages, stats
+                tool_result_indices[call_id] = index
+
+        if not assistant_rounds:
+            return messages, stats
+        if set(tool_names) != set(tool_result_indices):
+            return messages, stats
+
+        latest_assistant_index, latest_call_ids = assistant_rounds[-1]
+        latest_indices = [latest_assistant_index] + [tool_result_indices[call_id] for call_id in latest_call_ids]
+        latest_round_chars = _message_chars([messages[index] for index in latest_indices])
+        if latest_round_chars > COMPACTION_TRIGGER_TOTAL_CHARS:
+            stats["warning"] = "latest_tool_round_exceeds_compaction_budget"
+            _LOGGER.warning(
+                "Context compaction skipped: latest tool round is %d chars (budget %d)",
+                latest_round_chars,
+                COMPACTION_TRIGGER_TOTAL_CHARS,
+            )
+            return messages, stats
+
+        latest_ids = set(latest_call_ids)
+        candidate = copy.deepcopy(messages)
+        compacted = 0
+        for call_id, index in tool_result_indices.items():
+            if call_id in latest_ids:
+                continue
+            content = messages[index].get("content")
+            if not isinstance(content, str) or len(content) <= COMPACTION_TOOL_RESULT_THRESHOLD:
+                continue
+
+            compact_record: Dict[str, Any] = {
+                "_compacted": True,
+                "tool": tool_names[call_id],
+                "tool_call_id": call_id,
+                "original_char_count": len(content),
+                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "head_excerpt": content[:COMPACTION_HEAD_EXCERPT_CHARS],
+                "tail_excerpt": content[-COMPACTION_TAIL_EXCERPT_CHARS:],
+                "notice": "[COMPACTED OBSOLETE OBSERVATION: Full raw payload preserved in local JSONL transcript]",
+            }
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, dict) and isinstance(parsed.get("status"), (str, int, float, bool)):
+                    compact_record["status"] = parsed["status"]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+
+            candidate[index]["content"] = json.dumps(
+                compact_record,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            compacted += 1
+
+        if not compacted:
+            return messages, stats
+
+        stats["after_chars"] = _message_chars(candidate)
+        stats["compacted_tool_results"] = compacted
+        return candidate, stats
+    except Exception:
+        _LOGGER.exception("Context compaction failed; retaining original evidence")
+        return messages, stats
 
 
 GUARD_TOOLS = [
@@ -1105,6 +1234,9 @@ class SchengenAgentChat:
         self.inspector_completion_tokens = 0
         self.judge_prompt_tokens = 0
         self.judge_completion_tokens = 0
+        self.compaction_events = 0
+        self.compacted_tool_results = 0
+        self.compaction_chars_saved = 0
 
     def cancel(self) -> None:
         """Flag current in-flight LLM call to abort immediately."""
@@ -1129,7 +1261,30 @@ class SchengenAgentChat:
             "inspector_out": self.inspector_completion_tokens,
             "judge_in": self.judge_prompt_tokens,
             "judge_out": self.judge_completion_tokens,
+            "compaction_events": self.compaction_events,
+            "compacted_tool_results": self.compacted_tool_results,
+            "compaction_chars_saved": self.compaction_chars_saved,
         }
+
+    def _compact_messages_for_request(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        compacted, stats = _compact_tool_observations(messages)
+        count = int(stats["compacted_tool_results"])
+        if count:
+            saved = int(stats["before_chars"]) - int(stats["after_chars"])
+            self.compaction_events += 1
+            self.compacted_tool_results += count
+            self.compaction_chars_saved += saved
+            _LOGGER.info(
+                "Compacted %d obsolete tool observations: %d -> %d chars",
+                count,
+                stats["before_chars"],
+                stats["after_chars"],
+            )
+            self._append_transcript(
+                role="system",
+                content={"event": "context_compaction", **stats},
+            )
+        return compacted
 
     def _append_transcript(self, role: str, content: Any, tool_calls: Optional[List[Dict[str, Any]]] = None) -> None:
         try:
@@ -1212,6 +1367,7 @@ class SchengenAgentChat:
             for loop_turn in range(4):
                 if self._cancel_requested:
                     return "🛑 [Interrupted]: LLM investigation aborted by user."
+                messages = self._compact_messages_for_request(messages)
                 inspector_headers = {
                     "Authorization": f"Bearer {self.inspector_api_key}",
                     "Content-Type": "application/json",
@@ -1268,6 +1424,7 @@ class SchengenAgentChat:
                     if (self.judge_api_key != self.inspector_api_key or 
                         self.judge_base_url != self.inspector_base_url or 
                         self.judge_model != self.inspector_model):
+                        messages = self._compact_messages_for_request(messages)
                         judge_payload = {
                             "model": self.judge_model,
                             "messages": messages,
