@@ -30,9 +30,9 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
    - 2) **#4027 Heredoc 본문 마스킹 & 시맨틱 복잡도(Multi-Factor) 완화** (커밋 메시지 과도한 복잡도 패널티 제거)
    - 3) **#3143 / #3219 OpenCode Prefix & 상하위 디렉터리 경로 매칭** (화면 절단으로 인한 키 주입 실패 방어, `ctrl+f`는 신중 모드)
    - 4) **TUI SettingsModal UI 토글 연동** (`approve_advisory`, `Approval Bias`, `Fast-Track Mode`) & `get_complexity_tax_config` TTL 캐시 무효화.
-   - 5) **[P1 Urgent] 자율적 Context Compaction & 내부 토큰 절감 엔진** (Inspector 자율 트리거, Caveman 영문 압축 표기, 한글/TUI 렌더링 레이어 분리).
+   - 5) **[Completed/Urgent-1] Deterministic In-Flight Tool Observation Compaction** (Forgejo #217 / PR #218).
    - 6) **[Feature/Tools/P1] Gatekeeper/Inspector 자율 심사용 Ripgrep (`grep_search`) 및 모던 에이전트 관측 도구 체계 (`find_by_name`, `git_diff_stat`) 구축**.
-   - 7) **[Feature/Herdr/P2] `herdr agent read` 기반 Agent Thread 고수준 컨텍스트 수집 최적화** (대상이 에이전트인 경우 `pane read` 대신 구조화된 `agent read` 우선 활용).
+   - 7) **[Feature/Herdr/Urgent-2] `herdr agent read` 기반 Agent Thread 고수준 컨텍스트 수집 최적화** (대상이 에이전트인 경우 구조화된 thread를 우선 활용하고 raw pane으로 안전하게 fallback).
    - 8) **[Bug/Codex/P1] Reject instruction Enter dropped due to modal transition race (#5096)** (escape-to-prompt transition timing gap & Enter loss).
 
 2. ⚙️ **[Track 2 — Sprint 4 대형 동시성 엔진 (EPIC Concurrency)]**:
@@ -213,7 +213,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     • M3: Gatekeeper 프롬프트에 `grep_search` 활용 지침 추가 ("명령어가 민감 환경변수나 파괴적 스크립트를 건드리는지 의심될 경우 `grep_search`로 선행 검증하라").
     • M4: 단위 테스트 작성 (`tests/test_gatekeeper_investigation_tools.py`).
 
-[] [Feature/Herdr/P2] `herdr agent read` 기반 Agent Thread 컨텍스트 수집 최적화:
+[x] [Feature/Herdr/Urgent-2] `herdr agent read` 기반 Agent Thread 컨텍스트 수집 최적화 — Forgejo #219:
   - Context & Motivation:
     • 현재 `scripts/adapters/herdr_client.py`의 `get_pane_text` 및 LLM 도구 `investigate_pane_history`는 원시 터미널 덤프인 `herdr pane read <pane_id>`에 전적으로 의존함.
     • 대상 pane에서 코딩 에이전트(Codex, OpenCode, Hermes, AGY 등)가 실행 중인 경우, 단순 원시 뷰포트/터미널 행(`pane read`) 대신 Herdr가 제공하는 **`herdr agent read <target>`**을 사용하면:
@@ -222,9 +222,10 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
       3) `agent get` 메타데이터(세션 ID, 모델명, 에이전트 라이프사이클 상태)와 자연스럽게 결합하여 심사 품질 대폭 향상.
   - Architecture & Specification:
     1. **스마트 소스 라우팅 및 세션 유효성 판정 (Smart Buffer Routing & Session Guard in `herdr_client.py`)**:
-       - `get_pane_text(pane_id, ...)` 호출 시, 대상 pane이 Herdr에 등록된 **유효한 실시간 에이전트 세션(`agent_session.value` 존재 & `agent_status != 'unknown'`)**인지 먼저 검증:
+       - 기존 `get_pane_text`는 모달 liveness와 canonical request 안전 경로를 위해 변경하지 않는다. 별도 `get_agent_or_pane_text`가 조사 도구에서만 세션을 판별한다.
+       - `agent_session.value`가 있고 status가 `working|idle|done|blocked`인 경우에만 Agent Thread 읽기를 시도한다. 미인식 status는 pane으로 fallback한다.
          • **유효 Agent Session 확인 시**: `herdr agent read <pane_id> --source recent-unwrapped --lines <N>`을 호출하여 정제된 스레드 텍스트 획득.
-         • **Agent Session이 아닌 경우 (일반 대화형 셸, 백그라운드 작업, 세션 미식별/종료 상태)**:
+         • 명시적 pane source 또는 `full_dump`는 Agent Thread를 우회한다. Agent Session이 아니거나 agent read가 실패·빈 문자열·공백만 반환하는 경우:
            - **주의 및 의사판단 규칙**: `agent read`는 유효 세션이 없으면 빈 결과나 에러를 반환할 뿐만 아니라 에이전트 외 명령(인간의 직접 셸 입력 등)의 시각적 맥락을 유실할 수 있음.
            - 따라서 **"무조건 agent read를 고집하지 않고, 세션 비존재 시 즉시 원시 `pane read`로 전환하거나 심사 레이어에 'Non-Agent Raw Shell Session'임을 명시적으로 알리는 의사판단 분기"**를 강제 적용.
     2. **`investigate_pane_history` 툴 및 관측 레이어 연계**:
@@ -234,6 +235,9 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     • M2: 세션 미식별 시 원시 터미널(`pane read`) 의사판단 fallback 경로 및 로깅 강화.
     • M3: `scripts/tools/schengen_agent_llm.py`의 `investigate_pane_history` 핸들러에서 에이전트 스레드 우선 읽기 적용.
     • M4: 단위 테스트 추가 (`tests/test_herdr_agent_read_routing.py` - 유효 세션 vs 일반 셸 분기 테스트).
+
+[] [Deferred/Hardening/Low] `herdr_client.run_cmd`의 `agent list`/`agent read` subprocess timeout 도입 (#219 피어리뷰 후속):
+  - 현재 공통 helper는 timeout이 없어 Herdr CLI hang 시 Inspector가 지연될 수 있다. 모든 기존 caller의 timeout 의미를 함께 검토한 별도 변경으로 처리한다.
 
 ---
 

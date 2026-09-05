@@ -182,10 +182,13 @@ Approved. All files verified safely."""
         self.assertIn("english_feedback", ko)
         self.assertIn("professional English", ko)
 
-    @patch("tools.schengen_agent_llm.get_pane_text")
-    def test_investigate_pane_history_full_dump(self, mock_get_pane):
+    @patch("tools.schengen_agent_llm.get_agent_or_pane_text")
+    def test_investigate_pane_history_full_dump(self, mock_get_context):
         from tools.schengen_agent_llm import execute_tool_call
-        mock_get_pane.return_value = "multiline script line 1\nmultiline script line 2\n"
+        mock_get_context.return_value = (
+            "multiline script line 1\nmultiline script line 2\n",
+            "pane:scrollback",
+        )
         
         result_json = execute_tool_call("investigate_pane_history", {
             "pane_id": "w1D:p1",
@@ -196,8 +199,30 @@ Approved. All files verified safely."""
         self.assertEqual(parsed["pane_id"], "w1D:p1")
         self.assertEqual(parsed["lines_read"], 150)
         self.assertTrue(parsed["full_dump"])
+        self.assertEqual(parsed["capture_source"], "pane:scrollback")
         self.assertIn("multiline script line 1", parsed["pane_text_snippet"])
-        mock_get_pane.assert_called_once_with("w1D:p1", lines=150, full_dump=True)
+        mock_get_context.assert_called_once_with("w1D:p1", lines=150, full_dump=True)
+
+    @patch("tools.schengen_agent_llm.get_agent_or_pane_text")
+    def test_investigate_agent_thread_reports_source_and_redacts(self, mock_get_context):
+        from tools.schengen_agent_llm import execute_tool_call
+
+        secret = "sk-1234567890abcdefghijklmnopqrstuvwxyz"
+        mock_get_context.return_value = (
+            "old-noise\n" * 2_000 + f"Authorization: Bearer {secret}\n",
+            "agent:recent-unwrapped",
+        )
+        self.assertIn(secret, mock_get_context.return_value[0])
+
+        parsed = json.loads(execute_tool_call("investigate_pane_history", {
+            "pane_id": "w1D:p1",
+            "lines": 100,
+        }))
+
+        self.assertEqual(parsed["capture_source"], "agent:recent-unwrapped")
+        self.assertLessEqual(len(parsed["pane_text_snippet"]), 12_000)
+        self.assertNotIn(secret, parsed["pane_text_snippet"])
+        self.assertIn("[REDACTED:api-key]", parsed["pane_text_snippet"])
 
 
 @unittest.skipUnless(HAS_TEXTUAL, "Textual is required for TUI UI tests")

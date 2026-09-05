@@ -68,7 +68,7 @@ from core.guard_db import (
     record_audit_log,
     resolve_escalation,
 )
-from adapters.herdr_client import get_pane_text
+from adapters.herdr_client import get_agent_or_pane_text
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter
 from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
 from adapters.auto_advance import run_auto_advance
@@ -700,12 +700,17 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
         lines = args.get("lines", 100)
         full_dump = bool(args.get("full_dump", False))
         try:
-            raw = get_pane_text(pane_id, lines=lines, full_dump=full_dump)
+            raw, capture_source = get_agent_or_pane_text(
+                pane_id,
+                lines=lines,
+                full_dump=full_dump,
+            )
             safe_text = redact_for_cloud(raw)
             return json.dumps({
                 "pane_id": pane_id,
                 "lines_read": lines,
                 "full_dump": full_dump,
+                "capture_source": capture_source,
                 "pane_text_snippet": safe_text[-12000:] if safe_text else "",
             }, ensure_ascii=False)
         except Exception as e:
