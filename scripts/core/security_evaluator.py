@@ -1664,12 +1664,12 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     if _FORENSIC_NETWORK_BIN_RE.search(cmd_str):
         return False          # forensic / network egress primitives
 
-    if cmd_str.lstrip().startswith("docker "):
-        return _is_readonly_docker_exec(cmd_str)
-
     # Obvious-safe closed recognizer: bare `<bin> --version|-v|-V|--help|-h`.
     if _is_obvious_safe_version_help(cmd_str):
         return True
+
+    if cmd_str.lstrip().startswith("docker "):
+        return _is_readonly_docker_exec(cmd_str)
 
     # A single or all-Git chain uses the closed parser exclusively. This prevents
     # prefix regexes from treating mutations such as `git branch new-name` or
