@@ -2,6 +2,7 @@
 """Judge no-tool-call, decision-source, and runtime provenance regressions."""
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -141,6 +142,55 @@ class TestJudgeObservability(unittest.TestCase):
         self.assertTrue(tracked)
         self.assertTrue(all((REPO_ROOT / path).is_file() for path in tracked))
         self.assertFalse(any("__pycache__" in path.parts or path.suffix == ".pyc" for path in tracked))
+
+    def test_installer_rejects_tracked_source_symlink(self):
+        source_root = Path(self.temp_dir.name).resolve() / "source"
+        target = Path(self.temp_dir.name).resolve() / "herdr-schengen"
+        link = source_root / "scripts/link.py"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(Path(__file__))
+        with patch.object(schengen_install, "REPO_ROOT", source_root), patch.object(
+            schengen_install, "CANONICAL_TARGETS", frozenset({target.absolute()})
+        ), patch.object(schengen_install, "source_is_clean", return_value=True), patch.object(
+            schengen_install, "tracked_files", return_value=(Path("scripts/link.py"),)
+        ), self.assertRaisesRegex(ValueError, "not a regular file"):
+            schengen_install.install(target)
+        self.assertFalse(target.exists())
+
+    def test_installer_copy_failure_preserves_previous_runtime(self):
+        target = Path(self.temp_dir.name).resolve() / "herdr-schengen"
+        sentinel = target / "scripts/previous.py"
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_text("previous", encoding="utf-8")
+        with patch.object(
+            schengen_install, "CANONICAL_TARGETS", frozenset({target.absolute()})
+        ), patch.object(schengen_install, "source_is_clean", return_value=True), patch.object(
+            schengen_install.shutil, "copy2", side_effect=OSError("copy failed")
+        ), self.assertRaisesRegex(OSError, "copy failed"):
+            schengen_install.install(target)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "previous")
+        self.assertFalse(any(target.parent.glob(f".{target.name}.stage-*")))
+
+    def test_installer_activation_failure_rolls_back_previous_runtime(self):
+        target = Path(self.temp_dir.name).resolve() / "herdr-schengen"
+        sentinel = target / "scripts/previous.py"
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_text("previous", encoding="utf-8")
+        real_replace = os.replace
+
+        def fail_stage_activation(source, destination):
+            if Path(source).name.startswith(f".{target.name}.stage-"):
+                raise OSError("activation failed")
+            return real_replace(source, destination)
+
+        with patch.object(
+            schengen_install, "CANONICAL_TARGETS", frozenset({target.absolute()})
+        ), patch.object(schengen_install, "source_is_clean", return_value=True), patch.object(
+            schengen_install.os, "replace", side_effect=fail_stage_activation
+        ), self.assertRaisesRegex(OSError, "activation failed"):
+            schengen_install.install(target)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "previous")
+        self.assertFalse(any(target.parent.glob(f".{target.name}.backup-*")))
 
 
 class _Response:
