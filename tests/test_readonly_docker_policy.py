@@ -53,6 +53,10 @@ class TestReadonlyDockerPolicy(unittest.TestCase):
             "rg TOKEN ~/.ssh/id_rsa",
             "grep KEY .env",
             "grep -r --include=.env TOKEN src",
+            "rg -g '*.env' TOKEN src",
+            "rg --glob='**/.netrc' TOKEN src",
+            "grep -r --include='credentials*' TOKEN src",
+            "rg TOKEN /etc/shadow",
         ):
             with self.subTest(command=command):
                 safe, _reason, layer = audit_shell_command(command)

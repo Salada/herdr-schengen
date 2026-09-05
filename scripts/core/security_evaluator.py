@@ -95,6 +95,7 @@ SENSITIVE_FILE_PATTERN = re.compile(
         {SEP}\.pypirc{END_SEP}|
         {SEP}authorized_keys{END_SEP}|
         {SEP}known_hosts{END_SEP}
+        |/(?:private/)?etc/(?:shadow|passwd){END_SEP}
     )""",
     re.VERBOSE | re.IGNORECASE,
 )
@@ -244,6 +245,7 @@ READ_COMMANDS = {
     "head",
     "tail",
     "grep",
+    "rg",
     "less",
     "more",
     "awk",
@@ -1487,13 +1489,24 @@ def _search_target_tokens(tokens: list[str]) -> list[str]:
     return selectors + (positional if pattern_from_option else positional[1:])
 
 
+def _is_sensitive_target(value: str) -> bool:
+    """Check a path or glob selector after making glob boundaries explicit."""
+    glob_normalized = re.sub(r"[*?\[\]{}!,]+", "/", value)
+    return bool(
+        SENSITIVE_FILE_PATTERN.search(value)
+        or SENSITIVE_DIRECTORY_PATTERN.search(value)
+        or SENSITIVE_FILE_PATTERN.search(glob_normalized)
+        or SENSITIVE_DIRECTORY_PATTERN.search(glob_normalized)
+    )
+
+
 def _search_has_sensitive_target(seg: str) -> bool:
     try:
         tokens = shlex.split(seg)
     except ValueError:
         return True
     targets = _search_target_tokens(tokens)
-    return any(SENSITIVE_FILE_PATTERN.search(target) or SENSITIVE_DIRECTORY_PATTERN.search(target) for target in targets)
+    return any(_is_sensitive_target(target) for target in targets)
 
 
 def _is_readonly_substitution_script(script: str) -> bool:
@@ -1523,7 +1536,7 @@ def _is_readonly_diagnostic_sed(tokens: list[str]) -> bool:
     targets = tokens[index + 1:]
     return bool(targets) and all(
         not target.startswith("-")
-        and not (SENSITIVE_FILE_PATTERN.search(target) or SENSITIVE_DIRECTORY_PATTERN.search(target))
+        and not _is_sensitive_target(target)
         and not _BROAD_WILDCARD_RE.search(target)
         for target in targets
     )
@@ -1542,9 +1555,7 @@ def _is_readonly_diagnostic_segment(seg: str, depth: int = 0) -> bool:
     if executable in {"true", "false"}:
         return len(tokens) == 1
     if executable == "test":
-        return len(tokens) == 3 and tokens[1] in {"-e", "-f", "-d", "-r", "-s", "-L"} and not (
-            SENSITIVE_FILE_PATTERN.search(tokens[2]) or SENSITIVE_DIRECTORY_PATTERN.search(tokens[2])
-        )
+        return len(tokens) == 3 and tokens[1] in {"-e", "-f", "-d", "-r", "-s", "-L"} and not _is_sensitive_target(tokens[2])
     if executable == "sed" and _is_readonly_diagnostic_sed(tokens):
         return True
     return _is_readonly_pipeline_segment(seg)
@@ -1552,7 +1563,7 @@ def _is_readonly_diagnostic_segment(seg: str, depth: int = 0) -> bool:
 
 def _is_readonly_docker_exec(cmd_str: str, depth: int = 0) -> bool:
     """Recursively verify a local docker exec payload as a read-only diagnostic."""
-    if depth > 2 or any(char in cmd_str for char in ("$", "`", "\n", "\r")):
+    if depth >= 2 or any(char in cmd_str for char in ("$", "`", "\n", "\r")):
         return False
     structure = _shell_structure_view(cmd_str)
     if re.search(r">>?|<<?", structure) or _FORENSIC_NETWORK_BIN_RE.search(cmd_str):
@@ -1619,8 +1630,7 @@ def _is_readonly_pipeline_segment(seg: str) -> bool:
             return False
         targets = _search_target_tokens(tokens)
         return not any(
-            SENSITIVE_FILE_PATTERN.search(target)
-            or SENSITIVE_DIRECTORY_PATTERN.search(target)
+            _is_sensitive_target(target)
             or _BROAD_WILDCARD_RE.search(target)
             for target in targets
         )
@@ -1723,8 +1733,7 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
             return False
         targets = _search_target_tokens(search_tokens)
         return not any(
-            SENSITIVE_FILE_PATTERN.search(target)
-            or SENSITIVE_DIRECTORY_PATTERN.search(target)
+            _is_sensitive_target(target)
             or _BROAD_WILDCARD_RE.search(target)
             for target in targets
         )
@@ -2531,6 +2540,13 @@ def _audit_static_shell_command(
                     )
 
     # 4. Check sensitive file reading or network exfiltration
+    for sub_cmd in _split_shell_control_segments(cmd_str):
+        try:
+            executable = Path(shlex.split(sub_cmd)[0]).name
+        except (ValueError, IndexError):
+            continue
+        if executable in {"grep", "rg"} and _search_has_sensitive_target(sub_cmd):
+            return False, f"Attempting to READ sensitive file: '{sub_cmd.strip()}'", DecisionLayer.SECRET_GUARD
     if SENSITIVE_FILE_PATTERN.search(cmd_str) and not FORGEJO_HOST_PATTERN.search(cmd_str):
         sub_commands = _split_shell_control_segments(cmd_str)
         for sub_cmd in sub_commands:
