@@ -228,6 +228,10 @@ def truncate_cmd_display(raw_cmd: Any, max_cells: int = AUDIT_CMD_MAX_CELLS) -> 
 def audit_verdict_badge(decision: Any, resolution: Any, approver: Any) -> str:
     """Sidebar "V" verdict cell from existing stored fields (presentation only)."""
     dec = str(decision or "")
+    if dec == "MODEL_NO_TOOL_CALL":
+        return "[yellow]NTC[/]"
+    if dec == "AUTO_DEFERRED":
+        return "[yellow]DEF[/]"
     if "APPROVE" in dec:
         return "[green]OK[/]"
     if resolution == "APPROVED":
@@ -273,7 +277,12 @@ def modal_audit_cells(log: dict) -> Tuple[str, ...]:
     AUDIT_CMD_MAX_CELLS — the FULL command stays in the record / detail modal.
     """
     dec = str(log.get("decision") or "")
-    badge = "[green]APPROVED[/]" if "APPROVE" in dec else "[red]ESCALATED[/]"
+    if dec == "MODEL_NO_TOOL_CALL":
+        badge = "[yellow]NO-TOOL[/]"
+    elif dec == "AUTO_DEFERRED":
+        badge = "[yellow]DEFERRED[/]"
+    else:
+        badge = "[green]APPROVED[/]" if "APPROVE" in dec else "[red]ESCALATED[/]"
     full_cmd = truncate_cmd_display(log.get("raw_command"), max_cells=AUDIT_CMD_MAX_CELLS)
     reason = " ".join(str(log.get("safety_reason") or "").split())[:45]
     return (
@@ -283,7 +292,7 @@ def modal_audit_cells(log: dict) -> Tuple[str, ...]:
         str(log.get("agent_kind") or "agy"),
         badge,
         format_resolution_badge(log.get("resolution"), short=True),
-        str(log.get("decision_layer") or "SHELL_AST"),
+        f"{log.get('decision_layer') or 'SHELL_AST'} · {log.get('decision_source') or 'DETERMINISTIC'}",
         rich_escape(reason),
         rich_escape(full_cmd),
     )
@@ -298,7 +307,10 @@ def modal_audit_cells(log: dict) -> Tuple[str, ...]:
 
 # Searchable text per record. Command + reason are the core fields; pane /
 # agent / layer / id are cheap, useful extras.
-AUDIT_SEARCH_FIELDS = ("raw_command", "safety_reason", "pane_id", "agent_kind", "decision_layer", "id")
+AUDIT_SEARCH_FIELDS = (
+    "raw_command", "safety_reason", "pane_id", "agent_kind", "decision_layer",
+    "decision_source", "source_revision", "id",
+)
 
 # 5 tolerance levels -> SequenceMatcher ratio thresholds (spec mapping).
 AUDIT_SEARCH_TOLERANCE_THRESHOLDS = {
@@ -1467,10 +1479,11 @@ class AuditDetailModal(ModalCloseMixin, ModalScreen):
             f"[bold]ID[/]: #{log['id']}    [bold]Time[/]: {format_local_time(log.get('timestamp', ''))}\n"
             f"[bold]Pane[/]: {log.get('pane_id', '')}    [bold]Agent[/]: {log.get('agent_kind', 'unknown')}\n"
             f"[bold]Verdict[/]: {badge}    [bold]Resolution[/]: {format_resolution_badge(resolution)}    [bold]Approver[/]: {format_approver_badge(approver, dec)}\n"
-            f"[bold]Layer[/]: {log.get('decision_layer', 'FAST_TRACK_AST')}\n"
+            f"[bold]Layer[/]: {log.get('decision_layer', 'FAST_TRACK_AST')}    [bold]Source[/]: {log.get('decision_source', 'DETERMINISTIC')}\n"
             f"[bold]Reason[/]: {rich_escape(str(log.get('safety_reason', '')))}\n"
             f"[bold]Origin[/]: {log.get('origin', 'A')}    [bold]Consequence[/]: {log.get('consequence', 'NONE')}    [bold]Mechanism[/]: {log.get('mechanism', 'none')}\n"
-            f"[bold]Gate[/]: {log.get('gate_state', 'ENFORCE')}    [bold]Shadow[/]: {'ON' if log.get('shadow_mode') else 'OFF'}"
+            f"[bold]Gate[/]: {log.get('gate_state', 'ENFORCE')}    [bold]Shadow[/]: {'ON' if log.get('shadow_mode') else 'OFF'}\n"
+            f"[bold]Runtime Revision[/]: {log.get('source_revision', 'unknown')}"
         )
         self.query_one("#detail-fields", Static).update(fields)
         self.query_one("#detail-command", Static).update(rich_escape(str(log.get('raw_command', ''))))

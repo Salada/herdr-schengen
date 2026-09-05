@@ -1,14 +1,9 @@
-# DB Schema Migration Runbook — `adjudication_log` Provenance Columns
+# DB Schema Migration Runbook — Additive Provenance Columns
 
-> **Scope**: additive migration of the SQLite `adjudication_log` table to separate
-> the **human's opinion** from the **gatekeeper's final adjudication** (provenance
-> split, invariants INV-HO-1..6). This runbook is for **explicit** execution under
-> LLM/operator judgment.
->
-> **Note**: `guard_db.init_db()` does **not** yet migrate `adjudication_log` (its
-> current migration path only touches `pending_escalations`). Apply this migration
-> explicitly via this runbook; the provenance-split implementation will add the
-> idempotent `adjudication_log` guard to `init_db()` later.
+> **Scope**: additive provenance migrations for `audit_logs`,
+> `pending_escalations`, and `adjudication_log`. `guard_db.init_db()` applies all
+> migrations idempotently at startup; the SQL below is for inspection and manual
+> recovery only.
 
 ## 1. Why
 
@@ -100,8 +95,13 @@ legacy rows simply read `NULL`.
 
 ## 8. In-code equivalent
 
-`guard_db.init_db()` does **not** yet migrate `adjudication_log` — its current
-migration path only touches `pending_escalations`. The provenance-split
-implementation (design spec §1.1) will add the idempotent `PRAGMA table_info` +
-`ALTER TABLE ... ADD COLUMN` guard for `adjudication_log` to `init_db()`. Until
-that lands, apply this migration explicitly via this runbook.
+`guard_db.init_db()` inspects each table with `PRAGMA table_info` and adds only
+missing columns. It now covers:
+
+- `adjudication_log.approver` and `human_note`;
+- `audit_logs.decision_source` and `source_revision`;
+- `pending_escalations.capture_source`, `normalization_relation`,
+  `normalization_ambiguous`, and `raw_capture_evaluated`.
+
+Legacy rows retain neutral defaults (`DETERMINISTIC`, `unknown`, `NULL`, or
+false); migration never manufactures human or LLM provenance.

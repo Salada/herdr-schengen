@@ -32,17 +32,18 @@ sections (governance, decision layers, border policy) are shared.
 
 ```bash
 # Launch the interactive gatekeeper (single daemon lifecycle owner)
-~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/cmd/schengen_tui.py
+export SCHENGEN_HOME="${SCHENGEN_HOME:-$HOME/code/herdr-schengen}"
+~/.local/share/herdr-schengen-tui-venv/bin/python3 "$SCHENGEN_HOME/scripts/cmd/schengen_tui.py"
 
 # Diagnostics (read-only — NOT lifecycle; the TUI owns start/stop/reload)
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_watcher.py --status
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py -n 10
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --search "git"
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --tail 20
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py -n 5 --json
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --paths
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --pending
-python3 ~/.agents/skills/herdr-schengen/scripts/cmd/schengen_history.py --stats
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_watcher.py" --status
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" -n 10
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --search "git"
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --tail 20
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" -n 5 --json
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --paths
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --pending
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --stats
 ```
 
 ---

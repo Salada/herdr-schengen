@@ -168,4 +168,4 @@ python3 -m unittest tests/test_llm_evaluator_integration.py
 | **[`docs/guides/setup.md`](docs/guides/setup.md)** | Full setup, dependencies & OpenCode integration |
 | **[`docs/guides/configuration.md`](docs/guides/configuration.md)** | Environment variables, `config/schengen_watcher.json`, and runtime state layout |
 | **[`docs/guides/setup-from-scratch.md`](docs/guides/setup-from-scratch.md)** | Clean-machine bootstrap (portable `$SCHENGEN_HOME/.venv`) |
-| **[`docs/adr/`](docs/adr/)** | 13 Architecture Decision Records, each with `Status: Active` / `Evolved` |
+| **[`docs/adr/`](docs/adr/)** | 16 Architecture Decision Records, each with `Status: Active` / `Evolved` / `Superseded` |

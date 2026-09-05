@@ -168,15 +168,32 @@ class TestGatekeeperTargetBlock(unittest.TestCase):
         esc = dict(_ACTIVE_ESC, raw_command="echo a\nrm -rf /tmp/x\necho b")
         with _patch_esc(esc):
             prompt = build_system_prompt()
-        self.assertIn("- Raw Command:\n```bash\n", prompt)
+        self.assertIn("- Canonical Command:\n```bash\n", prompt)
         self.assertIn("rm -rf /tmp/x", prompt)
         self.assertIn("\n```", prompt)
-        self.assertNotIn("- Raw Command: `echo a", prompt)
+        self.assertNotIn("- Canonical Command: `echo a", prompt)
 
     def test_singleline_raw_command_renders_inline(self):
         with _patch_esc():
             prompt = build_system_prompt()
-        self.assertIn("- Raw Command: `rm -rf /tmp/test_dir`", prompt)
+        self.assertIn("- Canonical Command: `rm -rf /tmp/test_dir`", prompt)
+
+    def test_capture_and_normalization_context_surfaced(self):
+        esc = dict(
+            _ACTIVE_ESC,
+            capture_source="recent-unwrapped",
+            normalization_relation="same",
+            normalization_ambiguous=0,
+            raw_capture_evaluated=1,
+        )
+        with _patch_esc(esc):
+            prompt = build_system_prompt()
+        self.assertIn("- Capture Source: recent-unwrapped", prompt)
+        self.assertIn("- Normalization Relation: same", prompt)
+        self.assertIn("- Normalization Ambiguous: False", prompt)
+        self.assertIn("- Raw Capture Evaluated: True", prompt)
+        self.assertIn("Every candidate", prompt)
+        self.assertIn("deterministic capture, normalization, denylist, and TOCTOU guards", prompt)
 
     def test_decision_layer_drives_triage_text(self):
         # Tier A layers are enumerated in the prompt (SHELL_CRITICAL etc.).

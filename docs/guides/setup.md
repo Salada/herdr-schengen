@@ -79,11 +79,28 @@ When `SCHENGEN_INSPECTOR_MODEL` is not explicitly set, SmartGate automatically r
 
 ## 🚀 4. How to Launch & Run
 
+### Install or update runtime skill mirrors
+
+Run the repository-owned installer from the tested source checkout. It copies
+only Git-tracked files in the supported runtime surface, removes stale files
+from its managed directories, and stamps the exact Git revision. It accepts
+only the two runtime skill roots below, refuses a dirty source checkout, and
+rejects symlinks in the destination path. It does not start, stop, or reload
+the daemon.
+
+```bash
+cd ~/code/herdr-schengen
+python3 scripts/cmd/schengen_install.py \
+  --target ~/.agents/skills/herdr-schengen \
+  --target ~/.gemini/skills/herdr-schengen
+```
+
 ### Option A: Interactive Textual TUI (Recommended in Dedicated Herdr Pane)
 In a dedicated Herdr pane (e.g. `w1D:p7`):
 
 ```bash
-~/.local/share/herdr-schengen-tui-venv/bin/python3 ~/code/herdr-schengen/scripts/cmd/schengen_tui.py
+export SCHENGEN_HOME="${SCHENGEN_HOME:-$HOME/code/herdr-schengen}"
+~/.local/share/herdr-schengen-tui-venv/bin/python3 "$SCHENGEN_HOME/scripts/cmd/schengen_tui.py"
 ```
 
 ### Option B: Standalone Background Watcher Daemon (deprecated — issue #114)
@@ -94,7 +111,7 @@ In a dedicated Herdr pane (e.g. `w1D:p7`):
 
 ```bash
 # Read-only diagnostics (NOT lifecycle — the TUI owns start/stop/reload)
-python3 ~/code/herdr-schengen/scripts/cmd/schengen_watcher.py --status
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_watcher.py" --status
 ```
 
 ---
