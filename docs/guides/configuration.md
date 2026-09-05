@@ -59,6 +59,16 @@ layer (`scripts/core/guard_db.py`, `scripts/core/feature_db.py`).
 | `feature_requests.db` | Feature-request / self-improvement backlog (SQLite, FTS5 trigram CJK search). |
 | `in_flight_state.json` | Watcher-published in-flight inspector state; the TUI reads it read-only (INV-PH1-2/5). |
 
+Each runtime skill root also contains `.schengen-source.json`, written by the
+repository installer. New audit rows copy its exact Git revision into
+`audit_logs.source_revision`. Source checkouts without a manifest fall back to
+their current `git rev-parse HEAD`; `SCHENGEN_SOURCE_REVISION` is the explicit
+fallback for packaged environments without Git metadata.
+
+Audit `decision_source` values are `DETERMINISTIC`, `LLM`, `HUMAN`, `DEFERRED`,
+or `NORMALIZATION_AMBIGUOUS`. A Judge briefing without an adjudication tool is
+recorded as `MODEL_NO_TOOL_CALL`/`LLM` and leaves the escalation pending.
+
 ## 5. OpenCode Plugin Configuration
 
 The plugin (`opencode/plugins/schengen-host.js`) forwards a minimal allowlist of

@@ -20,6 +20,8 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+from core.runtime_provenance import get_source_revision
 from urllib.parse import urlsplit
 
 DB_DIR = Path.home() / ".local" / "state" / "herdr-schengen"
@@ -113,7 +115,9 @@ def init_db():
             mechanism TEXT DEFAULT 'none',
             gate_state TEXT DEFAULT 'ENFORCE', -- 'ENFORCE' | 'OBSERVE' | 'DEGRADED'
             shadow_mode INTEGER DEFAULT 0, -- 0: false, 1: true
-            scope_context TEXT DEFAULT 'SESSION_TRANSIENT' -- 'GLOBAL_RULE' | 'SESSION_TRANSIENT' | 'REPO_LOCAL'
+            scope_context TEXT DEFAULT 'SESSION_TRANSIENT', -- 'GLOBAL_RULE' | 'SESSION_TRANSIENT' | 'REPO_LOCAL'
+            decision_source TEXT DEFAULT 'DETERMINISTIC',
+            source_revision TEXT DEFAULT 'unknown'
         );
 
         CREATE TABLE IF NOT EXISTS pattern_stats (
@@ -162,6 +166,10 @@ def init_db():
             last_transitioned_at TEXT NOT NULL,
             cwd TEXT, -- workspace cwd at interception (issue #7207 auto-promotion)
             origin TEXT, -- command author origin (A/H/I/E) at interception (INV-WS-3 promotion gate)
+            capture_source TEXT,
+            normalization_relation TEXT,
+            normalization_ambiguous INTEGER DEFAULT 0,
+            raw_capture_evaluated INTEGER DEFAULT 0,
             UNIQUE(pane_id, command_hash)
         );
 
@@ -225,6 +233,10 @@ def init_db():
             cursor.execute(
                 "ALTER TABLE audit_logs ADD COLUMN scope_context TEXT DEFAULT 'SESSION_TRANSIENT'"
             )
+        if "decision_source" not in columns:
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN decision_source TEXT DEFAULT 'DETERMINISTIC'")
+        if "source_revision" not in columns:
+            cursor.execute("ALTER TABLE audit_logs ADD COLUMN source_revision TEXT DEFAULT 'unknown'")
 
         # Migration: Ensure session_id column exists in pending_escalations
         cursor.execute("PRAGMA table_info(pending_escalations)")
@@ -241,6 +253,14 @@ def init_db():
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN cwd TEXT")
         if "origin" not in p_columns:
             cursor.execute("ALTER TABLE pending_escalations ADD COLUMN origin TEXT")
+        if "capture_source" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN capture_source TEXT")
+        if "normalization_relation" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN normalization_relation TEXT")
+        if "normalization_ambiguous" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN normalization_ambiguous INTEGER DEFAULT 0")
+        if "raw_capture_evaluated" not in p_columns:
+            cursor.execute("ALTER TABLE pending_escalations ADD COLUMN raw_capture_evaluated INTEGER DEFAULT 0")
 
         # Migration: user_allowlist CUD columns (issue #91). created_by
         # backfills to 'human-tui' (correct: always human-reviewed); existing
@@ -488,6 +508,8 @@ def record_audit_log(
     gate_state: str = "ENFORCE",
     shadow_mode: bool = False,
     scope_context: str = "SESSION_TRANSIENT",
+    decision_source: Optional[str] = None,
+    source_revision: Optional[str] = None,
 ):
     """Record an audit entry with 2D Taxonomy and update pattern frequency statistics.
 
@@ -497,6 +519,19 @@ def record_audit_log(
     init_db()
     norm_pattern = normalize_command(raw_command)
     now_iso = datetime.now(timezone.utc).isoformat()
+    layer_value = decision_layer.value if hasattr(decision_layer, "value") else str(decision_layer)
+    if decision_source is None:
+        if decision == "MODEL_NO_TOOL_CALL" or layer_value in ("CLOUD_JUDGE", "LLM_INSPECTOR"):
+            decision_source = "LLM"
+        elif decision == "AUTO_DEFERRED":
+            decision_source = "DEFERRED"
+        elif layer_value == "NORMALIZATION_AMBIGUOUS":
+            decision_source = "NORMALIZATION_AMBIGUOUS"
+        elif origin == "H" or layer_value in ("HUMAN_APPROVAL", "HUMAN_APPROVED"):
+            decision_source = "HUMAN"
+        else:
+            decision_source = "DETERMINISTIC"
+    source_revision = source_revision or get_source_revision()
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -506,9 +541,10 @@ def record_audit_log(
             INSERT INTO audit_logs (
                 timestamp, pane_id, agent_kind, raw_command, normalized_pattern,
                 decision, safety_reason, decision_layer, origin, consequence,
-                mechanism, gate_state, shadow_mode, scope_context
+                mechanism, gate_state, shadow_mode, scope_context,
+                decision_source, source_revision
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 now_iso,
@@ -518,13 +554,15 @@ def record_audit_log(
                 norm_pattern,
                 decision,
                 safety_reason,
-                decision_layer,
+                layer_value,
                 origin,
                 consequence,
                 mechanism,
                 gate_state,
                 1 if shadow_mode else 0,
                 scope_context,
+                decision_source,
+                source_revision,
             ),
         )
 
@@ -1005,6 +1043,12 @@ def get_recent_audit_logs(
     query = """
         SELECT a.id, a.timestamp, a.pane_id, a.agent_kind, a.raw_command, a.normalized_pattern,
                a.decision, a.safety_reason, COALESCE(a.decision_layer, 'FAST_TRACK_AST') AS decision_layer,
+               CASE
+                   WHEN pe.approver IN ('human-tui', 'pane-direct') THEN 'HUMAN'
+                   WHEN pe.approver = 'gatekeeper' THEN 'LLM'
+                   ELSE COALESCE(a.decision_source, 'DETERMINISTIC')
+               END AS decision_source,
+               COALESCE(a.source_revision, 'unknown') AS source_revision,
                pe.resolution AS resolution,
                pe.approver AS approver
         FROM audit_logs a
@@ -1037,15 +1081,19 @@ def search_audit_logs(keyword: str, limit: int = 20) -> list[dict]:
     """Search audit logs by keyword across raw_command, pattern, reason, or layer."""
     init_db()
     query = """
-        SELECT id, timestamp, pane_id, agent_kind, raw_command, normalized_pattern, decision, safety_reason, COALESCE(decision_layer, 'FAST_TRACK_AST') as decision_layer
+        SELECT id, timestamp, pane_id, agent_kind, raw_command, normalized_pattern, decision,
+               safety_reason, COALESCE(decision_layer, 'FAST_TRACK_AST') AS decision_layer,
+               COALESCE(decision_source, 'DETERMINISTIC') AS decision_source,
+               COALESCE(source_revision, 'unknown') AS source_revision
         FROM audit_logs
-        WHERE raw_command LIKE ? OR safety_reason LIKE ? OR normalized_pattern LIKE ? OR decision_layer LIKE ?
+        WHERE raw_command LIKE ? OR safety_reason LIKE ? OR normalized_pattern LIKE ?
+              OR decision_layer LIKE ? OR decision_source LIKE ? OR source_revision LIKE ?
         ORDER BY id DESC LIMIT ?
     """
     pattern = f"%{keyword}%"
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(query, (pattern, pattern, pattern, pattern, max(1, limit)))
+        cursor.execute(query, (pattern, pattern, pattern, pattern, pattern, pattern, max(1, limit)))
         return [dict(row) for row in cursor.fetchall()]
 
 
@@ -1856,6 +1904,10 @@ def enqueue_pending_escalation(
     dialog_snapshot: Optional[str] = None,
     cwd: Optional[str] = None,
     origin: Optional[str] = None,
+    capture_source: Optional[str] = None,
+    normalization_relation: Optional[str] = None,
+    normalization_ambiguous: bool = False,
+    raw_capture_evaluated: bool = False,
 ) -> int:
     """Enqueue a blocked dangerous command into persistent escalations queue (At-Least-Once).
 
@@ -1876,9 +1928,10 @@ def enqueue_pending_escalation(
         cursor.execute(
             """
             INSERT INTO pending_escalations (
-                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, last_transitioned_at, cwd, origin
+                pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, last_transitioned_at, cwd, origin,
+                capture_source, normalization_relation, normalization_ambiguous, raw_capture_evaluated
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(pane_id, command_hash) DO UPDATE SET
                 session_id = excluded.session_id,
                 status = 'PENDING',
@@ -1887,12 +1940,21 @@ def enqueue_pending_escalation(
                 dialog_snapshot = excluded.dialog_snapshot,
                 cwd = excluded.cwd,
                 origin = excluded.origin,
+                capture_source = excluded.capture_source,
+                normalization_relation = excluded.normalization_relation,
+                normalization_ambiguous = excluded.normalization_ambiguous,
+                raw_capture_evaluated = excluded.raw_capture_evaluated,
                 last_transitioned_at = excluded.last_transitioned_at,
                 resolution = NULL,
                 approver = NULL,
                 delivered_at = NULL
         """,
-            (pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason, decision_layer, dialog_snapshot, now_iso, now_iso, cwd, origin),
+            (
+                pane_id, session_id, agent_kind, raw_command, cmd_hash, safety_reason,
+                decision_layer, dialog_snapshot, now_iso, now_iso, cwd, origin,
+                capture_source, normalization_relation, 1 if normalization_ambiguous else 0,
+                1 if raw_capture_evaluated else 0,
+            ),
         )
         last_id = cursor.lastrowid
         if not last_id:
@@ -1919,7 +1981,7 @@ def get_pending_escalations(
     """
     init_db()
     statuses = "('PENDING', 'DELIVERED')" if include_delivered else "('PENDING')"
-    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, delivered_at, last_transitioned_at, cwd, origin FROM pending_escalations WHERE status IN {statuses}"
+    query = f"SELECT id, pane_id, session_id, agent_kind, raw_command, command_hash, safety_reason, decision_layer, dialog_snapshot, status, started_at, delivered_at, last_transitioned_at, cwd, origin, capture_source, normalization_relation, normalization_ambiguous, raw_capture_evaluated FROM pending_escalations WHERE status IN {statuses}"
     params = []
     if pane_id:
         query += " AND pane_id = ?"

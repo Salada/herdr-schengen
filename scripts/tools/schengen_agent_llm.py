@@ -1012,9 +1012,9 @@ STEP 4 — FEEDBACK FORMAT:
     # LLM sees the full payload unambiguously instead of a truncated inline span.
     raw_command_text = active_esc['raw_command']
     if "\n" in raw_command_text:
-        raw_command_line = f"- Raw Command:\n```bash\n{raw_command_text}\n```"
+        raw_command_line = f"- Canonical Command:\n```bash\n{raw_command_text}\n```"
     else:
-        raw_command_line = f"- Raw Command: `{raw_command_text}`"
+        raw_command_line = f"- Canonical Command: `{raw_command_text}`"
 
     return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
 
@@ -1025,13 +1025,43 @@ STEP 4 — FEEDBACK FORMAT:
 - Escalation ID: #{active_esc['id']}
 - Target Pane: {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})
 {raw_command_line}
+- Command Representation: canonical (the only executable candidate)
+- Capture Source: {active_esc.get('capture_source') or 'unknown'}
+- Normalization Relation: {active_esc.get('normalization_relation') or 'unknown'}
+- Normalization Ambiguous: {bool(active_esc.get('normalization_ambiguous'))}
+- Raw Capture Evaluated: {bool(active_esc.get('raw_capture_evaluated'))}
 - Intercepted Reason: {active_esc['safety_reason']}
 - Detected Target: `{target_candidate}`
 - Decision Layer: {active_esc.get('decision_layer', 'UNKNOWN')}
 - Human Opinion Recorded: {has_human_opinion(active_esc['id'])}
 
 {protocol}
+
+[NORMALIZATION SAFETY CONTRACT]:
+- You may suggest a reconstructed command only as advisory text.
+- Never treat your reconstruction as executable or adjudicated. Every candidate
+  must re-enter deterministic capture, normalization, denylist, and TOCTOU guards.
 """
+
+
+def record_model_no_tool_call(active_esc: Dict[str, Any], phase: str) -> str:
+    """Persist a fail-closed LLM turn that produced text but no action tool."""
+    reason = (
+        f"{phase} returned briefing text without an adjudication tool call; "
+        "escalation remains pending for human review"
+    )
+    record_audit_log(
+        pane_id=active_esc["pane_id"],
+        raw_command=active_esc["raw_command"],
+        decision="MODEL_NO_TOOL_CALL",
+        safety_reason=reason,
+        agent_kind=active_esc.get("agent_kind", "unknown"),
+        decision_layer=active_esc.get("decision_layer", "NOT_ALLOWLISTED"),
+        origin=active_esc.get("origin") or "A",
+        mechanism=f"{phase.lower()}-no-tool-call",
+        decision_source="LLM",
+    )
+    return reason
 
 
 class SchengenAgentChat:
@@ -1218,6 +1248,7 @@ class SchengenAgentChat:
                     self.inspector_completion_tokens += c_tokens
 
                     # ── Judge Phase ─────────────────────────────────────────────
+                    final_phase = "Inspector"
                     if (self.judge_api_key != self.inspector_api_key or 
                         self.judge_base_url != self.inspector_base_url or 
                         self.judge_model != self.inspector_model):
@@ -1251,6 +1282,7 @@ class SchengenAgentChat:
                         self.judge_prompt_tokens += jp_tokens
                         self.judge_completion_tokens += jc_tokens
                         msg = judge_data["choices"][0]["message"]
+                        final_phase = "Judge"
                     else:
                         self.judge_prompt_tokens += p_tokens
                         self.judge_completion_tokens += c_tokens
@@ -1259,6 +1291,14 @@ class SchengenAgentChat:
                     final_content = clean_llm_response(raw_content)
                     if not final_content:
                         final_content = "⚠️ No explicit verdict returned by Inspector/Judge; deferring to human operator."
+
+                    if allow_adjudication and active_esc:
+                        record_model_no_tool_call(active_esc, final_phase)
+                        final_content = (
+                            f"⚠️ [MODEL_NO_TOOL_CALL] {final_phase} supplied advisory text but did not "
+                            "execute an approval or rejection. The escalation remains pending.\n\n"
+                            + final_content
+                        )
 
                     self._append_transcript(role="assistant", content=final_content)
                     self.history.append({"role": "user", "content": user_text})

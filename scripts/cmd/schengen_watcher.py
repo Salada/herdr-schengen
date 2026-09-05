@@ -1002,7 +1002,16 @@ def agent_matches(agent_kind: str, agent_filter) -> bool:
     return agent_kind in agent_filter
 
 
-def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer, agent_kind, visible_text=None):
+def escalate_request(
+    pane_id,
+    pane_info,
+    req_cmd,
+    safety_reason,
+    decision_layer,
+    agent_kind,
+    visible_text=None,
+    evaluation_context=None,
+):
     """Enqueue a persistent escalation and emit intercept notifications. Returns escalation id."""
     session_uuid = (
         pane_info.get("agent_session", {}).get("value") if isinstance(pane_info.get("agent_session"), dict) else None
@@ -1015,6 +1024,8 @@ def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer,
     # Capture the raw dialog/situation (tail-most 8K chars) so the host LLM can
     # later inspect exactly what was on screen without re-deriving it (ADR-008).
     snapshot = (visible_text or "").strip()[-8000:] or None
+    context = evaluation_context or {}
+    layer_value = decision_layer.value if hasattr(decision_layer, "value") else str(decision_layer)
     esc_id = enqueue_pending_escalation(
         pane_id=pane_id,
         raw_command=req_cmd,
@@ -1025,6 +1036,10 @@ def escalate_request(pane_id, pane_info, req_cmd, safety_reason, decision_layer,
         dialog_snapshot=snapshot,
         cwd=esc_cwd,
         origin=esc_origin,
+        capture_source=context.get("capture_source"),
+        normalization_relation=context.get("normalization_relation"),
+        normalization_ambiguous=layer_value == DecisionLayer.NORMALIZATION_AMBIGUOUS.value,
+        raw_capture_evaluated=bool(context.get("raw_capture_evaluated")),
     )
     print(
         f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).",
@@ -1111,7 +1126,9 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
                 origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
                 mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
                 shadow_mode=tax.get("shadow_mode", False))
-            inspector.human_queue.append((pane_id, live_info, req_cmd, reason, layer, visible_text, state_seq, agent_status))
+            inspector.human_queue.append(
+                (pane_id, live_info, req_cmd, reason, layer, visible_text, state_seq, agent_status, tax)
+            )
             inspector.set_state(pane_id, request, "queued")
             continue
         # Safe -> verified-inject path. The AUTO_APPROVED audit row is written
@@ -1175,6 +1192,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
             escalate_request(
                 pane_id, live_info, req_cmd, approval_failed_reason,
                 "OPENCODE_FAILSAFE", live_info.get("agent", "unknown"), visible_text=visible_text,
+                evaluation_context=tax,
             )
             last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
             inspector.release(pane_id, request)
@@ -1382,12 +1400,19 @@ def main():
                 cancel_stale_human_escalation(active_pane, active_cmd)
             if inspector.active_human is None and inspector.human_queue:
                 queued = inspector.human_queue.popleft()
-                pane_id, pane_info, req_cmd, reason, layer, visible_text, state_seq, agent_status = queued
+                (
+                    pane_id, pane_info, req_cmd, reason, layer, visible_text,
+                    state_seq, agent_status, evaluation_context,
+                ) = queued
                 adapter = get_adapter(pane_info.get("agent", ""))
                 visible = get_pane_text(pane_id, lines=80)
                 canonical, _ = canonical_request(adapter, pane_id, visible) if adapter else (None, "")
                 if adapter and canonical == req_cmd:
-                    escalate_request(pane_id, pane_info, req_cmd, reason, layer, pane_info.get("agent", "unknown"), visible_text)
+                    escalate_request(
+                        pane_id, pane_info, req_cmd, reason, layer,
+                        pane_info.get("agent", "unknown"), visible_text,
+                        evaluation_context=evaluation_context,
+                    )
                     inspector.active_human = (pane_id, req_cmd)
                     inspector.set_state(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), "active")
                     last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}

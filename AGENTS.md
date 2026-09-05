@@ -78,6 +78,7 @@ This repository serves as the single source of truth (SSOT) for the Schengen Sec
 | **[ADR-013](./docs/adr/adr-013-opencode-structured-permission-channel.md)** | Active | OpenCode Structured Permission Channel & Programmatic Approval |
 | **[ADR-014](./docs/adr/adr-014-escalation-phase-model-and-ephemeral-ipc.md)** | Active | Escalation Phase Model & Ephemeral Cross-Process IPC |
 | **[ADR-015](./docs/adr/adr-015-gatekeeper-advisory-only-governance.md)** | Active | Gatekeeper Advisory-Only Governance (Human Final Authority, No Autonomous Reject) |
+| **[ADR-016](./docs/adr/adr-016-judge-observability-and-runtime-provenance.md)** | Active | Explicit no-tool-call outcomes, decision-source audit, and installed revision provenance |
 
 ---
 
@@ -105,9 +106,10 @@ For full setup, installation, and environment variable configuration, refer to *
 nvim ~/code/herdr-schengen/scripts/core/security_evaluator.py
 # 2. Run test suite
 HERDR_ENV=1 ~/.local/share/herdr-schengen-tui-venv/bin/python3 -m unittest discover -s tests
-# 3. Mirror to runtime skill
-cp -r ~/code/herdr-schengen/scripts/ ~/.agents/skills/herdr-schengen/scripts/
-cp -r ~/code/herdr-schengen/docs/ ~/.agents/skills/herdr-schengen/docs/
+# 3. Install the tested source into both runtime mirrors (stamps source revision)
+python3 scripts/cmd/schengen_install.py \
+  --target ~/.agents/skills/herdr-schengen \
+  --target ~/.gemini/skills/herdr-schengen
 # 4. Restart the daemon via TUI (Ctrl+T) — non-TUI reload is deprecated (Rule 2 / ADR-009)
 ```
 
@@ -120,6 +122,6 @@ cp -r ~/code/herdr-schengen/docs/ ~/.agents/skills/herdr-schengen/docs/
 ```bash
 # 1. Create docs/adr/adr-00X-<title>.md
 # 2. Link only to internal ADRs using relative paths (./adr-00X-*.md)
-# 3. Sync to skill docs
-cp -r ~/code/herdr-schengen/docs/ ~/.agents/skills/herdr-schengen/docs/
+# 3. Re-run the repository installer after tests pass
+python3 scripts/cmd/schengen_install.py --target ~/.agents/skills/herdr-schengen
 ```
