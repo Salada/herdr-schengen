@@ -64,7 +64,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 ## 🎯 Active Execution Backlog (상세 항목)
 
 ### 🚨 [P0 Urgent / Bug] Disagree-and-Commit 규약 도입 후 과잉 Reject 및 Gatekeeper 권능 월권 회귀 수정 (PR #179 / #3864 후속)
-[] [Bug/Gatekeeper] Gatekeeper의 독자적 Reject 남발 및 인간 승인 의사 묵살 결함 긴급 해소:
+[x] [Bug/Gatekeeper] Gatekeeper의 독자적 Reject 남발 및 인간 승인 의사 묵살 결함 긴급 해소 (PR #189, #190, ADR-015로 완료):
   - 현상 및 부작용 보고 (사용자 인시던트):
     1) Gatekeeper가 인간에게 판단을 위임/요청하지 않고 자체적으로 `reject`를 섣불리 결정하여 에이전트에 에러/거절 메시지를 넘김 (인간 판단 요청 단계 생략 빈번).
     2) 인간이 `/approve` 슬래시 커맨드가 아닌 채팅 메시지로 강력한 승인 의견을 제시했음에도 Gatekeeper가 이를 무시하고 자체 판정으로 `reject`를 강행함.
@@ -82,12 +82,12 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 
 ### [Track 1] Quick-Wins & Precision Engine
 
-[] [Bug/Guard] 따옴표/이스케이프된 셸 제어문자 과도 에스컬레이션 완화:
+[x] [Bug/Guard] 따옴표/이스케이프된 셸 제어문자 과도 에스컬레이션 완화 (PR #188로 완료):
   - `security_evaluator.py`의 구조 뷰가 인용된 `|`, `;`, `&`, `<`, `>`를 인자 데이터로 마스킹하되, 원문 오프셋을 유지한다. 비인용 제어문자, 동적 치환, 민감 경로, 변이 명령은 기존 fail-closed 규칙을 유지한다.
-  - [ ] **AGY (Coder tab):** PR을 검토하고 전체 단위 테스트가 통과하면 Forgejo `main`에 merge한다.
-  - [ ] **OpenCode:** merge 뒤 깨끗한 worktree에서 `git pull --ff-only origin main` 후 `HERDR_ENV=1 ~/.local/share/herdr-schengen-tui-venv/bin/python3 -m unittest discover -s tests`를 실행하고, quoted-control 회귀 사례와 `rm -rf`/`.env` 차단 사례를 확인한다.
+  - [x] **AGY (Coder tab):** PR을 검토하고 전체 단위 테스트가 통과하면 Forgejo `main`에 merge한다.
+  - [x] **OpenCode:** merge 뒤 깨끗한 worktree에서 `git pull --ff-only origin main` 후 `HERDR_ENV=1 ~/.local/share/herdr-schengen-tui-venv/bin/python3 -m unittest discover -s tests`를 실행하고, quoted-control 회귀 사례와 `rm -rf`/`.env` 차단 사례를 확인한다.
 
-[] [Refactor/TestRunner] 안전한 read-only 체인 진단 명령 Fast-Track 확장 (사례: #3670 후속 백로그):
+[x] [Refactor/TestRunner] 안전한 read-only 체인 진단 명령 Fast-Track 확장 (사례: #3670 후속 백로그, 커밋 50a0a87로 완료):
   - 현상 및 요구사항:
     • 에이전트들의 일상적인 검증/진단용 안전 체인 명령(`cd <worktree> && python3 -m unittest discover -s tests 2>&1 | tail -30`, `git status --short && echo "..." && git diff --stat`)이 `NOT_ALLOWLISTED`로 인간 승인을 매번 요구하여 피로도 유발.
     • `cd <safe_dir> && <safe_runner>` 결합 체인 및 `| tail -N` / `| head -N` 안전 파이프라인의 Fast-Track / Test-Runner 인정 규칙 정밀화.
@@ -97,7 +97,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 
     • 구현 힌트: `security_evaluator.py:1118` `_is_read_only_pipeline` 확장 검토 (read-only 세그먼트만 파싱·검증, `&& rm -rf` 등 변이 세그먼트 탐지 시 fail-closed 에스컬레이션).
 
-[] [Idea/Complexity] Heredoc 페이로드 분리 및 시맨틱 복잡도(Semantic Risk & Multi-Factor Complexity) 산정 체계 재설계 (사례: #3864, #4027):
+[x] [Idea/Complexity] Heredoc 페이로드 분리 및 시맨틱 복잡도(Semantic Risk & Multi-Factor Complexity) 산정 체계 재설계 (사례: #3864, #4027, 커밋 50a0a87/b128f8e로 완료):
   - Context & Core Problem (사례: #3864 복합 파이프라인, #4027 Heredoc 커밋 메시지):
     • 현재 `compute_complexity`는 연산자 수(`&&`, `|`, `;`), 서브쉘, 리다이렉션(`2>&1`) 뿐만 아니라 **개행 문자(`\n`, `\r`)를 세그먼트 분리자(`_COMPLEXITY_CONTROL_RE = re.compile(r"[|&;\n\r]+")`)로 취급**.
     • 이로 인해 **Heredoc 본문(`cat <<'EOF' ... EOF`) 내부의 단순 줄바꿈/텍스트 내용이 각각 독립 명령 세그먼트로 오인식**되어 복잡도 점수가 폭발적으로 과계산됨 (`#4027`: 단순 16줄 커밋 메시지 작성 + git commit/push 체인인데 `complexity=26 > 6`으로 과도하게 치솟음).
@@ -121,7 +121,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - Action Items:
     • `scripts/core/security_evaluator.py` 내 `compute_complexity`에 Heredoc 본문 마스킹 정규식/파서 도입 및 단위테스트(`tests/test_complexity_tax.py`) 추가.
 
-[] [Bug/OpenCode] OpenCode 승인 시 `_norm_req_cmd` 불일치(뷰포트 절단 및 access_directory 경로 차이)로 인한 키 주입 실패 & DB 상태 불일치 (사례: #3143, #3219):
+[x] [Bug/OpenCode] OpenCode 승인 시 `_norm_req_cmd` 불일치(뷰포트 절단 및 access_directory 경로 차이)로 인한 키 주입 실패 & DB 상태 불일치 (사례: #3143, #3219, PR #187로 완료):
   - 현상 및 원인 (사례: Escalation #3143 Git 커밋 & Escalation #3219 `access_directory`):
     • Gatekeeper LLM이 승인(`APPROVE`)하여 DB 상에는 `status='RESOLVED', resolution='APPROVED', approver='gatekeeper'`로 기록되었으나, 실제 OpenCode 터미널은 `Permission required` 모달 상태로 계속 멈춰 있어 승인이 해소되지 않는 현상 반복 발생.
     • 근본 원인 (2가지 불일치 유형):
@@ -335,7 +335,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - Context: PR #177에서 정의·테스트된 신규 exchange 조회 헬퍼가 현재 프로덕션 모달의 `get_adjudications_for_audit`와 부분 분리되어 있음.
   - Solution: future-facing 주석 처리 또는 프로덕션 감사 모달 전체를 exchange 뷰로 일원화 전환 검토. (Non-blocking Deferred)
 
-[] [Idea/Audit] System Auto-Approval의 스코프 맥락(Session-Specific vs Global/Stateless) 감사 메타데이터 명시화
+[x] [Idea/Audit] System Auto-Approval의 스코프 맥락(Session-Specific vs Global/Stateless) 감사 메타데이터 명시화 (guard_db.py 및 test_persistent_allowlist_cud.py로 완료):
   - Context & Objective:
     - 시스템에 의해 자동 승인(`AUTO_APPROVED`)될 때, 해당 승인이 '세션 한정 일시적 기억/이력(Session-Specific / TTL Memory)'에 의한 것인지, '전역 불변 룰(Global Invariant / Fast-Track AST / User Allowlist)'에 의한 것인지 구분하기 어려워 사후 감사(Audit) 시 판단 근거 추적이 모호함.
   - Design & Scope Taxonomy:
