@@ -83,10 +83,10 @@ When `SCHENGEN_INSPECTOR_MODEL` is not explicitly set, SmartGate automatically r
 
 Run the repository-owned installer from the tested source checkout. It copies
 only Git-tracked files in the supported runtime surface, removes stale files
-from its managed directories, and stamps the exact Git revision. It accepts
-only the two runtime skill roots below, refuses a dirty source checkout, and
-rejects symlinks in the destination path. It does not start, stop, or reload
-the daemon.
+from its managed directories, and stages the complete payload before replacing
+the live mirror. It accepts only the two runtime skill roots below, refuses a
+dirty source checkout and tracked source symlinks, and rejects symlinks in the
+destination path. It does not start, stop, or reload the daemon.
 
 ```bash
 cd ~/code/herdr-schengen
