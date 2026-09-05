@@ -79,6 +79,7 @@ This repository serves as the single source of truth (SSOT) for the Schengen Sec
 | **[ADR-014](./docs/adr/adr-014-escalation-phase-model-and-ephemeral-ipc.md)** | Active | Escalation Phase Model & Ephemeral Cross-Process IPC |
 | **[ADR-015](./docs/adr/adr-015-gatekeeper-advisory-only-governance.md)** | Active | Gatekeeper Advisory-Only Governance (Human Final Authority, No Autonomous Reject) |
 | **[ADR-016](./docs/adr/adr-016-judge-observability-and-runtime-provenance.md)** | Active | Explicit no-tool-call outcomes, decision-source audit, and installed revision provenance |
+| **[ADR-017](./docs/adr/adr-017-canonical-capture-and-monotonic-normalization.md)** | Active | Canonical pane capture, monotonic normalization, and deterministic re-entry for LLM reconstruction |
 
 ---
 

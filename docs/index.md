@@ -24,6 +24,7 @@ source-code path(s) under `scripts/`.
 | [ADR-014](adr/adr-014-escalation-phase-model-and-ephemeral-ipc.md) | Active | Escalation phase model (in-flight / judging / human-required) & ephemeral cross-process IPC. | `scripts/core/security_evaluator.py` (`_emit_phase`), `scripts/cmd/schengen_watcher.py`, `scripts/cmd/schengen_tui.py` |
 | [ADR-015](adr/adr-015-gatekeeper-advisory-only-governance.md) | Active | Gatekeeper advisory-only governance: human final authority, no autonomous reject (Disagree & Commit regression fix). | `scripts/tools/schengen_agent_llm.py`, `scripts/core/security_evaluator.py` |
 | [ADR-016](adr/adr-016-judge-observability-and-runtime-provenance.md) | Active | Explicit no-tool-call outcomes, decision-source audit, and installed revision provenance. | `scripts/tools/schengen_agent_llm.py`, `scripts/core/guard_db.py`, `scripts/cmd/schengen_install.py` |
+| [ADR-017](adr/adr-017-canonical-capture-and-monotonic-normalization.md) | Active | Canonical pane capture, monotonic normalization, and deterministic guard re-entry for advisory reconstruction. | `scripts/adapters/request_match.py`, `scripts/adapters/capture_evaluator.py`, `scripts/tools/schengen_agent_llm.py` |
 
 ## 2. Guides (`docs/guides/`)
 
