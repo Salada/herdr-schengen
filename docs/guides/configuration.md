@@ -94,6 +94,16 @@ explicit scoped paths for `git add`, an explicit `-m`/`--message` for
 `--force-with-lease`, implicit targets, broad adds, and unknown options remain
 human-gated.
 
+Local `docker exec` is likewise structural rather than keyword-scored. Schengen
+parses the container command and, for `sh -c`/`bash -lc`, recursively checks up
+to eight inner diagnostic segments. Reads, existence tests, filters, and a
+single print-only redacting `sed s///` may fast-track. Docker exec options other
+than interactive/TTY, credential paths, mutation, networking, substitution,
+and redirection remain fail-closed. For `grep` and `rg`, pattern text is kept
+separate from path operands, so names such as `private` or `encrypted` are not
+credentials by themselves; actual sensitive targets and selector globs remain
+blocked.
+
 ### Session-pattern removal (INTENTIONAL)
 
 The 2a gatekeeper-prompt rework removed the "Session Pattern Memory"
