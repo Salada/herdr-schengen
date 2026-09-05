@@ -10,6 +10,9 @@ import os
 import subprocess
 
 
+AGENT_THREAD_READ_STATUSES = frozenset({"working", "idle", "done", "blocked"})
+
+
 def run_cmd(args):
     """Run a subprocess command and return stdout (None on failure)."""
     try:
@@ -54,6 +57,47 @@ def get_pane_text(pane_id, lines=80, full_dump=False, source=None):
     source = source or ("scrollback" if (full_dump or lines > 100) else "visible")
     out = run_cmd(["herdr", "pane", "read", pane_id, "--source", source, "--lines", str(lines)])
     return out or ""
+
+
+def get_agent_or_pane_text(pane_id, lines=80, full_dump=False, source=None):
+    """Prefer a registered agent thread for advisory context investigations.
+
+    This intentionally costs one metadata subprocess before the read. Explicit
+    pane sources and full scrollback dumps bypass agent routing because those
+    are terminal-buffer concepts used by safety-critical callers.
+    """
+    pane_source = source or ("scrollback" if (full_dump or lines > 100) else "visible")
+
+    if source is None and not full_dump:
+        pane = get_pane_info(pane_id)
+        session = pane.get("agent_session") if isinstance(pane, dict) else None
+        status = str(pane.get("agent_status") or "").strip().lower() if isinstance(pane, dict) else ""
+        if (
+            isinstance(session, dict)
+            and bool(session.get("value"))
+            and status in AGENT_THREAD_READ_STATUSES
+        ):
+            out = run_cmd(
+                [
+                    "herdr",
+                    "agent",
+                    "read",
+                    pane_id,
+                    "--source",
+                    "recent-unwrapped",
+                    "--lines",
+                    str(lines),
+                ]
+            )
+            if out and out.strip():
+                return out, "agent:recent-unwrapped"
+
+    return get_pane_text(
+        pane_id,
+        lines=lines,
+        full_dump=full_dump,
+        source=source,
+    ), f"pane:{pane_source}"
 
 
 def detect_self_pane_id():
