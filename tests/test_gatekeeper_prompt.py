@@ -27,7 +27,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from core.cloud_judge import GENERAL_CLOUD_JUDGE_SYSTEM_PROMPT
-from tools.schengen_agent_llm import build_system_prompt
+from tools.schengen_agent_llm import build_escalation_context_block, build_system_prompt
 
 _ACTIVE_ESC = {
     "id": 123,
@@ -154,29 +154,29 @@ class TestGatekeeperTargetBlock(unittest.TestCase):
 
     def test_decision_layer_surfaced(self):
         esc = dict(_ACTIVE_ESC, decision_layer="SHELL_CRITICAL")
-        with _patch_esc(esc):
-            prompt = build_system_prompt()
-        self.assertIn("- Decision Layer: SHELL_CRITICAL", prompt)
+        with patch("tools.schengen_agent_llm.has_human_opinion", return_value=False):
+            context = build_escalation_context_block(esc)
+        self.assertIn("- Decision Layer: SHELL_CRITICAL", context)
 
     def test_decision_layer_unknown_when_missing(self):
         esc = {k: v for k, v in _ACTIVE_ESC.items() if k != "decision_layer"}
-        with _patch_esc(esc):
-            prompt = build_system_prompt()
-        self.assertIn("- Decision Layer: UNKNOWN", prompt)
+        with patch("tools.schengen_agent_llm.has_human_opinion", return_value=False):
+            context = build_escalation_context_block(esc)
+        self.assertIn("- Decision Layer: UNKNOWN", context)
 
     def test_multiline_raw_command_renders_fenced(self):
         esc = dict(_ACTIVE_ESC, raw_command="echo a\nrm -rf /tmp/x\necho b")
-        with _patch_esc(esc):
-            prompt = build_system_prompt()
-        self.assertIn("- Canonical Command:\n```bash\n", prompt)
-        self.assertIn("rm -rf /tmp/x", prompt)
-        self.assertIn("\n```", prompt)
-        self.assertNotIn("- Canonical Command: `echo a", prompt)
+        with patch("tools.schengen_agent_llm.has_human_opinion", return_value=False):
+            context = build_escalation_context_block(esc)
+        self.assertIn("- Canonical Command:\n```bash\n", context)
+        self.assertIn("rm -rf /tmp/x", context)
+        self.assertIn("\n```", context)
+        self.assertNotIn("- Canonical Command: `echo a", context)
 
     def test_singleline_raw_command_renders_inline(self):
-        with _patch_esc():
-            prompt = build_system_prompt()
-        self.assertIn("- Canonical Command: `rm -rf /tmp/test_dir`", prompt)
+        with patch("tools.schengen_agent_llm.has_human_opinion", return_value=False):
+            context = build_escalation_context_block(_ACTIVE_ESC)
+        self.assertIn("- Canonical Command: `rm -rf /tmp/test_dir`", context)
 
     def test_capture_and_normalization_context_surfaced(self):
         esc = dict(
@@ -186,12 +186,13 @@ class TestGatekeeperTargetBlock(unittest.TestCase):
             normalization_ambiguous=0,
             raw_capture_evaluated=1,
         )
-        with _patch_esc(esc):
-            prompt = build_system_prompt()
-        self.assertIn("- Capture Source: recent-unwrapped", prompt)
-        self.assertIn("- Normalization Relation: same", prompt)
-        self.assertIn("- Normalization Ambiguous: False", prompt)
-        self.assertIn("- Raw Capture Evaluated: True", prompt)
+        with patch("tools.schengen_agent_llm.has_human_opinion", return_value=False):
+            context = build_escalation_context_block(esc)
+        self.assertIn("- Capture Source: recent-unwrapped", context)
+        self.assertIn("- Normalization Relation: same", context)
+        self.assertIn("- Normalization Ambiguous: False", context)
+        self.assertIn("- Raw Capture Evaluated: True", context)
+        prompt = build_system_prompt(has_active=True)
         self.assertIn("Every candidate", prompt)
         self.assertIn("deterministic capture, normalization, denylist, and TOCTOU guards", prompt)
 
@@ -209,37 +210,38 @@ class TestGatekeeperHumanOpinionSurface(unittest.TestCase):
     hallucinated one (edge-case-7 / INV-HO-1 free-text parity)."""
 
     def test_human_opinion_recorded_true_surfaced(self):
-        with _patch_esc(), patch(
+        with patch(
             "tools.schengen_agent_llm.has_human_opinion", return_value=True
         ) as mock_ho:
-            prompt = build_system_prompt()
-        self.assertIn("- Human Opinion Recorded: True", prompt)
+            context = build_escalation_context_block(_ACTIVE_ESC)
+        self.assertIn("- Human Opinion Recorded: True", context)
         mock_ho.assert_called_once_with(_ACTIVE_ESC["id"])
 
     def test_human_opinion_recorded_false_surfaced(self):
-        with _patch_esc(), patch(
+        with patch(
             "tools.schengen_agent_llm.has_human_opinion", return_value=False
         ) as mock_ho:
-            prompt = build_system_prompt()
-        self.assertIn("- Human Opinion Recorded: False", prompt)
+            context = build_escalation_context_block(_ACTIVE_ESC)
+        self.assertIn("- Human Opinion Recorded: False", context)
         mock_ho.assert_called_once_with(_ACTIVE_ESC["id"])
 
     def test_human_opinion_surfaced_in_read_only_mode(self):
         # Question interpretation mode keeps the target block — the hint must
         # surface there too (adjudication capability is removed, not the info).
-        with _patch_esc(), patch(
+        with patch(
             "tools.schengen_agent_llm.has_human_opinion", return_value=True
         ):
-            prompt = build_system_prompt(allow_adjudication=False)
-        self.assertIn("- Human Opinion Recorded: True", prompt)
+            context = build_escalation_context_block(_ACTIVE_ESC)
+        self.assertIn("- Human Opinion Recorded: True", context)
+        self.assertIn("NO ADJUDICATION", build_system_prompt(allow_adjudication=False, has_active=True))
 
     def test_no_active_escalation_returns_without_human_opinion_line(self):
         # Early-return branch (no active escalation) must not call has_human_opinion.
-        with _patch_esc(None), patch(
+        with patch(
             "tools.schengen_agent_llm.has_human_opinion", return_value=True
         ) as mock_ho:
-            prompt = build_system_prompt()
-        self.assertNotIn("Human Opinion Recorded", prompt)
+            context = build_escalation_context_block(None)
+        self.assertEqual(context, "")
         mock_ho.assert_not_called()
 
 
