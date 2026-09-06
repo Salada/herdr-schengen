@@ -211,5 +211,120 @@ class TestGrepSearch(unittest.TestCase):
         self.assertIn("require EVIDENCE OF DANGER", prompt)
 
 
+class TestViewFileSlice(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name).resolve()
+        (self.root / "src").mkdir()
+        self.target = self.root / "src" / "app.py"
+        self.target.write_text("one\ntwo\nthree\n", encoding="utf-8")
+        self.context = {"cwd": str(self.root / "src")}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _view(self, args):
+        root = _completed([], stdout=str(self.root) + "\n")
+        with patch("tools.schengen_agent_llm.subprocess.run", return_value=root):
+            return json.loads(execute_tool_call("view_file_slice", args, context=self.context))
+
+    def test_schema_exposes_only_repository_relative_range(self):
+        tool = next(t for t in GUARD_TOOLS if t["function"]["name"] == "view_file_slice")
+        params = tool["function"]["parameters"]
+        self.assertEqual(set(params["properties"]), {"relative_path", "start_line", "end_line"})
+        self.assertEqual(params["required"], ["relative_path"])
+
+    def test_reads_one_based_inclusive_range_and_defaults(self):
+        result = self._view({"relative_path": "src/app.py", "start_line": 2, "end_line": 3})
+        self.assertEqual(result["content"], ["   2 | two", "   3 | three"])
+        self.assertFalse(result["truncated"])
+
+        defaulted = self._view({"relative_path": "src/app.py"})
+        self.assertEqual(defaulted["content"], ["   1 | one", "   2 | two", "   3 | three"])
+
+    def test_strict_integer_and_range_validation(self):
+        invalid = [
+            {"start_line": True},
+            {"start_line": 1.0},
+            {"start_line": "1"},
+            {"start_line": 0},
+            {"end_line": 1_000_001},
+            {"start_line": 3, "end_line": 2},
+            {"start_line": 1, "end_line": 101},
+        ]
+        for extra in invalid:
+            with self.subTest(extra=extra):
+                result = self._view({"relative_path": "src/app.py", **extra})
+                self.assertIn("error", result)
+
+    def test_exact_hundred_lines_eof_and_beyond_eof(self):
+        self.target.write_text("".join(f"line-{i}\n" for i in range(1, 101)), encoding="utf-8")
+        exact = self._view({"relative_path": "src/app.py", "start_line": 1, "end_line": 100})
+        self.assertEqual(len(exact["content"]), 100)
+        self.assertFalse(exact["truncated"])
+
+        eof = self._view({"relative_path": "src/app.py", "start_line": 99, "end_line": 100})
+        self.assertEqual(eof["content"], ["  99 | line-99", " 100 | line-100"])
+
+        beyond = self._view({"relative_path": "src/app.py", "start_line": 101, "end_line": 101})
+        self.assertEqual(beyond["content"], [])
+        self.assertFalse(beyond["truncated"])
+
+    def test_reuses_repository_boundary_rejections(self):
+        for relative_path in ["/tmp/x", "~/x", "src/../x", ".env", ".git/config", "credentials.json"]:
+            with self.subTest(relative_path=relative_path), \
+                 patch("tools.schengen_agent_llm.subprocess.run") as run:
+                result = json.loads(execute_tool_call(
+                    "view_file_slice", {"relative_path": relative_path}, context=self.context,
+                ))
+                self.assertIn("error", result)
+                run.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "outside.txt"
+            external.write_text("secret\n", encoding="utf-8")
+            (self.root / "escape").symlink_to(external)
+            escaped = self._view({"relative_path": "escape"})
+            self.assertIn("external access forbidden", escaped["error"])
+
+    def test_binary_invalid_utf8_and_directory_are_rejected(self):
+        self.target.write_bytes(b"text\x00binary")
+        self.assertIn("Binary file", self._view({"relative_path": "src/app.py"})["error"])
+
+        self.target.write_bytes(b"\xff\xfe")
+        self.assertIn("non-UTF-8", self._view({"relative_path": "src/app.py"})["error"])
+
+        directory = self._view({"relative_path": "src"})
+        self.assertIn("not a regular file", directory["error"])
+
+    def test_final_component_swap_fails_closed(self):
+        with patch("tools.schengen_agent_llm.os.open", side_effect=OSError("Too many levels of symbolic links")):
+            result = self._view({"relative_path": "src/app.py"})
+        self.assertIn("Unable to open repository file safely", result["error"])
+
+    def test_large_line_redaction_and_output_cap_are_explicit(self):
+        self.target.write_text("DB_PASSWORD=SuperSecretPass123" + "x" * 10000 + "\n", encoding="utf-8")
+        result = self._view({"relative_path": "src/app.py", "start_line": 1, "end_line": 1})
+        encoded = json.dumps(result, ensure_ascii=False)
+        self.assertTrue(result["truncated"])
+        self.assertIn("[TRUNCATED]", encoded)
+        self.assertNotIn("SuperSecretPass123", encoded)
+        self.assertLessEqual(len(encoded), 4000)
+
+    def test_prompt_confines_slice_to_search_hits(self):
+        escalation = {
+            "id": 1,
+            "pane_id": "w1D:p1",
+            "agent_kind": "codex",
+            "raw_command": "git add src",
+            "safety_reason": "requires review",
+            "decision_layer": "NOT_ALLOWLISTED",
+        }
+        with patch("tools.schengen_agent_llm.get_current_command_escalation", return_value=escalation):
+            prompt = build_system_prompt()
+        self.assertIn("specific file and line range returned by `grep_search`", prompt)
+        self.assertIn("not a general file browser", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

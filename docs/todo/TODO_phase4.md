@@ -232,12 +232,14 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
          • `git diff --stat` 또는 `git status --short`를 서브프로세스로 안전 격리 조회하여, 워커 에이전트의 커밋/푸시 명령 직전 실제 변경된 파일 수, 추가/삭제 라인 규모를 파악해 의도치 않은 대량 파괴(Mass Deletion/Mutation) 사전 감지.
        - 📑 **`view_file_slice` (범위 지정 파일 정밀 뷰어)**:
          • 단순 앞단 8KB 제한(`read_file_snippet`)을 탈피하여, `start_line` / `end_line` 슬라이스로 특정 코드 블록(예: 위험한 셸 실행 함수 호출부)을 타깃팅하여 읽는 경량 뷰어.
+         • Phase 2 (#233)는 `grep_search` 결과의 후속 확인에만 사용하며, 동일한 repository boundary와 민감 경로 차단을 재사용한다. 1-based inclusive 범위를 최대 100줄로 제한하고 binary/non-UTF-8·non-regular 파일을 거부하며 결과는 redaction 후 4,000자로 제한한다.
   - Codex 작업 마일스톤 (Action Items & Milestones for Codex):
     • [x] M1 / Phase 1 (#225): repository-confined `grep_search` 스키마 및 결정론적 `rg` 핸들러 구현.
     • [ ] M2 / Phase 2: `git_diff_stat` 및 `find_by_name` 보조 관측 툴 추가.
     • [x] M3 / Phase 1 (#225): 구체적으로 명명된 미해결 red flag에만 검색을 허용하도록 Gatekeeper 프롬프트 제한.
     • [x] M4 / Phase 1 (#225): `tests/test_gatekeeper_investigation_tools.py` 결정론적 단위 테스트 작성.
-    • [ ] Phase 2: `view_file_slice`를 포함한 나머지 도구는 별도 범위·리뷰 후 진행.
+    • [x] Phase 2 (#233): repository-confined `view_file_slice`와 결정론적 범위·binary·TOCTOU·redaction 회귀 테스트 구현.
+    • [ ] 후속 단계: `git_diff_stat` 및 `find_by_name`은 별도 범위·리뷰 후 진행.
 
 [x] [Feature/Herdr/Urgent-2] `herdr agent read` 기반 Agent Thread 컨텍스트 수집 최적화 — Forgejo #219:
   - Context & Motivation:
