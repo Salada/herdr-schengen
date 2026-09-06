@@ -1099,6 +1099,14 @@ _OBVIOUS_SAFE_VERSION_HELP_RE = re.compile(
     r"\s+(?:--version|-v|-V|--help|-h)\s*$"
 )
 
+# Closed query grammar validated against Herdr 0.8.2. Revalidate every form
+# before changing the supported Herdr CLI version (issue #237).
+_HERDR_AGENT_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
+_HERDR_PANE_ID_RE = re.compile(r"w[0-9A-Za-z]+:p[0-9A-Za-z]+\Z")
+_HERDR_WORKSPACE_ID_RE = re.compile(r"w[0-9A-Za-z]+\Z")
+_HERDR_WAIT_STATES = frozenset({"idle", "working", "blocked", "done", "unknown"})
+_HERDR_MAX_WAIT_TIMEOUT_MS = 1_800_000
+
 
 def _is_obvious_safe_version_help(cmd_str: str) -> bool:
     """True iff cmd_str is a CLOSED, trivially-safe version/help query.
@@ -1122,6 +1130,62 @@ def _is_obvious_safe_version_help(cmd_str: str) -> bool:
     if re.search(r"[|&;\n\r]", cmd_str):
         return False
     return _OBVIOUS_SAFE_VERSION_HELP_RE.match(cmd_str) is not None
+
+
+def _is_safe_herdr_query(cmd_str: str) -> bool:
+    """Recognize only the closed, read-only Herdr 0.8.2 query grammar."""
+    structure = _shell_structure_view(cmd_str)
+    if re.search(r"\$\(|`|>>?|<<?|[|&;\n\r]", structure):
+        return False
+    try:
+        tokens = shlex.split(cmd_str)
+    except ValueError:
+        return False
+
+    if len(tokens) == 2 and tokens[0] == "herdr":
+        return tokens[1] in {"--version", "-V", "--help", "-h"}
+    if tokens == ["herdr", "agent", "list"]:
+        return True
+    if len(tokens) == 4 and tokens[:3] == ["herdr", "agent", "get"]:
+        return bool(
+            _HERDR_AGENT_NAME_RE.fullmatch(tokens[3])
+            or _HERDR_PANE_ID_RE.fullmatch(tokens[3])
+        )
+    if len(tokens) >= 4 and tokens[:3] == ["herdr", "agent", "wait"]:
+        if not (
+            _HERDR_AGENT_NAME_RE.fullmatch(tokens[3])
+            or _HERDR_PANE_ID_RE.fullmatch(tokens[3])
+        ):
+            return False
+        seen_timeout = False
+        index = 4
+        while index < len(tokens):
+            if index + 1 >= len(tokens):
+                return False
+            flag, value = tokens[index:index + 2]
+            if flag == "--until":
+                if value not in _HERDR_WAIT_STATES:
+                    return False
+            elif flag == "--timeout":
+                if seen_timeout or not value.isascii() or not value.isdecimal():
+                    return False
+                timeout_ms = int(value)
+                if not 1 <= timeout_ms <= _HERDR_MAX_WAIT_TIMEOUT_MS:
+                    return False
+                seen_timeout = True
+            else:
+                return False
+            index += 2
+        return True
+    if tokens == ["herdr", "pane", "list"]:
+        return True
+    if len(tokens) == 5 and tokens[:3] == ["herdr", "pane", "list"]:
+        return tokens[3] == "--workspace" and bool(
+            _HERDR_WORKSPACE_ID_RE.fullmatch(tokens[4])
+        )
+    if len(tokens) == 4 and tokens[:3] == ["herdr", "pane", "get"]:
+        return bool(_HERDR_PANE_ID_RE.fullmatch(tokens[3]))
+    return False
 
 
 def _is_safe_cd_target(directory: str) -> bool:
@@ -1695,6 +1759,9 @@ def _is_fast_track_allowlisted(cmd_str: str) -> bool:
     # Pure read-only pipeline (segments joined by | && ;)
     if _PIPELINE_SEP_RE.search(structure):
         return _is_safe_readonly_pipeline(cmd_str)
+
+    if _is_safe_herdr_query(cmd_str):
+        return True
 
     # Single-command allowlist (no pipeline separators)
     for pat in FAST_TRACK_SAFE_GIT_PATTERNS:
