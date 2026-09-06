@@ -158,9 +158,9 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - 1) `SettingsModal` (Automation 섹션) 내 `approve_advisory` On/Off 토글 스위치 연동 (PR #180 후속).
   - 2) `guard_config` 테이블 내 bias/fast-track 전용 키 선행 정의 후 `SettingsModal` 라디오/스위치 연동.
 
-[] [Deferred/ConfigCache] `get_complexity_tax_config()` 프로세스-로컬 캐시 무효화 및 런타임 동기화 (#171 후속 피어리뷰 제안):
+[x] [ConfigCache] `get_complexity_tax_config()` 프로세스-로컬 캐시 무효화 및 런타임 동기화 (#171 후속, Forgejo #227):
   - Context: PR #171에서 적용된 read-once 메모리 캐시는 프로세스 단위로 동작하여, TUI에서 임계치(Threshold)를 변경하더라도 Watcher 데몬 프로세스가 SIGHUP 리로드 전까지 변경사항을 즉시 인지하지 못함.
-  - Solution: 짧은 TTL (예: 5~10s) 도입, SIGHUP/인메모리 invalidate 연동 또는 동기화 문서화. (Non-blocking Deferred)
+  - Solution: DB path로 key된 cache에 `time.monotonic()` 기반 5초 TTL을 적용한다. 로컬 write는 즉시 invalidate하며, 별도 프로세스의 write 및 허용된 read/write race는 재시작 없이 최대 5초 안에 반영된다. SQLite WAL의 mtime에는 의존하지 않는다.
 
 [x] [Feature/Optimization/P1/Urgent-1] Deterministic In-Flight Tool Observation Compaction (Zero-LLM Inspector/Judge Token Reduction) — Forgejo #217:
   - 실제 비용 원인은 영구 `self.history`가 아니라 단일 `send_message` 안에서 최대 4회 Inspector 루프와 Judge로 재전송되는 대형 tool observation이다.

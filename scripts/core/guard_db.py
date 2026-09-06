@@ -1361,13 +1361,16 @@ _COMPLEXITY_TAX_DEFAULTS = {
     "complexity_threshold": 6,
 }
 
-# (#139-4) read-once validated cache for the complexity-tax knobs, keyed by the
-# active DB path: (db_path, validated_cfg). `get_complexity_tax_config()` runs on
+# (#139-4/#227) short-lived validated cache for the complexity-tax knobs, keyed
+# by the active DB path: (db_path, validated_cfg, loaded_at_monotonic).
+# `get_complexity_tax_config()` runs on
 # EVERY non-allowlist command evaluation (twice per command: gray-zone PROMPT +
 # pre-novelty gate) — a raw init_db() + SELECT per call is wasteful. The DB-path
 # key self-invalidates when DB_PATH changes (tests / runtime state-dir switch),
-# and `set_complexity_tax_config()` (the only write path) clears it explicitly.
-_complexity_tax_config_cache: Optional[tuple[str, dict[str, Any]]] = None
+# `set_complexity_tax_config()` clears it explicitly, and the TTL bounds stale
+# cross-process reads to five seconds without relying on SQLite/WAL mtimes.
+_COMPLEXITY_TAX_CACHE_TTL_SECONDS = 5.0
+_complexity_tax_config_cache: Optional[tuple[str, dict[str, Any], float]] = None
 
 
 def _load_complexity_tax_config() -> dict[str, Any]:
@@ -1392,18 +1395,26 @@ def get_complexity_tax_config() -> dict[str, Any]:
     """Complexity-tax knobs, backed by guard_config. Missing keys -> defaults.
     threshold stored as string; coerce to int, clamp to [1, 10000].
 
-    (#139-4) in-memory read-once cache: repeated non-allowlist command evaluation
+    (#139-4/#227) short-lived in-memory cache: repeated non-allowlist evaluation
     serves the validated copy instead of re-running init_db() + SELECT per call.
     Return semantics are unchanged — always a fresh dict of the current defaults
     merged with persisted overrides. Invalidation: set_complexity_tax_config()
     (write path) clears the cache; the DB-path key also self-invalidates when the
-    active DB_PATH changes."""
+    active DB_PATH changes; cross-process writes become visible within five
+    seconds. A concurrent write can race an expiring read and briefly re-cache
+    the pre-write value, but it self-heals within the same bounded TTL."""
     global _complexity_tax_config_cache
     db_key = str(DB_PATH)
-    if _complexity_tax_config_cache is not None and _complexity_tax_config_cache[0] == db_key:
+    now = time.monotonic()
+    if (
+        _complexity_tax_config_cache is not None
+        and _complexity_tax_config_cache[0] == db_key
+        and now - _complexity_tax_config_cache[2] < _COMPLEXITY_TAX_CACHE_TTL_SECONDS
+    ):
         return dict(_complexity_tax_config_cache[1])
+    _complexity_tax_config_cache = None
     cfg = _load_complexity_tax_config()
-    _complexity_tax_config_cache = (db_key, cfg)
+    _complexity_tax_config_cache = (db_key, cfg, time.monotonic())
     return dict(cfg)
 
 
@@ -1435,7 +1446,7 @@ def set_complexity_tax_config(enabled=None, threshold=None) -> dict[str, Any]:
                 ("complexity_threshold", str(clamped), now_iso),
             )
         conn.commit()
-    _complexity_tax_config_cache = None  # (#139-4) invalidate read-once cache
+    _complexity_tax_config_cache = None  # (#139-4/#227) immediate local invalidation
     return get_complexity_tax_config()
 
 
