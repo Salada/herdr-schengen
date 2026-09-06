@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import tempfile
@@ -12,6 +13,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 from cmd.schengen_test_shards import (
     LIVE_ONLY_MODULES,
     SHARDS,
+    TimedTextTestResult,
     _validate_home_root,
     manifest_errors,
     run_parallel,
@@ -20,6 +22,25 @@ from cmd.schengen_test_shards import (
 
 
 class TestCITestShards(unittest.TestCase):
+    def test_result_prints_machine_readable_duration_for_each_case(self):
+        class SampleTest(unittest.TestCase):
+            def test_ok(self):
+                pass
+
+        stream = io.StringIO()
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(SampleTest)
+        result = unittest.TextTestRunner(
+            stream=stream,
+            verbosity=2,
+            resultclass=TimedTextTestResult,
+        ).run(suite)
+
+        self.assertTrue(result.wasSuccessful())
+        self.assertRegex(
+            stream.getvalue(),
+            r"duration_seconds=\d+\.\d{6} test=.*SampleTest\.test_ok",
+        )
+
     def test_manifest_covers_each_module_exactly_once(self):
         self.assertEqual(manifest_errors(), [])
         assigned = [module for modules in SHARDS.values() for module in modules]

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -89,6 +90,25 @@ SHARDS = {
 }
 
 LIVE_ONLY_MODULES = ("tests.test_llm_evaluator_integration",)
+
+
+class TimedTextTestResult(unittest.TextTestResult):
+    """Emit one machine-readable duration line for every completed test case."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._started_at = {}
+
+    def startTest(self, test):
+        self._started_at[id(test)] = time.perf_counter()
+        super().startTest(test)
+
+    def stopTest(self, test):
+        started_at = self._started_at.pop(id(test), None)
+        super().stopTest(test)
+        if started_at is not None:
+            elapsed = time.perf_counter() - started_at
+            self.stream.writeln(f"duration_seconds={elapsed:.6f} test={test.id()}")
 
 
 def discover_test_modules(repo_root=REPO_ROOT):
@@ -187,7 +207,7 @@ def run_worker(shard):
     if str(SCRIPTS_ROOT) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_ROOT))
     suite = unittest.defaultTestLoader.loadTestsFromNames(SHARDS[shard])
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=TimedTextTestResult).run(suite)
     return 0 if result.wasSuccessful() else 1
 
 
@@ -200,7 +220,7 @@ def run_live():
     if str(SCRIPTS_ROOT) not in sys.path:
         sys.path.insert(0, str(SCRIPTS_ROOT))
     suite = unittest.defaultTestLoader.loadTestsFromNames(LIVE_ONLY_MODULES)
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=TimedTextTestResult).run(suite)
     if result.skipped:
         print("live test contract violation: configured tests were skipped", file=sys.stderr)
         return 1
