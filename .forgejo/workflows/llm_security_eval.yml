@@ -5,7 +5,7 @@ on:
   schedule:
     - cron: '0 0 * * 1'   # Weekly every Monday at 00:00 UTC
   push:
-    branches: [ main, "feat/*", "fix/*" ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -14,13 +14,29 @@ jobs:
     name: Run LLM Security & Substitution Tests
     runs-on: ubuntu-latest
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GUARD_LLM_MODEL: "gpt-5.6-luna"
       GUARD_REASONING_EFFORT: "low"
       HERDR_ENV: "1"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Select Host Runner Caches
+        run: |
+          cache_root=/data/.cache/herdr-schengen
+          ci_home_parent=/data/.ci-runs/herdr-schengen
+          cache_mode=host-persistent
+          if ! mkdir -p "$cache_root/pip" "$cache_root/tools" "$ci_home_parent" || [ ! -w "$cache_root" ] || [ ! -w "$ci_home_parent" ]; then
+            cache_root="${RUNNER_TEMP:-/tmp}/herdr-schengen-cache"
+            ci_home_parent="$HOME/.local/state/herdr-schengen-ci-runs"
+            cache_mode=job-local
+            mkdir -p "$cache_root/pip" "$cache_root/tools" "$ci_home_parent"
+          fi
+          echo "PIP_CACHE_DIR=$cache_root/pip" >> "$GITHUB_ENV"
+          echo "SCHENGEN_TOOL_CACHE=$cache_root/tools" >> "$GITHUB_ENV"
+          echo "SCHENGEN_CI_HOME_PARENT=$ci_home_parent" >> "$GITHUB_ENV"
+          echo "cache_mode=$cache_mode cache_root=$cache_root ci_home_parent=$ci_home_parent"
+          df -P "$cache_root" | tail -n 1
 
       - name: Verify No Residual Git Conflict Markers
         run: |
@@ -31,21 +47,34 @@ jobs:
 
       - name: Ensure ShellCheck Binary
         run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            echo "📥 Downloading standalone shellcheck binary for CI runner..."
-            mkdir -p "$HOME/.local/bin"
-            ARCH=$(uname -m)
-            if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-              SC_ARCH="aarch64"
-            else
-              SC_ARCH="x86_64"
-            fi
-            curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.${SC_ARCH}.tar.xz" | tar -xJ -C /tmp
-            cp "/tmp/shellcheck-v0.10.0/shellcheck" "$HOME/.local/bin/"
-            chmod +x "$HOME/.local/bin/shellcheck"
-            echo "$HOME/.local/bin" >> $GITHUB_PATH
-            export PATH="$HOME/.local/bin:$PATH"
+          case "$(uname -m)" in
+            aarch64|arm64)
+              sc_arch=aarch64
+              sc_sha=324a7e89de8fa2aed0d0c28f3dab59cf84c6d74264022c00c22af665ed1a09bb
+              ;;
+            x86_64|amd64)
+              sc_arch=x86_64
+              sc_sha=6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87
+              ;;
+            *)
+              echo "Unsupported runner architecture: $(uname -m)"
+              exit 1
+              ;;
+          esac
+          archive="$SCHENGEN_TOOL_CACHE/shellcheck-v0.10.0.linux.${sc_arch}.tar.xz"
+          if [ -f "$archive" ] && echo "$sc_sha  $archive" | sha256sum -c - >/dev/null 2>&1; then
+            echo "shellcheck_cache=hit"
+          else
+            echo "shellcheck_cache=miss"
+            curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.${sc_arch}.tar.xz" -o "$archive.tmp"
+            echo "$sc_sha  $archive.tmp" | sha256sum -c -
+            mv "$archive.tmp" "$archive"
           fi
+          tool_dir="${RUNNER_TEMP:-/tmp}/shellcheck-v0.10.0"
+          mkdir -p "$tool_dir"
+          tar -xJf "$archive" -C "$tool_dir"
+          echo "$tool_dir/shellcheck-v0.10.0" >> "$GITHUB_PATH"
+          export PATH="$tool_dir/shellcheck-v0.10.0:$PATH"
           shellcheck --version
 
       - name: Verify Environment
@@ -57,18 +86,25 @@ jobs:
       - name: Install Python Dependencies (incl. required semgrep SAST CLI)
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install --no-cache-dir --quiet textual rich httpx 'semgrep>=1.70.0'
+          .venv/bin/pip install --quiet textual rich httpx 'semgrep>=1.70.0'
           .venv/bin/semgrep --version
+          .venv/bin/pip cache info
 
-      - name: Run Unit Guardrail Tests
+      - name: Run Purpose-Based Isolated Test Shards
         run: |
-          export PATH="$PWD/.venv/bin:$HOME/.local/bin:$PATH"
-          .venv/bin/python3 -m unittest discover -s tests -v
+          export PATH="$PWD/.venv/bin:$PATH"
+          .venv/bin/python3 scripts/cmd/schengen_test_shards.py --verify
+          .venv/bin/python3 scripts/cmd/schengen_test_shards.py --run
 
       - name: Run Live LLM Integration Tests (OpenAI-compatible cloud judge)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          RUN_LIVE_LLM_TESTS: "1"
         run: |
           if [ -n "${OPENAI_API_KEY}" ]; then
-            .venv/bin/python3 -m unittest tests/test_llm_evaluator_integration.py
+            .venv/bin/python3 scripts/cmd/schengen_test_shards.py --live
           else
             echo "ℹ️  OPENAI_API_KEY secret not set; skipping live integration tests in CI."
           fi

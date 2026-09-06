@@ -4,28 +4,29 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '15 0 * * 1'   # Weekly every Monday 00:15 UTC (drift canary)
-  push:
-    branches: [ main, "feat/*", "fix/*" ]
-  pull_request:
-    branches: [ main ]
 
 jobs:
   approval-bias:
     name: Run LLM Approval-Bias Regression Harness
     runs-on: ubuntu-latest
     env:
-      # Inspector and Judge are pinned to the SAME model/endpoint so the Judge
-      # phase is skipped in send_message (1 API call per corpus case).
-      SCHENGEN_INSPECTOR_API_KEY: ${{ secrets.SCHENGEN_INSPECTOR_API_KEY }}
-      SCHENGEN_INSPECTOR_BASE_URL: ${{ secrets.SCHENGEN_INSPECTOR_BASE_URL }}
-      SCHENGEN_INSPECTOR_MODEL: "gpt-5.6-luna"
-      SCHENGEN_JUDGE_API_KEY: ${{ secrets.SCHENGEN_INSPECTOR_API_KEY }}
-      SCHENGEN_JUDGE_BASE_URL: ${{ secrets.SCHENGEN_INSPECTOR_BASE_URL }}
-      SCHENGEN_JUDGE_MODEL: "gpt-5.6-luna"
       HERDR_ENV: "1"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Select Host Runner Package Cache
+        run: |
+          cache_root=/data/.cache/herdr-schengen/pip
+          cache_mode=host-persistent
+          if ! mkdir -p "$cache_root" || [ ! -w "$cache_root" ]; then
+            cache_root="${RUNNER_TEMP:-/tmp}/herdr-schengen-pip-cache"
+            cache_mode=job-local
+            mkdir -p "$cache_root"
+          fi
+          echo "PIP_CACHE_DIR=$cache_root" >> "$GITHUB_ENV"
+          echo "cache_mode=$cache_mode cache_root=$cache_root"
+          df -P "$cache_root" | tail -n 1
 
       - name: Verify No Residual Git Conflict Markers
         run: |
@@ -37,15 +38,19 @@ jobs:
       - name: Install Python Dependencies
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install --no-cache-dir --quiet httpx
-
-      - name: Run Approval-Bias Unit & Corpus Validation Tests (no live LLM)
-        run: |
-          export PATH="$PWD/.venv/bin:$PATH"
-          .venv/bin/python3 -m unittest tests.test_schengen_bias_harness tests.test_approval_bias_corpus -v
+          .venv/bin/pip install --quiet httpx
+          .venv/bin/pip cache info
 
       - name: Run Live Approval-Bias Harness (gatekeeper LLM drift gate — canary only)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          # Inspector and Judge are pinned to the SAME model/endpoint so the Judge
+          # phase is skipped in send_message (1 API call per corpus case).
+          SCHENGEN_INSPECTOR_API_KEY: ${{ secrets.SCHENGEN_INSPECTOR_API_KEY }}
+          SCHENGEN_INSPECTOR_BASE_URL: ${{ secrets.SCHENGEN_INSPECTOR_BASE_URL }}
+          SCHENGEN_INSPECTOR_MODEL: "gpt-5.6-luna"
+          SCHENGEN_JUDGE_API_KEY: ${{ secrets.SCHENGEN_INSPECTOR_API_KEY }}
+          SCHENGEN_JUDGE_BASE_URL: ${{ secrets.SCHENGEN_INSPECTOR_BASE_URL }}
+          SCHENGEN_JUDGE_MODEL: "gpt-5.6-luna"
         run: |
           if [ -z "${SCHENGEN_INSPECTOR_API_KEY}" ]; then
             echo "ℹ️  SCHENGEN_INSPECTOR_API_KEY secret not set; skipping live approval-bias harness (non-blocking)."
