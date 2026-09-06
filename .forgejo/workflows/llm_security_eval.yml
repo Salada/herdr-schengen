@@ -7,6 +7,11 @@ on:
         description: "Optional isolated cache namespace for persistence checks"
         required: false
         default: "shared-v1"
+      run_live:
+        description: "Run live LLM integration tests"
+        required: false
+        type: boolean
+        default: false
   schedule:
     - cron: '0 0 * * 1'   # Weekly every Monday at 00:00 UTC
   push:
@@ -31,8 +36,8 @@ jobs:
         run: |
           cache_namespace=${SCHENGEN_CACHE_NAMESPACE:-shared-v1}
           case "$cache_namespace" in
-            *[!A-Za-z0-9._-]*)
-              echo "Invalid cache namespace: use only ASCII letters, digits, dot, underscore, and hyphen"
+            .|..|*[!A-Za-z0-9._-]*)
+              echo "Invalid cache namespace: use allowed ASCII characters and do not use . or .."
               exit 1
               ;;
           esac
@@ -53,7 +58,7 @@ jobs:
 
       - name: Verify No Residual Git Conflict Markers
         run: |
-          if grep -rnE '^(<{7}|>{7}|={7}) ' --exclude-dir=.git .; then
+          if git grep -nE '^(<{7}|>{7}|={7}) ' -- .; then
             echo "❌ Git conflict markers detected in repository!"
             exit 1
           fi
@@ -116,7 +121,7 @@ jobs:
           .venv/bin/python3 scripts/cmd/schengen_test_shards.py --run
 
       - name: Run Live LLM Integration Tests (OpenAI-compatible cloud judge)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'schedule' || github.event.inputs.run_live == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}

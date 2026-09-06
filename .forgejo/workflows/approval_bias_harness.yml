@@ -17,7 +17,7 @@ jobs:
 
       - name: Select Host Runner Package Cache
         run: |
-          cache_root=/data/.cache/herdr-schengen/pip
+          cache_root=/data/.cache/herdr-schengen/shared-v1/pip
           cache_mode=host-persistent
           if ! mkdir -p "$cache_root" || [ ! -w "$cache_root" ]; then
             cache_root="${RUNNER_TEMP:-/tmp}/herdr-schengen-pip-cache"
@@ -30,7 +30,7 @@ jobs:
 
       - name: Verify No Residual Git Conflict Markers
         run: |
-          if grep -rnE '^(<{7}|>{7}|={7}) ' --exclude-dir=.git .; then
+          if git grep -nE '^(<{7}|>{7}|={7}) ' -- .; then
             echo "❌ Git conflict markers detected in repository!"
             exit 1
           fi
