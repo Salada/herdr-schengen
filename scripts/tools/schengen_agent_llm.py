@@ -132,6 +132,33 @@ COMPACTION_TAIL_EXCERPT_CHARS = 300
 
 _LOGGER = logging.getLogger(__name__)
 
+DEFAULT_INSPECTOR_MAX_TOKENS = 800
+DEFAULT_JUDGE_MAX_TOKENS = 600
+MIN_COMPLETION_MAX_TOKENS = 64
+MAX_COMPLETION_MAX_TOKENS = 4096
+
+
+def _completion_token_limit(name: str, default: int) -> int:
+    """Read one strict, bounded completion-token override at process setup."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if not raw.isascii() or not raw.isdecimal():
+        _LOGGER.warning("Ignoring invalid %s=%r; using %d", name, raw, default)
+        return default
+    value = int(raw)
+    if not MIN_COMPLETION_MAX_TOKENS <= value <= MAX_COMPLETION_MAX_TOKENS:
+        _LOGGER.warning(
+            "Ignoring out-of-range %s=%r; expected %d..%d, using %d",
+            name,
+            raw,
+            MIN_COMPLETION_MAX_TOKENS,
+            MAX_COMPLETION_MAX_TOKENS,
+            default,
+        )
+        return default
+    return value
+
 
 def _message_chars(messages: List[Dict[str, Any]]) -> int:
     """Return a stable lower-bound estimate, excluding fixed protocol/schema overhead."""
@@ -1653,6 +1680,12 @@ class SchengenAgentChat:
         self.judge_api_key = api_key or JUDGE_API_KEY
         self.judge_base_url = JUDGE_BASE_URL
         self.judge_model = JUDGE_MODEL
+        self.inspector_max_tokens = _completion_token_limit(
+            "SCHENGEN_INSPECTOR_MAX_TOKENS", DEFAULT_INSPECTOR_MAX_TOKENS
+        )
+        self.judge_max_tokens = _completion_token_limit(
+            "SCHENGEN_JUDGE_MAX_TOKENS", DEFAULT_JUDGE_MAX_TOKENS
+        )
         self.session_id = f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         self.log_file = SESSIONS_DIR / f"{self.session_id}.jsonl"
         self.history: List[Dict[str, Any]] = []
@@ -1840,6 +1873,7 @@ class SchengenAgentChat:
                     "messages": messages,
                     "tools": tools,
                     "temperature": 0.0,
+                    "max_tokens": self.inspector_max_tokens,
                     "stream": False,
                 }
                 resp, err = await _post_with_adaptive_retry(
@@ -1865,6 +1899,20 @@ class SchengenAgentChat:
                 self.total_cached_tokens += cached
 
                 choice = data["choices"][0]
+                if choice.get("finish_reason") == "length":
+                    self.inspector_prompt_tokens += p_tokens
+                    self.inspector_completion_tokens += c_tokens
+                    warning = (
+                        "⚠️ [MAX_TOKENS_REACHED] Inspector completion reached its "
+                        f"{self.inspector_max_tokens}-token ceiling. Any partial tool calls were "
+                        "discarded; the escalation remains pending for human review."
+                    )
+                    _LOGGER.warning(
+                        "Inspector completion reached max_tokens=%d; dropping all tool calls",
+                        self.inspector_max_tokens,
+                    )
+                    self._append_transcript(role="assistant", content=warning)
+                    return warning
                 msg = choice["message"]
                 tool_calls = msg.get("tool_calls")
 
@@ -1883,6 +1931,7 @@ class SchengenAgentChat:
                             "model": self.judge_model,
                             "messages": messages,
                             "temperature": 0.0,
+                            "max_tokens": self.judge_max_tokens,
                             "stream": False,
                         }
                         judge_resp, judge_err = await _post_with_adaptive_retry(
@@ -1908,9 +1957,12 @@ class SchengenAgentChat:
 
                         self.judge_prompt_tokens += jp_tokens
                         self.judge_completion_tokens += jc_tokens
-                        msg = judge_data["choices"][0]["message"]
+                        judge_choice = judge_data["choices"][0]
+                        judge_truncated = judge_choice.get("finish_reason") == "length"
+                        msg = judge_choice["message"]
                         final_phase = "Judge"
                     else:
+                        judge_truncated = False
                         self.judge_prompt_tokens += p_tokens
                         self.judge_completion_tokens += c_tokens
 
@@ -1918,6 +1970,17 @@ class SchengenAgentChat:
                     final_content = clean_llm_response(raw_content)
                     if not final_content:
                         final_content = "⚠️ No explicit verdict returned by Inspector/Judge; deferring to human operator."
+                    if judge_truncated:
+                        _LOGGER.warning(
+                            "Judge completion reached max_tokens=%d; preserving pending state",
+                            self.judge_max_tokens,
+                        )
+                        final_content = (
+                            "⚠️ [MAX_TOKENS_REACHED] Judge completion reached its "
+                            f"{self.judge_max_tokens}-token ceiling; the text below is incomplete "
+                            "and the escalation remains pending.\n\n"
+                            + final_content
+                        )
 
                     if allow_adjudication and active_esc:
                         record_model_no_tool_call(active_esc, final_phase)

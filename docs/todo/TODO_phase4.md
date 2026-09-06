@@ -190,6 +190,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
        - 툴 결과 임계값(`COMPACTION_TOOL_RESULT_THRESHOLD`)을 800~1,000자 수준으로 조정하여 긴 터미널 덤프/파일 조회가 발생했을 때 즉각 축약되도록 유도.
   - Codex 작업 마일스톤 (Action Items & Milestones for Codex):
     • [x] M1: `build_system_prompt` 리팩토링 (정적 시스템 프롬프트 vs 동적 에스컬레이션 컨텍스트 분리, Forgejo #231).
+    • [x] M1b: Inspector/Judge completion에 명시적 `max_tokens` 상한과 fail-closed truncation 처리를 적용 (Forgejo #235).
     • M2: `schengen_agent_llm.py` 단일 턴 Fast-Path (Short-Circuit Adjudication) 로직 구현.
     • M3: Compaction 파라미터 튜닝 및 `tests/test_context_compaction.py` 회귀 테스트 갱신.
     • M4: 토큰 절감률(40%+) 및 레이턴시 단축 회귀 검증.
