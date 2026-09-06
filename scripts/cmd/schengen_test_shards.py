@@ -172,6 +172,7 @@ def shard_environment(state_root, home_root, shard):
             "TMPDIR": str(paths["tmp"]),
             "SCHENGEN_LOG_DIR": str(paths["log"]),
             "PYTHONPYCACHEPREFIX": str(paths["pycache"]),
+            "PYTHONNOUSERSITE": "1",
             "XDG_CACHE_HOME": str(paths["xdg_cache"]),
             "XDG_DATA_HOME": str(paths["xdg_data"]),
             "XDG_STATE_HOME": str(paths["xdg_state"]),
@@ -214,10 +215,12 @@ def run_parallel():
         return 2
 
     parent = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
-    state_root = Path(tempfile.mkdtemp(prefix="herdr-schengen-ci-", dir=parent))
-    home_root = create_isolated_home_root()
+    state_root = None
+    home_root = None
     processes = []
     try:
+        state_root = Path(tempfile.mkdtemp(prefix="herdr-schengen-ci-", dir=parent))
+        home_root = create_isolated_home_root()
         for shard in SHARDS:
             log_path = state_root / f"{shard}.log"
             log_file = log_path.open("w", encoding="utf-8")
@@ -250,8 +253,10 @@ def run_parallel():
                     process.wait()
             if not log_file.closed:
                 log_file.close()
-        shutil.rmtree(state_root, ignore_errors=True)
-        shutil.rmtree(home_root, ignore_errors=True)
+        if state_root is not None:
+            shutil.rmtree(state_root, ignore_errors=True)
+        if home_root is not None:
+            shutil.rmtree(home_root, ignore_errors=True)
 
 
 def main(argv=None):

@@ -1,7 +1,9 @@
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -12,6 +14,7 @@ from cmd.schengen_test_shards import (
     SHARDS,
     _validate_home_root,
     manifest_errors,
+    run_parallel,
     shard_environment,
 )
 
@@ -44,12 +47,25 @@ class TestCITestShards(unittest.TestCase):
             "XDG_STATE_HOME",
         ):
             self.assertNotEqual(policy[key], runtime[key])
+        self.assertEqual(policy["PYTHONNOUSERSITE"], "1")
+        self.assertEqual(runtime["PYTHONNOUSERSITE"], "1")
 
     def test_home_root_rejects_paths_that_change_security_semantics(self):
         for path in ("/tmp/ci-home", "/private/tmp/ci-home", Path(__file__).resolve().parents[1] / ".ci-home"):
             with self.subTest(path=path):
                 with self.assertRaises(ValueError):
                     _validate_home_root(path)
+
+    def test_home_creation_failure_cleans_temporary_state_root(self):
+        with tempfile.TemporaryDirectory() as runner_temp:
+            with patch.dict(os.environ, {"RUNNER_TEMP": runner_temp}):
+                with patch(
+                    "cmd.schengen_test_shards.create_isolated_home_root",
+                    side_effect=RuntimeError("unavailable"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                        run_parallel()
+            self.assertEqual(list(Path(runner_temp).iterdir()), [])
 
 
 if __name__ == "__main__":
