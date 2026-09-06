@@ -54,87 +54,50 @@ def _canned(content_str: str) -> dict:
     return {"choices": [{"message": {"content": content_str}}]}
 
 
-class TestComplexityTaxConfigCache(unittest.TestCase):
-    """Five-second cross-process visibility without per-command SQLite reads."""
+class TestComplexityTaxUnifiedSettings(unittest.TestCase):
+    """Complexity knobs share the canonical settings snapshot and its one TTL."""
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test_guard.db"
         self.db_patch = patch.object(guard_db, "DB_PATH", self.db_path)
         self.db_patch.start()
-        guard_db._complexity_tax_config_cache = None
+        guard_db._reset_settings_resolver_cache()
         guard_db.init_db()
 
     def tearDown(self):
-        guard_db._complexity_tax_config_cache = None
+        guard_db._reset_settings_resolver_cache()
         self.db_patch.stop()
         self.temp_dir.cleanup()
 
-    def test_cache_hit_within_ttl_returns_copy_without_reload(self):
-        cfg = {"complexity_tax_enabled": True, "complexity_threshold": 6}
-        with patch.object(guard_db.time, "monotonic", side_effect=[100.0, 100.0, 104.9]), \
-             patch.object(guard_db, "_load_complexity_tax_config", return_value=cfg) as load:
-            first = get_complexity_tax_config()
-            first["complexity_threshold"] = 99
-            second = get_complexity_tax_config()
+    def test_getter_returns_copy_of_unified_snapshot(self):
+        first = get_complexity_tax_config()
+        first["complexity_threshold"] = 99
+        self.assertEqual(get_complexity_tax_config()["complexity_threshold"], 6)
 
-        self.assertEqual(second["complexity_threshold"], 6)
-        self.assertEqual(load.call_count, 1)
+    def test_sqlite_changes_after_migration_are_not_live_authority(self):
+        self.assertEqual(get_complexity_tax_config()["complexity_threshold"], 6)
+        with guard_db.get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                ("complexity_threshold", "17", "2026-09-06T00:00:00+00:00"),
+            )
+            conn.commit()
+        guard_db._reset_settings_resolver_cache()
+        self.assertEqual(get_complexity_tax_config()["complexity_threshold"], 6)
 
-    def test_cache_reloads_at_ttl_and_when_db_path_changes(self):
-        old = {"complexity_tax_enabled": True, "complexity_threshold": 6}
-        new = {"complexity_tax_enabled": False, "complexity_threshold": 9}
-        with patch.object(guard_db.time, "monotonic", side_effect=[10.0, 10.0, 15.0, 15.0]), \
-             patch.object(guard_db, "_load_complexity_tax_config", side_effect=[old, new]) as load:
-            self.assertEqual(get_complexity_tax_config(), old)
-            self.assertEqual(get_complexity_tax_config(), new)
-        self.assertEqual(load.call_count, 2)
-
-        other_db = Path(self.temp_dir.name) / "other.db"
-        with patch.object(guard_db, "DB_PATH", other_db), \
-             patch.object(guard_db.time, "monotonic", return_value=15.1), \
-             patch.object(guard_db, "_load_complexity_tax_config", return_value=old) as load:
-            self.assertEqual(get_complexity_tax_config(), old)
-        load.assert_called_once_with()
-
-    def test_direct_sqlite_update_is_visible_after_ttl(self):
-        with patch.object(guard_db.time, "monotonic", side_effect=[0.0, 0.0, 4.9, 5.0, 5.0]):
-            initial = get_complexity_tax_config()
-            with guard_db.get_db_connection() as conn:
-                conn.execute(
-                    "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                    ("complexity_threshold", "17", "2026-09-06T00:00:00+00:00"),
-                )
-                conn.commit()
-
-            self.assertEqual(get_complexity_tax_config(), initial)
-            self.assertEqual(get_complexity_tax_config()["complexity_threshold"], 17)
-
-    def test_reload_failure_leaves_cache_invalid_and_retries(self):
-        old = {"complexity_tax_enabled": True, "complexity_threshold": 6}
-        new = {"complexity_tax_enabled": False, "complexity_threshold": 12}
-        guard_db._complexity_tax_config_cache = (str(self.db_path), old, 0.0)
-        with patch.object(guard_db.time, "monotonic", return_value=6.0), \
-             patch.object(
-                 guard_db,
-                 "_load_complexity_tax_config",
-                 side_effect=[RuntimeError("db unavailable"), new],
-             ) as load:
-            with self.assertRaisesRegex(RuntimeError, "db unavailable"):
-                get_complexity_tax_config()
-            self.assertIsNone(guard_db._complexity_tax_config_cache)
-            self.assertEqual(get_complexity_tax_config(), new)
-        self.assertEqual(load.call_count, 2)
+    def test_independent_complexity_cache_is_removed(self):
+        self.assertFalse(hasattr(guard_db, "_complexity_tax_config_cache"))
+        self.assertFalse(hasattr(guard_db, "_load_complexity_tax_config"))
 
     def test_write_path_invalidates_immediately(self):
-        with patch.object(guard_db.time, "monotonic", return_value=20.0):
-            self.assertEqual(get_complexity_tax_config()["complexity_threshold"], 6)
-            updated = guard_db.set_complexity_tax_config(enabled=False, threshold=23)
-            self.assertEqual(updated, {
-                "complexity_tax_enabled": False,
-                "complexity_threshold": 23,
-            })
+        self.assertEqual(get_complexity_tax_config()["complexity_threshold"], 6)
+        updated = guard_db.set_complexity_tax_config(enabled=False, threshold=23)
+        self.assertEqual(updated, {
+            "complexity_tax_enabled": False,
+            "complexity_threshold": 23,
+        })
 
 
 class TestHeredocMasking(unittest.TestCase):

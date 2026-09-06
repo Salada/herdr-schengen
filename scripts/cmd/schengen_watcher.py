@@ -163,7 +163,19 @@ class InspectorCoordinator:
             "ts": time.time(),
             "detected_ns": detected_ns or time.monotonic_ns(),
         }
-        self.in_flight[pane_id] = (request, phase_box, self.executor.submit(self._evaluate, evaluate, phase_box))
+        # Publish ownership before submit: an immediate worker may synchronously
+        # reach code that observes its live phase box.
+        self.in_flight[pane_id] = (request, phase_box, None)
+        try:
+            future = self.executor.submit(self._evaluate, evaluate, phase_box)
+        except Exception:
+            current = self.in_flight.get(pane_id)
+            if current is not None and current[0] == request and current[1] is phase_box:
+                self.in_flight.pop(pane_id, None)
+            if self.owned.get(pane_id) == (request, "in_flight"):
+                self.owned.pop(pane_id, None)
+            raise
+        self.in_flight[pane_id] = (request, phase_box, future)
         return True
 
     def _evaluate(self, evaluate, phase_box):
@@ -181,7 +193,7 @@ class InspectorCoordinator:
 
     def completed(self):
         for pane_id, (request, phase_box, future) in list(self.in_flight.items()):
-            if not future.done():
+            if future is None or not future.done():
                 continue
             del self.in_flight[pane_id]
             self.completed_traces[pane_id] = dict(phase_box)

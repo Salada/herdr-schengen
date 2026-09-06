@@ -82,6 +82,7 @@ SHARDS = {
         "tests.test_schengen_tui_and_agent",
         "tests.test_session_cache_and_prompt",
         "tests.test_session_memory",
+        "tests.test_settings_config",
         "tests.test_stale_escalation_eviction",
         "tests.test_tui_deterministic_directives",
         "tests.test_tui_pane_direct_guard",

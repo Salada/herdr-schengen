@@ -22,10 +22,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.runtime_provenance import get_source_revision
+from core.settings_config import (
+    DEFAULT_SETTINGS,
+    SettingsResolver,
+    default_recovery_path,
+    default_settings_path,
+)
 from urllib.parse import urlsplit
 
 DB_DIR = Path.home() / ".local" / "state" / "herdr-schengen"
 DB_PATH = DB_DIR / "schengen_history.db"
+_DEFAULT_DB_PATH = DB_PATH
 
 # Phase-1 in-flight inspection IPC (INV-PH1-2/5): the watcher (single writer)
 # publishes inspector in-flight state to this JSON file; the TUI reads it
@@ -1229,13 +1236,109 @@ def get_state_file_paths() -> dict[str, str]:
 
 
 _INSTRUCTION_CONFIG_DEFAULTS = {
-    "send_approve_instruction": False,
-    "send_reject_instruction": True,
+    "send_approve_instruction": DEFAULT_SETTINGS.send_approve_instruction,
+    "send_reject_instruction": DEFAULT_SETTINGS.send_reject_instruction,
 }
 
 
 def _parse_bool(value) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+_settings_resolvers: dict[tuple[str, str, str], SettingsResolver] = {}
+_settings_resolvers_lock = threading.RLock()
+
+
+def _settings_storage_paths() -> tuple[Path, Path]:
+    """Return production paths, or DB-scoped paths for injected test databases."""
+    if Path(DB_PATH) == Path(_DEFAULT_DB_PATH):
+        return default_settings_path(), default_recovery_path()
+    stem = Path(DB_PATH).name
+    return (
+        Path(DB_PATH).with_name(f".{stem}.settings.json"),
+        Path(DB_PATH).with_name(f".{stem}.settings.last-good.json"),
+    )
+
+
+def _get_settings_resolver() -> SettingsResolver:
+    settings_path, recovery_path = _settings_storage_paths()
+    key = (str(settings_path), str(recovery_path), str(DB_PATH))
+    with _settings_resolvers_lock:
+        resolver = _settings_resolvers.get(key)
+        if resolver is None:
+            resolver = SettingsResolver(settings_path, recovery_path)
+            _settings_resolvers[key] = resolver
+        return resolver
+
+
+def _reset_settings_resolver_cache() -> None:
+    """Test hook: discard every process-local effective settings snapshot."""
+    with _settings_resolvers_lock:
+        _settings_resolvers.clear()
+
+
+def _legacy_settings_snapshot() -> dict[str, object]:
+    """Build one validated migration candidate from legacy SQLite/defaults."""
+    data = DEFAULT_SETTINGS.to_dict()
+    init_db()
+    with get_db_connection() as conn:
+        rows = {row["key"]: row["value"] for row in conn.execute(
+            "SELECT key, value FROM guard_config"
+        ).fetchall()}
+
+    for name in (
+        "send_approve_instruction",
+        "send_reject_instruction",
+        "channel_approve",
+        "complexity_tax_enabled",
+        "origin_weighting_enabled",
+        "batch_approval_enabled",
+        "pane_direct_eviction_enabled",
+    ):
+        if name in rows:
+            normalized = str(rows[name]).strip().lower()
+            if normalized in ("1", "true", "yes", "on"):
+                data[name] = True
+            elif normalized in ("0", "false", "no", "off"):
+                data[name] = False
+
+    language = str(rows.get("answer_language", "")).strip().lower()
+    if language in _ANSWER_LANGUAGE_OPTIONS:
+        data["answer_language"] = language
+
+    try:
+        data["complexity_threshold"] = max(
+            1, min(10000, int(rows["complexity_threshold"]))
+        )
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        confidence = float(rows["cloud_judge_min_confidence"])
+        if confidence == confidence and confidence not in (float("inf"), float("-inf")):
+            data["cloud_judge_min_confidence"] = max(0.7, min(1.0, confidence))
+    except (KeyError, TypeError, ValueError):
+        pass
+    try:
+        data["human_approval_ttl_seconds"] = max(
+            60, min(86400, int(float(rows["human_approval_ttl_seconds"])))
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        pass
+    try:
+        data["pane_direct_confirm_polls"] = max(
+            1, min(5, int(float(rows["pane_direct_confirm_polls"])))
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        pass
+    return data
+
+
+def _settings_snapshot():
+    return _get_settings_resolver().get(_legacy_settings_snapshot)
+
+
+def _update_settings(**changes):
+    return _get_settings_resolver().update(changes, _legacy_settings_snapshot)
 
 
 def get_instruction_delivery_config() -> dict[str, bool]:
@@ -1244,16 +1347,13 @@ def get_instruction_delivery_config() -> dict[str, bool]:
 
     Defaults: send_approve_instruction=False (do NOT pollute the agent prompt on
     approve), send_reject_instruction=True (explain why a command was rejected).
-    Backed by the `guard_config` table; missing keys fall back to the defaults.
+    Backed by the canonical schema-v1 JSON document.
     """
-    init_db()
-    config = dict(_INSTRUCTION_CONFIG_DEFAULTS)
-    with get_db_connection() as conn:
-        rows = conn.execute("SELECT key, value FROM guard_config").fetchall()
-        for row in rows:
-            if row["key"] in config:
-                config[row["key"]] = _parse_bool(row["value"])
-    return config
+    snapshot = _settings_snapshot()
+    return {
+        "send_approve_instruction": snapshot.send_approve_instruction,
+        "send_reject_instruction": snapshot.send_reject_instruction,
+    }
 
 
 def set_instruction_delivery_config(
@@ -1261,41 +1361,23 @@ def set_instruction_delivery_config(
     send_reject_instruction: Optional[bool] = None,
 ) -> dict[str, bool]:
     """Update instruction-delivery config keys (None = leave unchanged). Returns the new config."""
-    init_db()
-    now_iso = datetime.now(timezone.utc).isoformat()
     updates = {}
     if send_approve_instruction is not None:
-        updates["send_approve_instruction"] = "true" if send_approve_instruction else "false"
+        updates["send_approve_instruction"] = bool(send_approve_instruction)
     if send_reject_instruction is not None:
-        updates["send_reject_instruction"] = "true" if send_reject_instruction else "false"
+        updates["send_reject_instruction"] = bool(send_reject_instruction)
     if updates:
-        with get_db_connection() as conn:
-            for key, value in updates.items():
-                conn.execute(
-                    """
-                    INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                    """,
-                    (key, value, now_iso),
-                )
-            conn.commit()
+        _update_settings(**updates)
     return get_instruction_delivery_config()
 
 
-_ANSWER_LANGUAGE_DEFAULT = "korean"
+_ANSWER_LANGUAGE_DEFAULT = DEFAULT_SETTINGS.answer_language
 _ANSWER_LANGUAGE_OPTIONS = ("english", "korean", "japanese")
 
 
 def get_answer_language() -> str:
     """Return the configured answer language for the TUI chat (english/korean/japanese)."""
-    init_db()
-    with get_db_connection() as conn:
-        row = conn.execute(
-            "SELECT value FROM guard_config WHERE key = 'answer_language'"
-        ).fetchone()
-    if row and str(row["value"]).strip().lower() in _ANSWER_LANGUAGE_OPTIONS:
-        return str(row["value"]).strip().lower()
-    return _ANSWER_LANGUAGE_DEFAULT
+    return _settings_snapshot().answer_language
 
 
 def set_answer_language(language: str) -> str:
@@ -1304,20 +1386,10 @@ def set_answer_language(language: str) -> str:
     lang = str(language).strip().lower()
     if lang not in _ANSWER_LANGUAGE_OPTIONS:
         lang = _ANSWER_LANGUAGE_DEFAULT
-    now_iso = datetime.now(timezone.utc).isoformat()
-    with get_db_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-            """,
-            ("answer_language", lang, now_iso),
-        )
-        conn.commit()
-    return lang
+    return _update_settings(answer_language=lang).answer_language
 
 
-_CHANNEL_APPROVE_DEFAULT = False
+_CHANNEL_APPROVE_DEFAULT = DEFAULT_SETTINGS.channel_approve
 
 
 def get_channel_approve_config() -> bool:
@@ -1326,288 +1398,132 @@ def get_channel_approve_config() -> bool:
     When True, the watcher writes an approve/reject decision bound to the exact
     permission_id and the opencode host plugin replies via client.permission
     (issue #57 full closure). When False, the watcher falls back to keystroke
-    injection (send-keys enter). Backed by the `guard_config` table — no longer a
-    transient env var (issue #114), so the TUI is the single toggle surface and
-    the daemon reads a consistent value regardless of spawn path.
+    injection (send-keys enter). It is no longer a transient env var (issue
+    #114); the canonical JSON is the shared live authority across processes.
     """
-    init_db()
-    with get_db_connection() as conn:
-        row = conn.execute(
-            "SELECT value FROM guard_config WHERE key = 'channel_approve'"
-        ).fetchone()
-    if row is not None:
-        return _parse_bool(row["value"])
-    return _CHANNEL_APPROVE_DEFAULT
+    return _settings_snapshot().channel_approve
 
 
 def set_channel_approve_config(enabled: bool) -> bool:
     """Persist the channel_approve (permission.reply) opt-in. Returns the new value."""
-    init_db()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    with get_db_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-            """,
-            ("channel_approve", "true" if enabled else "false", now_iso),
-        )
-        conn.commit()
-    return bool(enabled)
+    return _update_settings(channel_approve=bool(enabled)).channel_approve
 
 
 _COMPLEXITY_TAX_DEFAULTS = {
-    "complexity_tax_enabled": True,
-    "complexity_threshold": 6,
+    "complexity_tax_enabled": DEFAULT_SETTINGS.complexity_tax_enabled,
+    "complexity_threshold": DEFAULT_SETTINGS.complexity_threshold,
 }
-
-# (#139-4/#227) short-lived validated cache for the complexity-tax knobs, keyed
-# by the active DB path: (db_path, validated_cfg, loaded_at_monotonic).
-# `get_complexity_tax_config()` runs on
-# EVERY non-allowlist command evaluation (twice per command: gray-zone PROMPT +
-# pre-novelty gate) — a raw init_db() + SELECT per call is wasteful. The DB-path
-# key self-invalidates when DB_PATH changes (tests / runtime state-dir switch),
-# `set_complexity_tax_config()` clears it explicitly, and the TTL bounds stale
-# cross-process reads to five seconds without relying on SQLite/WAL mtimes.
-_COMPLEXITY_TAX_CACHE_TTL_SECONDS = 5.0
-_complexity_tax_config_cache: Optional[tuple[str, dict[str, Any], float]] = None
-
-
-def _load_complexity_tax_config() -> dict[str, Any]:
-    """Read complexity-tax knobs from guard_config. Missing keys -> defaults.
-    threshold stored as string; coerce to int, clamp to [1, 10000]."""
-    init_db()
-    cfg = dict(_COMPLEXITY_TAX_DEFAULTS)
-    with get_db_connection() as conn:
-        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
-            k, v = row["key"], row["value"]
-            if k == "complexity_tax_enabled":
-                cfg[k] = _parse_bool(v)
-            elif k == "complexity_threshold":
-                try:
-                    cfg[k] = max(1, min(10000, int(v)))
-                except (TypeError, ValueError):
-                    pass
-    return cfg
 
 
 def get_complexity_tax_config() -> dict[str, Any]:
-    """Complexity-tax knobs, backed by guard_config. Missing keys -> defaults.
-    threshold stored as string; coerce to int, clamp to [1, 10000].
-
-    (#139-4/#227) short-lived in-memory cache: repeated non-allowlist evaluation
-    serves the validated copy instead of re-running init_db() + SELECT per call.
-    Return semantics are unchanged — always a fresh dict of the current defaults
-    merged with persisted overrides. Invalidation: set_complexity_tax_config()
-    (write path) clears the cache; the DB-path key also self-invalidates when the
-    active DB_PATH changes; cross-process writes become visible within five
-    seconds. A concurrent write can race an expiring read and briefly re-cache
-    the pre-write value, but it self-heals within the same bounded TTL."""
-    global _complexity_tax_config_cache
-    db_key = str(DB_PATH)
-    now = time.monotonic()
-    if (
-        _complexity_tax_config_cache is not None
-        and _complexity_tax_config_cache[0] == db_key
-        and now - _complexity_tax_config_cache[2] < _COMPLEXITY_TAX_CACHE_TTL_SECONDS
-    ):
-        return dict(_complexity_tax_config_cache[1])
-    _complexity_tax_config_cache = None
-    cfg = _load_complexity_tax_config()
-    _complexity_tax_config_cache = (db_key, cfg, time.monotonic())
-    return dict(cfg)
+    """Return complexity-tax values from the unified <=5 second snapshot."""
+    snapshot = _settings_snapshot()
+    return {
+        "complexity_tax_enabled": snapshot.complexity_tax_enabled,
+        "complexity_threshold": snapshot.complexity_threshold,
+    }
 
 
 def set_complexity_tax_config(enabled=None, threshold=None) -> dict[str, Any]:
     """Human-only write path (TUI settings modal); returns the new config.
     Mirror the set_answer_language / set_channel_approve_config upsert pattern."""
-    global _complexity_tax_config_cache
-    init_db()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    with get_db_connection() as conn:
-        if enabled is not None:
-            conn.execute(
-                """
-                INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                ("complexity_tax_enabled", "true" if _parse_bool(enabled) else "false", now_iso),
-            )
-        if threshold is not None:
-            try:
-                clamped = max(1, min(10000, int(threshold)))
-            except (TypeError, ValueError):
-                clamped = int(_COMPLEXITY_TAX_DEFAULTS["complexity_threshold"])
-            conn.execute(
-                """
-                INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                ("complexity_threshold", str(clamped), now_iso),
-            )
-        conn.commit()
-    _complexity_tax_config_cache = None  # (#139-4/#227) immediate local invalidation
+    changes = {}
+    if enabled is not None:
+        changes["complexity_tax_enabled"] = _parse_bool(enabled)
+    if threshold is not None:
+        try:
+            changes["complexity_threshold"] = max(1, min(10000, int(threshold)))
+        except (TypeError, ValueError):
+            changes["complexity_threshold"] = _COMPLEXITY_TAX_DEFAULTS["complexity_threshold"]
+    if changes:
+        _update_settings(**changes)
     return get_complexity_tax_config()
 
 
-_ORIGIN_WEIGHTING_DEFAULTS = {"origin_weighting_enabled": True}
+_ORIGIN_WEIGHTING_DEFAULTS = {"origin_weighting_enabled": DEFAULT_SETTINGS.origin_weighting_enabled}
 
 
 def get_origin_weighting_config() -> dict[str, bool]:
     """M5 origin-weighting toggle. Controls ONLY the HUMAN trust concession
     (skip complexity tax). The INJECTED/EMERGENT hard-escalate is unconditional
     and NOT gated by this knob."""
-    init_db()
-    cfg = dict(_ORIGIN_WEIGHTING_DEFAULTS)
-    with get_db_connection() as conn:
-        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
-            if row["key"] == "origin_weighting_enabled":
-                cfg["origin_weighting_enabled"] = _parse_bool(row["value"])
-    return cfg
+    return {"origin_weighting_enabled": _settings_snapshot().origin_weighting_enabled}
 
 
 def set_origin_weighting_config(enabled: Optional[bool] = None) -> dict[str, bool]:
     """Human-only write path; mirror set_channel_approve_config upsert."""
-    init_db()
     if enabled is not None:
-        now_iso = datetime.now(timezone.utc).isoformat()
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                ("origin_weighting_enabled", "true" if _parse_bool(enabled) else "false", now_iso),
-            )
-            conn.commit()
+        _update_settings(origin_weighting_enabled=_parse_bool(enabled))
     return get_origin_weighting_config()
 
 
-_CLOUD_JUDGE_DEFAULTS = {"cloud_judge_min_confidence": 0.9}
+_CLOUD_JUDGE_DEFAULTS = {"cloud_judge_min_confidence": DEFAULT_SETTINGS.cloud_judge_min_confidence}
 
 
 def get_cloud_judge_config() -> dict[str, float]:
-    """M6 cloud-judge confidence knob, backed by guard_config. Missing keys ->
-    defaults. Stored as string; coerce to float and clamp to [0.7, 1.0]
-    (M6: lower bound raised from 0.5 — a 0.5-0.7 gate was too weak to be a
-    meaningful auto-approve confidence)."""
-    init_db()
-    cfg = dict(_CLOUD_JUDGE_DEFAULTS)
-    with get_db_connection() as conn:
-        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
-            if row["key"] == "cloud_judge_min_confidence":
-                try:
-                    cfg["cloud_judge_min_confidence"] = max(0.7, min(1.0, float(row["value"])))
-                except (TypeError, ValueError):
-                    pass
-    return cfg
+    """M6 cloud-judge confidence from the canonical settings snapshot."""
+    return {"cloud_judge_min_confidence": _settings_snapshot().cloud_judge_min_confidence}
 
 
 def set_cloud_judge_config(min_confidence: Optional[float] = None) -> dict[str, float]:
-    """Human-only write; clamp [0.7, 1.0] (M6: lower bound raised from 0.5);
-    upsert guard_config (mirror set_channel_approve_config)."""
-    init_db()
+    """Human-only canonical write; clamp confidence to [0.7, 1.0]."""
     if min_confidence is not None:
-        now_iso = datetime.now(timezone.utc).isoformat()
         clamped = max(0.7, min(1.0, float(min_confidence)))
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                ("cloud_judge_min_confidence", str(clamped), now_iso),
-            )
-            conn.commit()
+        _update_settings(cloud_judge_min_confidence=clamped)
     return get_cloud_judge_config()
 
 
-_BATCH_APPROVAL_DEFAULTS = {"batch_approval_enabled": True, "human_approval_ttl_seconds": 3600}
+_BATCH_APPROVAL_DEFAULTS = {
+    "batch_approval_enabled": DEFAULT_SETTINGS.batch_approval_enabled,
+    "human_approval_ttl_seconds": DEFAULT_SETTINGS.human_approval_ttl_seconds,
+}
 
 
 def get_batch_approval_config() -> dict:
-    """M7 anti-fatigue knobs, backed by guard_config. Missing keys -> defaults.
-
-    batch_approval_enabled: _parse_bool. human_approval_ttl_seconds: int clamp
-    [60, 86400] (used by the novelty gate in record_human_approval_pattern).
-    """
-    init_db()
-    cfg = dict(_BATCH_APPROVAL_DEFAULTS)
-    with get_db_connection() as conn:
-        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
-            k, v = row["key"], row["value"]
-            if k == "batch_approval_enabled":
-                cfg[k] = _parse_bool(v)
-            elif k == "human_approval_ttl_seconds":
-                try:
-                    cfg[k] = max(60, min(86400, int(float(v))))
-                except (TypeError, ValueError):
-                    pass
-    return cfg
+    """M7 anti-fatigue values from the canonical settings snapshot."""
+    snapshot = _settings_snapshot()
+    return {
+        "batch_approval_enabled": snapshot.batch_approval_enabled,
+        "human_approval_ttl_seconds": snapshot.human_approval_ttl_seconds,
+    }
 
 
 def set_batch_approval_config(enabled=None, ttl_seconds=None) -> dict:
-    """Human-only write path; upsert guard_config (mirror set_channel_approve_config)."""
-    init_db()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    with get_db_connection() as conn:
-        if enabled is not None:
-            conn.execute(
-                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                ("batch_approval_enabled", "true" if _parse_bool(enabled) else "false", now_iso),
-            )
-        if ttl_seconds is not None:
-            clamped = max(60, min(86400, int(float(ttl_seconds))))
-            conn.execute(
-                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                ("human_approval_ttl_seconds", str(clamped), now_iso),
-            )
-        conn.commit()
+    """Human-only canonical write path for anti-fatigue settings."""
+    changes = {}
+    if enabled is not None:
+        changes["batch_approval_enabled"] = _parse_bool(enabled)
+    if ttl_seconds is not None:
+        changes["human_approval_ttl_seconds"] = max(60, min(86400, int(float(ttl_seconds))))
+    if changes:
+        _update_settings(**changes)
     return get_batch_approval_config()
 
 
-_PANE_DIRECT_DEFAULTS = {"pane_direct_eviction_enabled": True, "pane_direct_confirm_polls": 2}
+_PANE_DIRECT_DEFAULTS = {
+    "pane_direct_eviction_enabled": DEFAULT_SETTINGS.pane_direct_eviction_enabled,
+    "pane_direct_confirm_polls": DEFAULT_SETTINGS.pane_direct_confirm_polls,
+}
 
 
 def get_pane_direct_config() -> dict:
-    """Pane-direct auto-eviction knobs, backed by guard_config. Missing keys -> defaults.
-
-    pane_direct_eviction_enabled: _parse_bool. pane_direct_confirm_polls: int
-    clamp [1, 5] (consecutive not-live polls required before a PD-C debounced
-    eviction self-approves a stale escalation).
-    """
-    init_db()
-    cfg = dict(_PANE_DIRECT_DEFAULTS)
-    with get_db_connection() as conn:
-        for row in conn.execute("SELECT key, value FROM guard_config").fetchall():
-            k, v = row["key"], row["value"]
-            if k == "pane_direct_eviction_enabled":
-                cfg[k] = _parse_bool(v)
-            elif k == "pane_direct_confirm_polls":
-                try:
-                    cfg[k] = max(1, min(5, int(float(v))))
-                except (TypeError, ValueError):
-                    pass
-    return cfg
+    """Pane-direct liveness values from the canonical settings snapshot."""
+    snapshot = _settings_snapshot()
+    return {
+        "pane_direct_eviction_enabled": snapshot.pane_direct_eviction_enabled,
+        "pane_direct_confirm_polls": snapshot.pane_direct_confirm_polls,
+    }
 
 
 def set_pane_direct_config(enabled=None, confirm_polls=None) -> dict:
-    """Human-only write path; upsert guard_config (mirror set_batch_approval_config)."""
-    init_db()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    with get_db_connection() as conn:
-        if enabled is not None:
-            conn.execute(
-                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                ("pane_direct_eviction_enabled", "true" if _parse_bool(enabled) else "false", now_iso),
-            )
-        if confirm_polls is not None:
-            clamped = max(1, min(5, int(float(confirm_polls))))
-            conn.execute(
-                "INSERT INTO guard_config (key, value, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                ("pane_direct_confirm_polls", str(clamped), now_iso),
-            )
-        conn.commit()
+    """Human-only canonical write path for pane-direct liveness settings."""
+    changes = {}
+    if enabled is not None:
+        changes["pane_direct_eviction_enabled"] = _parse_bool(enabled)
+    if confirm_polls is not None:
+        changes["pane_direct_confirm_polls"] = max(1, min(5, int(float(confirm_polls))))
+    if changes:
+        _update_settings(**changes)
     return get_pane_direct_config()
 
 
