@@ -2674,7 +2674,7 @@ def _audit_static_shell_command(
     # INV-5/6: fast-track auto-approve is now an explicit closed allowlist of
     # provably-benign commands (no metacharacters, no forensic/network binaries).
     if _is_fast_track_allowlisted(cmd_str):
-        if cmd_str.lstrip().startswith("herdr "):
+        if _is_safe_herdr_query(cmd_str):
             return True, "Fast-track verified safe Herdr CLI query", DecisionLayer.FAST_TRACK_AST
         return True, f"Fast-track verified safe: '{cmd_str}'", DecisionLayer.FAST_TRACK_AST
 

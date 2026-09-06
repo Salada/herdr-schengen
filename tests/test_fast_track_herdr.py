@@ -26,6 +26,7 @@ class TestHerdrQueryFastTrack(unittest.TestCase):
     def test_exact_readonly_queries_fast_track(self):
         for command in (
             "herdr --version",
+            "herdr\t--help",
             "herdr -V",
             "herdr --help",
             "herdr -h",
