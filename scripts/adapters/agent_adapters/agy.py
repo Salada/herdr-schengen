@@ -196,17 +196,15 @@ class AgyAdapter(AgentAdapter):
         return None
 
     def inject_approval(self, pane_id, req_cmd):
-        """Inject approval keystroke(s) for an AGY dialog.
-
-        AGY dialogs never fail after a safe evaluation, so this always returns
-        approved=True.
-        """
+        """Inject approval keystrokes, failing closed if delivery is unknown."""
         if req_cmd == "feedback_survey_skip":
             print(f"⏩ Auto-skipping CLI experience survey on {pane_id} (sending '0')...", flush=True)
-            run_cmd(["herdr", "agent", "send-keys", pane_id, "0"])
+            delivered = run_cmd(["herdr", "agent", "send-keys", pane_id, "0"])
         else:
             print(f"🚀 Auto-approving pre-execution script for {pane_id} (sending Enter via SmartGate)...", flush=True)
-            run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
+            delivered = run_cmd(["herdr", "agent", "send-keys", pane_id, "enter"])
+        if delivered is None:
+            return False, "delivery unknown: herdr CLI failure or timeout"
         return True, "approved"
 
     def inject_reject(self, pane_id, req_cmd):

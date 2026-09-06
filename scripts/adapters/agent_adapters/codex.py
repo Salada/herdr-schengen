@@ -238,7 +238,9 @@ class CodexAdapter(AgentAdapter):
     def inject_approval(self, pane_id, req_cmd):
         """Approve via 'y' (selection-independent, per Codex default keymap)."""
         print(f"🚀 Auto-approving codex request for {pane_id} (sending 'y')...", flush=True)
-        run_cmd(["herdr", "agent", "send-keys", pane_id, "y"])
+        delivered = run_cmd(["herdr", "agent", "send-keys", pane_id, "y"])
+        if delivered is None:
+            return False, "delivery unknown: herdr CLI failure or timeout"
         return True, "approved (y)"
 
     def inject_reject(self, pane_id, req_cmd):
