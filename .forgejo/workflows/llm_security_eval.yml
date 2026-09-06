@@ -66,9 +66,12 @@ jobs:
             echo "shellcheck_cache=hit"
           else
             echo "shellcheck_cache=miss"
-            curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.${sc_arch}.tar.xz" -o "$archive.tmp"
-            echo "$sc_sha  $archive.tmp" | sha256sum -c -
-            mv "$archive.tmp" "$archive"
+            tmp_archive=$(mktemp "$SCHENGEN_TOOL_CACHE/.shellcheck-v0.10.0.${sc_arch}.XXXXXX")
+            trap 'rm -f "$tmp_archive"' EXIT
+            curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.${sc_arch}.tar.xz" -o "$tmp_archive"
+            echo "$sc_sha  $tmp_archive" | sha256sum -c -
+            mv -f "$tmp_archive" "$archive"
+            trap - EXIT
           fi
           tool_dir="${RUNNER_TEMP:-/tmp}/shellcheck-v0.10.0"
           mkdir -p "$tool_dir"
