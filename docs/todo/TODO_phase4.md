@@ -188,18 +188,19 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
                "type": "object",
                "properties": {
                  "query": { "type": "string", "description": "Regex or literal pattern to search for." },
-                 "path": { "type": "string", "description": "Target directory or file path to search within." },
+                "relative_path": { "type": "string", "description": "Optional path relative to the active escalation's Git worktree root.", "default": "." },
                  "case_sensitive": { "type": "boolean", "description": "Case-sensitive search flag (default: false).", "default": false },
                  "max_results": { "type": "integer", "description": "Max match lines to return to avoid context overflow (default: 20, max: 50).", "default": 20 }
                },
-               "required": ["query", "path"]
+              "required": ["query"]
              }
            }
          }
          ```
-       - 보안 가드:
-         • `.env`, `id_rsa`, `.ssh/` 등 차단 경로 직접 진입 시 패턴 마스킹 또는 접근 차단.
-         • Context Compaction과 연동하여 출력 결과는 최대 20~50줄로 캡(Cap) 적용.
+       - 보안 가드 (Phase 1, Forgejo #225):
+         • 검색 root는 active escalation의 `cwd`에서 서버가 Git toplevel로 유도하며 LLM에는 root 지정 권한을 주지 않는다.
+         • 절대경로·tilde·상위경로·hidden path·symlink escape를 차단하고 기존 `SECRET_GUARD` 민감 경로 판정기를 재사용한다.
+         • `rg` 기본 ignore/hidden 정책을 유지하고, 결과는 redaction 후 전역 50줄·4,000자로 제한한다. `grep` fallback은 의미 차이 때문에 사용하지 않는다.
     2. **모던 에이전트 관측 도구군 선별 도입 (Modern Agent Investigation Toolkit)**:
        - 🔍 **`find_by_name` (파일/디렉터리 트리 고속 탐색)**:
          • 명령어가 삭제/수정하려는 타깃 경로가 실제로 어떤 파일 트리 구조를 가지는지 `fd` 또는 `find` 기반으로 안전하게 구조화된 트리 리스팅 (예: `build/`, `dist/`, `tmp/`의 실제 하위 구성 확인).
@@ -208,10 +209,11 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
        - 📑 **`view_file_slice` (범위 지정 파일 정밀 뷰어)**:
          • 단순 앞단 8KB 제한(`read_file_snippet`)을 탈피하여, `start_line` / `end_line` 슬라이스로 특정 코드 블록(예: 위험한 셸 실행 함수 호출부)을 타깃팅하여 읽는 경량 뷰어.
   - Codex 작업 마일스톤 (Action Items & Milestones for Codex):
-    • M1: `scripts/tools/schengen_agent_llm.py` 내 `grep_search` 도구 스키마 및 `rg` 래퍼 안전 핸들러 구현 (바이너리 부재 시 `grep` fallback 고려).
-    • M2: `git_diff_stat` 및 `find_by_name` 보조 관측 툴 추가.
-    • M3: Gatekeeper 프롬프트에 `grep_search` 활용 지침 추가 ("명령어가 민감 환경변수나 파괴적 스크립트를 건드리는지 의심될 경우 `grep_search`로 선행 검증하라").
-    • M4: 단위 테스트 작성 (`tests/test_gatekeeper_investigation_tools.py`).
+    • [x] M1 / Phase 1 (#225): repository-confined `grep_search` 스키마 및 결정론적 `rg` 핸들러 구현.
+    • [ ] M2 / Phase 2: `git_diff_stat` 및 `find_by_name` 보조 관측 툴 추가.
+    • [x] M3 / Phase 1 (#225): 구체적으로 명명된 미해결 red flag에만 검색을 허용하도록 Gatekeeper 프롬프트 제한.
+    • [x] M4 / Phase 1 (#225): `tests/test_gatekeeper_investigation_tools.py` 결정론적 단위 테스트 작성.
+    • [ ] Phase 2: `view_file_slice`를 포함한 나머지 도구는 별도 범위·리뷰 후 진행.
 
 [x] [Feature/Herdr/Urgent-2] `herdr agent read` 기반 Agent Thread 컨텍스트 수집 최적화 — Forgejo #219:
   - Context & Motivation:

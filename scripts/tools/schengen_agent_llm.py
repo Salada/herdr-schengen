@@ -20,6 +20,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -74,6 +75,7 @@ from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
 from adapters.auto_advance import run_auto_advance
 from core.cloud_judge import DEFAULT_REASONING_EFFORT
 from core.redaction import redact_for_cloud
+from core.security_evaluator import _is_sensitive_target
 
 # ── Shared fallback config ──────────────────────────────────────────
 # POLICY (ADR-011): OpenAI-standard env vars only. DeepSeek defaults are removed.
@@ -306,6 +308,43 @@ GUARD_TOOLS = [
                     },
                 },
                 "required": ["target_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep_search",
+            "description": "Search the active escalation's Git worktree with a bounded regular expression to verify one specific named red flag.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Regular expression to search for.",
+                        "minLength": 1,
+                        "maxLength": 512,
+                    },
+                    "relative_path": {
+                        "type": "string",
+                        "description": "Optional path relative to the active Git worktree root.",
+                        "default": ".",
+                        "maxLength": 1024,
+                    },
+                    "case_sensitive": {
+                        "type": "boolean",
+                        "description": "Use case-sensitive matching (default: false).",
+                        "default": False,
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum total match lines to return (default: 20, max: 50).",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 50,
+                    },
+                },
+                "required": ["query"],
             },
         },
     },
@@ -762,7 +801,165 @@ def reject_batch_escalations(feedback: str = "Rejected in batch via TUI") -> Dic
     return {"status": "ok", "resolved": resolved, "deferred": deferred}
 
 
-def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
+def _redacted_json(payload: Dict[str, Any]) -> str:
+    return redact_for_cloud(json.dumps(payload, ensure_ascii=False))
+
+
+def _grep_search(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
+    query = args.get("query")
+    if not isinstance(query, str) or not query or len(query) > 512:
+        return _redacted_json({"error": "query must be a non-empty regular expression of at most 512 characters"})
+
+    raw_relative = args.get("relative_path", ".")
+    if not isinstance(raw_relative, str) or len(raw_relative) > 1024:
+        return _redacted_json({"error": "relative_path must be a string of at most 1024 characters"})
+    raw_relative = raw_relative or "."
+    relative = Path(raw_relative)
+    if raw_relative.startswith("~") or relative.is_absolute() or ".." in relative.parts:
+        return _redacted_json({"error": "Path traversal or external access forbidden"})
+    if any(part.startswith(".") and part != "." for part in relative.parts):
+        return _redacted_json({"error": "Explicit hidden-path access forbidden"})
+    if _is_sensitive_target(raw_relative):
+        return _redacted_json({"error": "Access to sensitive path denied"})
+
+    cwd = str((context or {}).get("cwd") or "")
+    if not cwd:
+        return _redacted_json({"error": "Active escalation working directory unavailable"})
+
+    try:
+        cwd_path = canonicalize_path(cwd)
+        root_result = subprocess.run(
+            ["git", "-C", str(cwd_path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+            timeout=5.0,
+        )
+        if root_result.returncode != 0 or not root_result.stdout.strip():
+            return _redacted_json({"error": "Active escalation is not inside a Git worktree"})
+
+        repo_root = canonicalize_path(root_result.stdout.strip())
+        if not repo_root.is_dir() or repo_root == repo_root.parent:
+            return _redacted_json({"error": "Unsafe Git worktree root"})
+        try:
+            cwd_path.relative_to(repo_root)
+        except ValueError:
+            return _redacted_json({"error": "Active working directory escaped its Git worktree"})
+        target = canonicalize_path(str(repo_root / relative))
+        try:
+            target.relative_to(repo_root)
+        except ValueError:
+            return _redacted_json({"error": "Path traversal or external access forbidden"})
+        if not target.exists():
+            return _redacted_json({"error": "Search path does not exist"})
+        if _is_sensitive_target(str(target)):
+            return _redacted_json({"error": "Access to sensitive path denied"})
+
+        rg = shutil.which("rg")
+        if not rg:
+            return _redacted_json({"error": "rg unavailable"})
+
+        try:
+            requested_max = int(args.get("max_results", 20))
+        except (TypeError, ValueError):
+            requested_max = 20
+        max_results = max(1, min(50, requested_max))
+        command = [rg, "--json", "--no-messages", "--color", "never"]
+        if not bool(args.get("case_sensitive", False)):
+            command.append("--ignore-case")
+        command.extend(["--", query, str(target)])
+        search = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            shell=False,
+            timeout=5.0,
+        )
+    except FileNotFoundError:
+        return _redacted_json({"error": "required executable unavailable"})
+    except subprocess.TimeoutExpired:
+        return _redacted_json({"error": "grep_search timed out"})
+    except (OSError, ValueError) as exc:
+        return _redacted_json({"error": str(exc)})
+
+    if search.returncode == 1:
+        return _redacted_json({
+            "query": query,
+            "relative_path": raw_relative,
+            "matches": [],
+            "match_count": 0,
+            "truncated": False,
+        })
+    if search.returncode != 0:
+        detail = redact_for_cloud((search.stderr or "rg failed").strip())[:500]
+        return _redacted_json({"error": detail})
+
+    matches: List[str] = []
+    sensitive_matches_omitted = 0
+    truncated = False
+    try:
+        for raw_line in search.stdout.splitlines():
+            event = json.loads(raw_line)
+            if event.get("type") != "match":
+                continue
+            data = event.get("data") or {}
+            match_path_text = (data.get("path") or {}).get("text")
+            match_text = (data.get("lines") or {}).get("text")
+            if not isinstance(match_path_text, str) or not isinstance(match_text, str):
+                continue
+            match_path = Path(match_path_text)
+            if not match_path.is_absolute():
+                match_path = repo_root / match_path
+            match_path = canonicalize_path(str(match_path))
+            try:
+                display_path = match_path.relative_to(repo_root)
+            except ValueError:
+                return _redacted_json({"error": "rg returned a path outside the active Git worktree"})
+            if _is_sensitive_target(str(match_path)) or _is_sensitive_target(str(display_path)):
+                sensitive_matches_omitted += 1
+                continue
+
+            line_number = data.get("line_number") or 0
+            record = f"{display_path}:{line_number}:{match_text.rstrip()}"[:2000]
+            if len(matches) >= max_results:
+                truncated = True
+                continue
+            candidate = {
+                "query": query,
+                "relative_path": raw_relative,
+                "matches": [*matches, record],
+                "match_count": len(matches) + 1,
+                "sensitive_matches_omitted": sensitive_matches_omitted,
+                "truncated": truncated,
+            }
+            if len(_redacted_json(candidate)) > 4000:
+                truncated = True
+                continue
+            matches.append(record)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _redacted_json({"error": "Malformed rg output"})
+
+    result = {
+        "query": query,
+        "relative_path": raw_relative,
+        "matches": matches,
+        "match_count": len(matches),
+        "sensitive_matches_omitted": sensitive_matches_omitted,
+        "truncated": truncated,
+    }
+    safe_result = _redacted_json(result)
+    if len(safe_result) > 4000:
+        return _redacted_json({"error": "grep_search output exceeded the safe bound"})
+    return safe_result
+
+
+def execute_tool_call(
+    name: str,
+    args: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+) -> str:
     if name == "investigate_pane_history":
         pane_id = args.get("pane_id", "")
         lines = args.get("lines", 100)
@@ -827,6 +1024,9 @@ def execute_tool_call(name: str, args: Dict[str, Any]) -> str:
             return json.dumps({"path": str(p), "content": safe_content}, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e)})
+
+    elif name == "grep_search":
+        return _grep_search(args, context)
 
     elif name == "approve_escalation":
         raw_id = args.get("escalation_id")
@@ -1109,6 +1309,11 @@ def format_tool_call_beautified(fn_name: str, fn_args: Dict[str, Any]) -> str:
         target = fn_args.get("target_path", "")
         return f"📄 **[File Read]**: `{target}`"
 
+    elif fn_name == "grep_search":
+        query = fn_args.get("query", "")
+        target = fn_args.get("relative_path", ".")
+        return f"🔎 **[Repository Search]**: `{query}` in `{target}`"
+
     elif fn_name == "approve_escalation":
         esc_id = fn_args.get("escalation_id", "")
         note = fn_args.get("english_feedback", "")
@@ -1177,6 +1382,7 @@ STEP 0 — RISK BRIEFING (produce this BEFORE any action):
 
 STEP 1 — INVESTIGATION (optional; use tools to verify facts):
 - Verify unverified claims with `investigate_path_details`, `investigate_pane_history`, or `read_file_snippet` as appropriate.
+- Use `grep_search` only for a specific, named, unresolved red flag inside the active Git worktree. Broad or exploratory searches are forbidden.
 - You may skip tools when the command is Tier B (obvious-safe) or Tier A (unambiguous critical) with certainty. "It looks simple" alone is NOT a skip reason — the command must match the closed Tier-B form.
 
 STEP 2 — TRIAGE (choose exactly one tier, driven by the Decision Layer). OVERALL BIAS — APPROVE BY DEFAULT: you are a flow-enabler, not a blocker. Withhold approval only on a concrete, named red flag — never on vague unease, and never because you cannot prove a negative.
@@ -1576,7 +1782,11 @@ class SchengenAgentChat:
                         chunk_msg = format_tool_call_beautified(fn_name, fn_args)
                         on_chunk(chunk_msg)
 
-                    tool_result = execute_tool_call(fn_name, fn_args)
+                    tool_result = execute_tool_call(
+                        fn_name,
+                        fn_args,
+                        context={"cwd": (active_esc or {}).get("cwd") or ""},
+                    )
                     self._append_transcript(role="tool", content=tool_result)
 
                     messages.append({
