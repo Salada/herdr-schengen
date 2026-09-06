@@ -2,6 +2,11 @@ name: LLM Security Evaluator CI
 
 on:
   workflow_dispatch:
+    inputs:
+      cache_namespace:
+        description: "Optional isolated cache namespace for persistence checks"
+        required: false
+        default: "shared-v1"
   schedule:
     - cron: '0 0 * * 1'   # Weekly every Monday at 00:00 UTC
   push:
@@ -17,13 +22,21 @@ jobs:
       GUARD_LLM_MODEL: "gpt-5.6-luna"
       GUARD_REASONING_EFFORT: "low"
       HERDR_ENV: "1"
+      SCHENGEN_CACHE_NAMESPACE: ${{ github.event.inputs.cache_namespace }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Select Host Runner Caches
         run: |
-          cache_root=/data/.cache/herdr-schengen
+          cache_namespace=${SCHENGEN_CACHE_NAMESPACE:-shared-v1}
+          case "$cache_namespace" in
+            *[!A-Za-z0-9._-]*)
+              echo "Invalid cache namespace: use only ASCII letters, digits, dot, underscore, and hyphen"
+              exit 1
+              ;;
+          esac
+          cache_root="/data/.cache/herdr-schengen/$cache_namespace"
           ci_home_parent=/data/.ci-runs/herdr-schengen
           cache_mode=host-persistent
           if ! mkdir -p "$cache_root/pip" "$cache_root/tools" "$ci_home_parent" || [ ! -w "$cache_root" ] || [ ! -w "$ci_home_parent" ]; then
@@ -35,7 +48,7 @@ jobs:
           echo "PIP_CACHE_DIR=$cache_root/pip" >> "$GITHUB_ENV"
           echo "SCHENGEN_TOOL_CACHE=$cache_root/tools" >> "$GITHUB_ENV"
           echo "SCHENGEN_CI_HOME_PARENT=$ci_home_parent" >> "$GITHUB_ENV"
-          echo "cache_mode=$cache_mode cache_root=$cache_root ci_home_parent=$ci_home_parent"
+          echo "cache_mode=$cache_mode cache_namespace=$cache_namespace cache_root=$cache_root ci_home_parent=$ci_home_parent"
           df -P "$cache_root" | tail -n 1
 
       - name: Verify No Residual Git Conflict Markers
@@ -89,8 +102,11 @@ jobs:
       - name: Install Python Dependencies (incl. required semgrep SAST CLI)
         run: |
           python3 -m venv .venv
+          echo "pip_cache_before"
+          .venv/bin/pip cache info
           .venv/bin/pip install --quiet textual rich httpx 'semgrep>=1.70.0'
           .venv/bin/semgrep --version
+          echo "pip_cache_after"
           .venv/bin/pip cache info
 
       - name: Run Purpose-Based Isolated Test Shards
