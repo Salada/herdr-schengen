@@ -133,6 +133,14 @@ separate from path operands, so names such as `private` or `encrypted` are not
 credentials by themselves; actual sensitive targets and selector globs remain
 blocked.
 
+Read-only Herdr metadata queries also use a closed deterministic grammar. The
+allowlist covers only help/version, `agent list|get|wait`, and `pane list|get`,
+with validated agent names, opaque pane/workspace IDs, wait states, and a
+30-minute maximum explicit timeout. Output-reading, input, focus, mutation,
+lifecycle, shell-control, substitution, redirection, unknown-option, and nested
+payload forms remain human-gated. This grammar was validated against Herdr
+0.8.2 and must be revalidated before a Herdr CLI upgrade is adopted.
+
 ### Session-pattern removal (INTENTIONAL)
 
 The 2a gatekeeper-prompt rework removed the "Session Pattern Memory"

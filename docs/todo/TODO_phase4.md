@@ -83,6 +83,13 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 
 ### [Track 1] Quick-Wins & Precision Engine
 
+[x] [Feature/FastTrack/P1] 닫힌 읽기 전용 Herdr CLI query fast-track (Forgejo #237):
+  - Herdr 0.8.2의 `--help`/`--version`, `agent list|get|wait`, `pane list|get`만
+    엄격한 token grammar와 opaque ID 검증을 통과할 때 `FAST_TRACK_AST`로 승인한다.
+  - 출력 조회, 입력/실행, focus/rename, lifecycle, nested payload, shell control,
+    substitution, redirection, 미등록 옵션은 계속 fail-closed로 유지한다.
+  - Herdr CLI 업그레이드 시 허용 grammar를 반드시 재검증한다.
+
 [x] [Bug/Guard] 따옴표/이스케이프된 셸 제어문자 과도 에스컬레이션 완화 (PR #188로 완료):
   - `security_evaluator.py`의 구조 뷰가 인용된 `|`, `;`, `&`, `<`, `>`를 인자 데이터로 마스킹하되, 원문 오프셋을 유지한다. 비인용 제어문자, 동적 치환, 민감 경로, 변이 명령은 기존 fail-closed 규칙을 유지한다.
   - [x] **AGY (Coder tab):** PR을 검토하고 전체 단위 테스트가 통과하면 Forgejo `main`에 merge한다.
