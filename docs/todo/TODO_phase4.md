@@ -26,12 +26,13 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
 ```
 
 1. ⚡ **[Track 1 — Quick-Wins & Precision Engine (최우선 착수)]**:
+   - 0) **[Feature/Performance/P0] LLM Token & Latency Diet: System Prompt KV-Cache Alignment, Short-Circuit Adjudication & Practical Compaction** (In/Out 토큰 40%+ 절감, 2-Hop Judge RTT 단축, 캐시 적중률 극대화)
    - 1) **#3670 Read-Only 체인 진단 명령 Fast-Track 확장** (`INV-5/6` Narrow Carve-out, 일상 피로도 즉시 해소)
    - 2) **#4027 Heredoc 본문 마스킹 & 시맨틱 복잡도(Multi-Factor) 완화** (커밋 메시지 과도한 복잡도 패널티 제거)
    - 3) **#3143 / #3219 OpenCode Prefix & 상하위 디렉터리 경로 매칭** (화면 절단으로 인한 키 주입 실패 방어, `ctrl+f`는 신중 모드)
    - 4) **TUI SettingsModal UI 토글 연동** (`approve_advisory`, `Approval Bias`, `Fast-Track Mode`) & `get_complexity_tax_config` TTL 캐시 무효화.
    - 5) **[Completed/Urgent-1] Deterministic In-Flight Tool Observation Compaction** (Forgejo #217 / PR #218).
-   - 6) **[Feature/Tools/P1] Gatekeeper/Inspector 자율 심사용 Ripgrep (`grep_search`) 및 모던 에이전트 관측 도구 체계 (`find_by_name`, `git_diff_stat`) 구축**.
+   - 6) **[Feature/Tools/P1] Gatekeeper/Inspector 자율 심사용 Ripgrep (`grep_search`) 및 모던 에이전트 관측 도구 체계 (`find_by_name`, `git_diff_stat`, `view_file_slice`) 구축**.
    - 7) **[Feature/Herdr/Urgent-2] `herdr agent read` 기반 Agent Thread 고수준 컨텍스트 수집 최적화** (대상이 에이전트인 경우 구조화된 thread를 우선 활용하고 raw pane으로 안전하게 fallback).
    - 8) **[Bug/Codex/P1] Reject instruction Enter dropped due to modal transition race (#5096)** (escape-to-prompt transition timing gap & Enter loss).
 
@@ -169,6 +170,29 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - 축약 레코드는 post-redaction 원문의 tool 이름, call ID, 문자 수, SHA-256, head/tail 각 300자를 보존하며 전체 원문은 JSONL 감사 로그에 남긴다.
   - ID pairing 이상, 내부 오류, 최신 round 단독 예산 초과 시 원본 메시지를 그대로 사용한다. 이는 증거 보존 fallback이며 승인 fallback이 아니다.
   - 합성 60k+ 관측에서 55% 이상 입력 크기 절감과 불변식 회귀 테스트를 통과해야 한다.
+
+[] [Feature/Performance/P0] LLM Token & Latency Diet: System Prompt KV-Cache Alignment, Short-Circuit Adjudication & Practical Compaction:
+  - Context & Problem Statement:
+    • TUI Token Meter 및 LLM 게이트키퍼가 과도한 Prompt/Completion 토큰을 소모하며 심사 지연(High Latency & Slow Execution)을 유발함.
+    • 핵심 병목 1 (프롬프트 비대 및 캐시 미스): `build_system_prompt()` 내에 정적 보안 지침과 동적 escalation 세부 정보(`active_esc`)가 결합되어 매 호출마다 Prompt Caching(Prefix Cache)이 깨지거나 재전송 비용이 발생함.
+    • 핵심 병목 2 (2-Hop 낭비): 도구 호출이 필요 없는 단순 판정에서도 Inspector 호출 후 동일 대용량 컨텍스트를 들고 Judge로 재전송하는 이중 RTT(Round Trip Time) 발생.
+    • 핵심 병목 3 (비현실적 압축 기준): PR #218의 Compaction 기준이 50,000자로 너무 높아 일상적인 escalation에서는 사실상 발동하지 않음.
+  - Architecture & Specification:
+    1. **System Prompt 정적/동적 분리 및 KV-Cache 최적화 (Cache-Aligned System Prompt)**:
+       - 불변 보안 원칙, 판정 계층(Tier A/B/C), 정규화 규칙을 정적 문자열로 고정하여 System Role 메시지의 Prefix Cache Hit율을 80%+ 이상으로 극대화.
+       - 가변 escalation 세부사항(Escalation ID, Pane ID, Command, Normalization relation)은 첫 번째 User 메시지로 명확히 분리 격리.
+       - 장황한 문장을 축약(Prompt Diet)하여 시스템 프롬프트 순수 크기를 30~50% 압축.
+    2. **Short-Circuit Adjudication (1-Hop Fast Path)**:
+       - Inspector와 Judge의 엔드포인트/모델이 동일하거나, Inspector 첫 턴에서 명백한 Tier B(Obvious-safe) 또는 Tier A(Critical Denylist) 판단이 가능할 경우 2차 Judge 호출을 건너뛰고 즉시 단일 턴에서 승인/거절을 완결.
+       - 응답 토큰 생성 상한(`max_tokens`)을 간결한 피드백에 맞게 적정값으로 제한하여 모델 생성 속도(Output Latency) 개선.
+    3. **실용적 In-Flight Compaction 임계치 하향 조정**:
+       - `COMPACTION_TRIGGER_TOTAL_CHARS`를 50,000자에서 12,000자(약 3,000 토큰) 수준으로 현실화.
+       - 툴 결과 임계값(`COMPACTION_TOOL_RESULT_THRESHOLD`)을 800~1,000자 수준으로 조정하여 긴 터미널 덤프/파일 조회가 발생했을 때 즉각 축약되도록 유도.
+  - Codex 작업 마일스톤 (Action Items & Milestones for Codex):
+    • M1: `build_system_prompt` 리팩토링 (정적 시스템 프롬프트 vs 동적 에스컬레이션 컨텍스트 분리).
+    • M2: `schengen_agent_llm.py` 단일 턴 Fast-Path (Short-Circuit Adjudication) 로직 구현.
+    • M3: Compaction 파라미터 튜닝 및 `tests/test_context_compaction.py` 회귀 테스트 갱신.
+    • M4: 토큰 절감률(40%+) 및 레이턴시 단축 회귀 검증.
 
 [] [Feature/Tools/P1] Gatekeeper/Inspector 자율 심사용 Ripgrep (`grep_search`) 및 모던 에이전트 관측 도구 체계 확장:
   - Context & Motivation:
