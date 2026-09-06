@@ -1380,6 +1380,7 @@ def build_system_prompt(
     allow_adjudication: bool = True,
     has_active: Optional[bool] = None,
 ) -> str:
+    """Build static instructions; callers inject build_escalation_context_block separately."""
     lang = language or get_answer_language()
     lang_instruction = _ANSWER_LANGUAGE_MAP.get(lang, _ANSWER_LANGUAGE_MAP["korean"])
 
