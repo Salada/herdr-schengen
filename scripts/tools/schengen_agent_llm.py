@@ -125,8 +125,8 @@ SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 # Deterministic in-flight context compaction. These limits intentionally use
 # characters instead of a model-specific tokenizer so behavior is stable
 # across Inspector/Judge providers.
-COMPACTION_TRIGGER_TOTAL_CHARS = 50_000
-COMPACTION_TOOL_RESULT_THRESHOLD = 1_500
+COMPACTION_TRIGGER_TOTAL_CHARS = 12_000
+COMPACTION_TOOL_RESULT_THRESHOLD = 1_000
 COMPACTION_HEAD_EXCERPT_CHARS = 300
 COMPACTION_TAIL_EXCERPT_CHARS = 300
 

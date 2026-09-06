@@ -20,6 +20,8 @@ from core.redaction import redact_for_cloud
 from tools.schengen_agent_llm import (
     COMPACTION_HEAD_EXCERPT_CHARS,
     COMPACTION_TAIL_EXCERPT_CHARS,
+    COMPACTION_TOOL_RESULT_THRESHOLD,
+    COMPACTION_TRIGGER_TOTAL_CHARS,
     SchengenAgentChat,
     _compact_tool_observations,
     _message_chars,
@@ -65,6 +67,45 @@ def _large_messages(old_size: int = 25_000, latest_size: int = 4_000):
 
 
 class TestContextCompaction(unittest.TestCase):
+    def test_conservative_defaults(self):
+        self.assertEqual(COMPACTION_TRIGGER_TOTAL_CHARS, 12_000)
+        self.assertEqual(COMPACTION_TOOL_RESULT_THRESHOLD, 1_000)
+        self.assertEqual(COMPACTION_HEAD_EXCERPT_CHARS, 300)
+        self.assertEqual(COMPACTION_TAIL_EXCERPT_CHARS, 300)
+
+    def test_total_threshold_boundary(self):
+        messages = [{"role": "system", "content": ""}]
+        messages.extend(_round("old", "A" * (COMPACTION_TOOL_RESULT_THRESHOLD + 1)))
+        messages.extend(_round("latest", "latest"))
+        padding = COMPACTION_TRIGGER_TOTAL_CHARS - _message_chars(messages)
+        self.assertGreaterEqual(padding, 0)
+        messages[0]["content"] = "S" * padding
+        self.assertEqual(_message_chars(messages), COMPACTION_TRIGGER_TOTAL_CHARS)
+
+        compacted, stats = _compact_tool_observations(messages)
+        self.assertIs(compacted, messages)
+        self.assertEqual(stats["compacted_tool_results"], 0)
+
+        messages[0]["content"] += "S"
+        compacted, stats = _compact_tool_observations(messages)
+        self.assertIsNot(compacted, messages)
+        self.assertEqual(stats["compacted_tool_results"], 1)
+
+    def test_tool_result_threshold_boundary(self):
+        messages = [{"role": "system", "content": ""}]
+        messages.extend(_round("at-limit", "A" * COMPACTION_TOOL_RESULT_THRESHOLD))
+        messages.extend(_round("over-limit", "B" * (COMPACTION_TOOL_RESULT_THRESHOLD + 1)))
+        messages.extend(_round("latest", "latest"))
+        padding = COMPACTION_TRIGGER_TOTAL_CHARS + 1 - _message_chars(messages)
+        self.assertGreaterEqual(padding, 0)
+        messages[0]["content"] = "S" * padding
+
+        compacted, stats = _compact_tool_observations(messages)
+
+        self.assertEqual(compacted[2], messages[2])
+        self.assertTrue(json.loads(compacted[4]["content"])["_compacted"])
+        self.assertEqual(stats["compacted_tool_results"], 1)
+
     def test_compaction_skips_when_under_total_threshold(self):
         messages = [{"role": "system", "content": "guard"}, *_round("latest", "x" * 2_000)]
         compacted, stats = _compact_tool_observations(messages)
