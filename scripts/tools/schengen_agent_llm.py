@@ -466,6 +466,30 @@ def _get_escalation_row(esc_id: int) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def _herdr_cli_failure(result: subprocess.CompletedProcess) -> str:
+    """Return a Herdr CLI failure detail, including exit-0 JSON errors."""
+    raw = (result.stdout or result.stderr or "").strip()
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        if result.returncode != 0:
+            return raw or f"exit {result.returncode}"
+        return "invalid Herdr JSON response"
+
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if error:
+        if isinstance(error, dict):
+            code = str(error.get("code") or "herdr_error")
+            message = str(error.get("message") or "").strip()
+            return f"{code}: {message}" if message else code
+        return str(error)
+    if result.returncode != 0:
+        return raw or f"exit {result.returncode}"
+    if not isinstance(payload, dict) or "result" not in payload:
+        return "missing Herdr result"
+    return ""
+
+
 def _inject_approval(
     target_pane: str,
     agent_kind: str,
@@ -535,16 +559,60 @@ def _inject_rejection(
             timeout=5.0,
         )
     if send_instruction and feedback and (send_after_adapter or not handled):
-        subprocess.run(
-            ["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"],
-            capture_output=True,
-            timeout=5.0,
-        )
-        subprocess.run(
-            ["herdr", "agent", "send-keys", target_pane, "enter"],
-            capture_output=True,
-            timeout=5.0,
-        )
+        instruction = f"# [SECURITY GATEKEEPER]: {feedback}"
+        if agent_kind == "codex":
+            # #5096: Codex needs a frame to leave its approval modal after Esc.
+            # Wait for a prompt-ready lifecycle state, then delegate paste+Enter
+            # atomically to Herdr.  Never fall back to raw send-text: that can
+            # strand feedback in the prompt buffer while still resolving the
+            # escalation as rejected.
+            try:
+                ready = subprocess.run(
+                    [
+                        "herdr", "agent", "wait", target_pane,
+                        "--until", "working", "--until", "idle", "--until", "done",
+                        "--timeout", "1000",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=2.0,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return False, f"codex prompt readiness failed: {exc}"
+            ready_failure = _herdr_cli_failure(ready)
+            if ready_failure:
+                return False, f"codex prompt readiness failed: {ready_failure}"
+
+            try:
+                submitted = subprocess.run(
+                    [
+                        "herdr", "agent", "prompt", target_pane, instruction,
+                        "--wait", "--until", "working", "--until", "idle",
+                        "--until", "done", "--timeout", "10000",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=12.0,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return False, f"codex rejection prompt failed: {exc}"
+            prompt_failure = _herdr_cli_failure(submitted)
+            if prompt_failure:
+                # A fresh blocked state may mean the submitted feedback caused
+                # another approval/question. Keep the original escalation
+                # PENDING rather than guessing that delivery settled cleanly.
+                return False, f"codex rejection prompt failed: {prompt_failure}"
+        else:
+            subprocess.run(
+                ["herdr", "pane", "send-text", target_pane, instruction],
+                capture_output=True,
+                timeout=5.0,
+            )
+            subprocess.run(
+                ["herdr", "agent", "send-keys", target_pane, "enter"],
+                capture_output=True,
+                timeout=5.0,
+            )
     return True, "rejection delivered"
 
 
