@@ -42,11 +42,13 @@ if str(SCRIPTS_ROOT) not in sys.path:
 import importlib
 
 import core.gray_zone_evaluator as gray_zone_evaluator
+import core.cloud_judge as cloud_judge
 import core.guard_db as guard_db
 import core.security_evaluator as security_evaluator
 from adapters.agent_adapters import INJECT_SKIP_CHANGED, canonical_request, get_adapter, target_agent_kinds
 from adapters.capture_evaluator import evaluate_capture_pair
 from core.cloud_judge import DEFAULT_REASONING_EFFORT
+from core.gatekeeper_telemetry import GatekeeperTimeline
 from core.redaction import redact_for_cloud
 from core.guard_db import (
     DB_DIR,
@@ -147,33 +149,56 @@ class InspectorCoordinator:
         self.owned = {}
         self.human_queue = deque()
         self.active_human = None
+        self.completed_traces = {}
+        self.queued_traces = {}
 
-    def submit(self, pane_id, request, evaluate):
+    def submit(self, pane_id, request, evaluate, detected_ns=None):
         if pane_id in self.owned:  # INV-CONC-1: ownership survives completion
             return False
         self.owned[pane_id] = (request, "in_flight")
         # Phase-1 IPC (INV-PH1-6): phase_box starts at "inspector"; the worker
         # thread's phase hook flips it to "gatekeeper" only around LLM calls.
-        phase_box = {"phase": "inspector", "ts": time.time()}
+        phase_box = {
+            "phase": "inspector",
+            "ts": time.time(),
+            "detected_ns": detected_ns or time.monotonic_ns(),
+        }
         self.in_flight[pane_id] = (request, phase_box, self.executor.submit(self._evaluate, evaluate, phase_box))
         return True
 
     def _evaluate(self, evaluate, phase_box):
         security_evaluator.set_phase_hook(lambda p: phase_box.update(phase=p))
+        cloud_judge.set_telemetry_hook(
+            lambda event: phase_box.setdefault("telemetry_events", []).append(event)
+        )
+        phase_box["evaluation_started_ns"] = time.monotonic_ns()
         try:
             return evaluate()
         finally:
+            phase_box["evaluation_finished_ns"] = time.monotonic_ns()
             security_evaluator.set_phase_hook(None)
+            cloud_judge.set_telemetry_hook(None)
 
     def completed(self):
-        for pane_id, (request, _phase_box, future) in list(self.in_flight.items()):
+        for pane_id, (request, phase_box, future) in list(self.in_flight.items()):
             if not future.done():
                 continue
             del self.in_flight[pane_id]
+            self.completed_traces[pane_id] = dict(phase_box)
             try:
                 yield pane_id, request, future.result()
             except Exception as exc:
                 yield pane_id, request, (False, f"Inspector failed closed: {exc}", DecisionLayer.SHELL_CRITICAL, {})
+
+    def pop_completed_trace(self, pane_id):
+        return self.completed_traces.pop(pane_id, {})
+
+    def queue_trace(self, pane_id, trace):
+        if trace:
+            self.queued_traces[pane_id] = trace
+
+    def pop_queued_trace(self, pane_id):
+        return self.queued_traces.pop(pane_id, {})
 
     def set_state(self, pane_id, request, state):
         if self.owned.get(pane_id, (None,))[0] == request:
@@ -183,6 +208,8 @@ class InspectorCoordinator:
         owned = self.owned.get(pane_id)
         if owned and (request is None or owned[0] == request):
             self.owned.pop(pane_id, None)
+            self.completed_traces.pop(pane_id, None)
+            self.queued_traces.pop(pane_id, None)
 
     def evict_stale_human_requests(self, is_live):
         """Drop stale active/queued requests and return the cancelled active slot."""
@@ -250,9 +277,16 @@ def sync_in_flight_state(inspector) -> None:
 
 def cancel_stale_human_escalation(pane_id, command):
     """Persist cancellation for a human slot invalidated by live-pane revalidation."""
+    command_hash = hashlib.sha256(command.encode("utf-8")).hexdigest()[:16]
+    for escalation in get_pending_escalations(pane_id=pane_id):
+        if escalation.get("command_hash") == command_hash:
+            GatekeeperTimeline.load(escalation["id"]).finish(
+                "cancelled", "stale_dialog", "cancelled"
+            )
+            break
     resolve_escalation(
         pane_id=pane_id,
-        command_hash=hashlib.sha256(command.encode("utf-8")).hexdigest()[:16],
+        command_hash=command_hash,
         resolution_status="CANCELLED",
         approver="other",
     )
@@ -1011,6 +1045,7 @@ def escalate_request(
     agent_kind,
     visible_text=None,
     evaluation_context=None,
+    telemetry_trace=None,
 ):
     """Enqueue a persistent escalation and emit intercept notifications. Returns escalation id."""
     session_uuid = (
@@ -1040,6 +1075,17 @@ def escalate_request(
         normalization_relation=context.get("normalization_relation"),
         normalization_ambiguous=layer_value == DecisionLayer.NORMALIZATION_AMBIGUOUS.value,
         raw_capture_evaluated=bool(context.get("raw_capture_evaluated")),
+    )
+    trace = telemetry_trace or {}
+    GatekeeperTimeline.begin(
+        esc_id,
+        decision_layer=layer_value,
+        detected_ns=trace.get("detected_ns", time.monotonic_ns()),
+        evaluation_started_ns=trace.get("evaluation_started_ns", time.monotonic_ns()),
+        evaluation_finished_ns=trace.get("evaluation_finished_ns", time.monotonic_ns()),
+        queued_ns=time.monotonic_ns(),
+        evaluation_outcome="delegated",
+        pre_events=trace.get("telemetry_events", ()),
     )
     print(
         f"🚨 [BORDER_CONTROL_INTERCEPT] Pre-execution HALTED for safety. Escalating to AGY / Human Review (Escalation #{esc_id}, Session: {session_uuid or 'unknown'}).",
@@ -1106,6 +1152,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
     AUTO_APPROVED. MANUAL_DELEGATED rows (unsafe -> human queue) are unchanged.
     """
     for pane_id, request, result in inspector.completed():
+        telemetry_trace = getattr(inspector, "pop_completed_trace", lambda _pane: {})(pane_id)
         req_cmd, state_seq, agent_status, pane_info, visible_text = request
         live_info = get_pane_info(pane_id)
         adapter = get_adapter(live_info.get("agent", "")) if live_info else None
@@ -1129,6 +1176,9 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
             inspector.human_queue.append(
                 (pane_id, live_info, req_cmd, reason, layer, visible_text, state_seq, agent_status, tax)
             )
+            queue_trace = getattr(inspector, "queue_trace", None)
+            if queue_trace:
+                queue_trace(pane_id, telemetry_trace)
             inspector.set_state(pane_id, request, "queued")
             continue
         # Safe -> verified-inject path. The AUTO_APPROVED audit row is written
@@ -1193,6 +1243,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
                 pane_id, live_info, req_cmd, approval_failed_reason,
                 "OPENCODE_FAILSAFE", live_info.get("agent", "unknown"), visible_text=visible_text,
                 evaluation_context=tax,
+                telemetry_trace=telemetry_trace,
             )
             last_processed_prompt[pane_id] = {"cmd": req_cmd, "seq": state_seq, "status": agent_status, "is_safe": False, "last_alert_time": time.time()}
             inspector.release(pane_id, request)
@@ -1412,6 +1463,7 @@ def main():
                         pane_id, pane_info, req_cmd, reason, layer,
                         pane_info.get("agent", "unknown"), visible_text,
                         evaluation_context=evaluation_context,
+                        telemetry_trace=inspector.pop_queued_trace(pane_id),
                     )
                     inspector.active_human = (pane_id, req_cmd)
                     inspector.set_state(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), "active")
@@ -1610,6 +1662,7 @@ def main():
                             )
                     continue
 
+                detected_ns = time.monotonic_ns()
                 print(
                     f"\n🔍 [Target: {pane_id} ({agent_kind})] Detected Script/Command Pre-Approval Request:\n----------------------------------------\n{req_cmd}\n----------------------------------------",
                     flush=True,
@@ -1662,7 +1715,12 @@ def main():
                         tax = derive_taxonomy(req, DecisionLayer.ALLOWLIST, True, wl_reason or "", origin=Origin.HUMAN)
                         return True, wl_reason, DecisionLayer.ALLOWLIST, tax
                     return result
-                inspector.submit(pane_id, (req_cmd, state_seq, agent_status, pane_info, visible_text), evaluate)
+                inspector.submit(
+                    pane_id,
+                    (req_cmd, state_seq, agent_status, pane_info, visible_text),
+                    evaluate,
+                    detected_ns=detected_ns,
+                )
                 continue
 
             # Phase-1 IPC (INV-PH1-3): publish the in-flight snapshot once per

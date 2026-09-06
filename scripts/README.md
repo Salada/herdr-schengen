@@ -77,6 +77,7 @@ scripts/
 python3 scripts/cmd/schengen_tui.py                     # interactive TUI (single daemon lifecycle owner)
 python3 scripts/cmd/schengen_watcher.py --status        # read-only diagnostics (spawn is deprecated, issue #114)
 python3 scripts/cmd/schengen_history.py --pending       # escalation queue
+python3 scripts/cmd/schengen_history.py --timeline 42   # redacted Gatekeeper timing timeline
 python3 scripts/cmd/schengen_feature.py --list          # feature backlog
 ```
 

@@ -27,10 +27,20 @@ identify the exact source revision that produced an audit decision.
    rejects symlinked destination paths, copies only Git-tracked files, prunes
    stale files from managed directories, and writes `.schengen-source.json`;
    every new audit row records that revision.
+5. Each persistent escalation has one metadata-only JSON timing timeline under
+   `~/.local/state/herdr-schengen/gatekeeper-timelines/`. A random correlation
+   ID links monotonic detection/queue, deterministic evaluation, every
+   Inspector/Judge attempt and retry backoff, tool-call timing, and terminal
+   delivery/outcome. The schema accepts only fixed labels and numeric values;
+   command text, tool arguments/output, model text, paths, secrets, and
+   exception strings cannot enter it. Timeline I/O is best-effort and never
+   changes a Gatekeeper decision or delivery result.
 
 ## Consequences
 
 - A low-reasoning model cannot silently turn a no-tool response into an implied
   approval or an unexplained wait.
 - Existing SQLite databases migrate additively and remain readable.
+- Per-turn latency bottlenecks are attributable without a SQLite migration or
+  a second raw-content audit surface.
 - Runtime synchronization is explicit, repeatable, and traceable to one commit.

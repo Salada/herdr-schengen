@@ -117,7 +117,7 @@ Standalone CLI utilities that ship with the repo (independent of the daemon life
 
 | Tool | Purpose |
 | :--- | :--- |
-| `scripts/cmd/schengen_history.py` | Audit history & diagnostics: `--recent 10`, `--search "git push"`, `--list-layers`, `--list-decisions`, `--pending` |
+| `scripts/cmd/schengen_history.py` | Audit history & diagnostics: `--recent 10`, `--search "git push"`, `--list-layers`, `--list-decisions`, `--pending`, redacted `--timeline <id>` |
 | `scripts/cmd/schengen_feature.py` | Feature-request / self-improvement backlog queue (`--add`, `--list`, ...) |
 | `scripts/cmd/schengen_mcp.py` | Lightweight stdio MCP server bound to the live guard daemon |
 | `scripts/cmd/smartgate.py`, `trusted_clearance.py`, `guard_watcher.py` | Backward-compatible aliases of `schengen_watcher.py` |
