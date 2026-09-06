@@ -24,6 +24,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +75,7 @@ from adapters.agent_adapters import INJECT_SKIP_CHANGED, get_adapter
 from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
 from adapters.auto_advance import run_auto_advance
 from core.cloud_judge import DEFAULT_REASONING_EFFORT
+from core.gatekeeper_telemetry import GatekeeperTimeline
 from core.redaction import redact_for_cloud
 from core.security_evaluator import _is_sensitive_target
 
@@ -1123,6 +1125,7 @@ def execute_tool_call(
     args: Dict[str, Any],
     context: Optional[Dict[str, Any]] = None,
 ) -> str:
+    timeline = (context or {}).get("telemetry")
     if name == "investigate_pane_history":
         pane_id = args.get("pane_id", "")
         lines = args.get("lines", 100)
@@ -1222,7 +1225,17 @@ def execute_tool_call(
             # FIX 1 (issue #23/#1910): the injection happens FIRST; resolve_escalation
             # + record_adjudication run ONLY after a verified injection success, so
             # 'APPROVED' in the DB actually implies the dialog got approved.
+            delivery_started_ns = time.monotonic_ns()
             injected, inject_reason = _inject_approval(target_pane, agent_kind, req_cmd, feedback, send_instruction)
+            if isinstance(timeline, GatekeeperTimeline):
+                timeline.record(
+                    "terminal_delivery",
+                    started_ns=delivery_started_ns,
+                    finished_ns=time.monotonic_ns(),
+                    outcome="delivered" if injected else (
+                        "dialog_changed" if inject_reason == INJECT_SKIP_CHANGED else "failed"
+                    ),
+                )
 
             if not injected:
                 # FIX 1/4 (issue #23/#1910): do NOT resolve/adjudicate on failure —
@@ -1271,6 +1284,8 @@ def execute_tool_call(
                             )
                         except Exception:
                             pass
+                        if isinstance(timeline, GatekeeperTimeline):
+                            timeline.finish("cancelled", "superseded", "complete")
                         return json.dumps({
                             "status": "success",
                             "action": "AUTO_ADVANCED",
@@ -1292,6 +1307,8 @@ def execute_tool_call(
                             cwd=(esc_row or {}).get("cwd") or "",
                             origin="A",
                         )
+                        if isinstance(timeline, GatekeeperTimeline):
+                            timeline.finish("cancelled", "superseded", "complete")
                         return json.dumps({
                             "status": "advanced_unsafe",
                             "action": "AUTO_ADVANCE_BLOCKED",
@@ -1303,10 +1320,14 @@ def execute_tool_call(
                     # not_trampolined (or no new command found): fall through to
                     # the existing re-polling deferral — A stays PENDING so the
                     # next poll re-parses and re-evaluates it normally.
+                    if isinstance(timeline, GatekeeperTimeline):
+                        timeline.finish("deferred", "dialog_changed", "complete")
                     return json.dumps({
                         "status": "error",
                         "error": f"approval deferred ({agent_kind}): dialog changed mid-evaluation; re-polling",
                     }, ensure_ascii=False)
+                if isinstance(timeline, GatekeeperTimeline):
+                    timeline.finish("delivery_failed", "approval_delivery_failed", "complete")
                 return json.dumps({
                     "status": "error",
                     "error": f"approval injection failed ({agent_kind}): {inject_reason or 'no adapter'}",
@@ -1326,6 +1347,8 @@ def execute_tool_call(
                 esc_id, target_pane, agent_kind, "APPROVE", feedback,
                 approver=approver, human_note=(feedback if directive else None),
             )
+            if isinstance(timeline, GatekeeperTimeline):
+                timeline.finish("approved", "gatekeeper_approved", "complete")
 
             if send_instruction and feedback:
                 subprocess.run(["herdr", "pane", "send-text", target_pane, f"# [SECURITY GATEKEEPER]: {feedback}"], capture_output=True, timeout=5.0)
@@ -1339,6 +1362,8 @@ def execute_tool_call(
                 "feedback": feedback,
             }, ensure_ascii=False)
         except Exception as e:
+            if isinstance(timeline, GatekeeperTimeline):
+                timeline.finish("deferred", "adjudication_internal_error", "failed")
             return json.dumps({"status": "error", "error": str(e)})
 
     elif name == "reject_escalation":
@@ -1364,10 +1389,20 @@ def execute_tool_call(
 
             cfg = get_instruction_delivery_config()
             send_instruction = bool(cfg.get("send_reject_instruction", True))
+            delivery_started_ns = time.monotonic_ns()
             injected, inject_reason = _inject_rejection(
                 target_pane, agent_kind, req_cmd, feedback, send_instruction
             )
+            if isinstance(timeline, GatekeeperTimeline):
+                timeline.record(
+                    "terminal_delivery",
+                    started_ns=delivery_started_ns,
+                    finished_ns=time.monotonic_ns(),
+                    outcome="delivered" if injected else "failed",
+                )
             if not injected:
+                if isinstance(timeline, GatekeeperTimeline):
+                    timeline.finish("delivery_failed", "rejection_delivery_failed", "complete")
                 return json.dumps({
                     "status": "error",
                     "error": f"rejection injection failed ({agent_kind}): {inject_reason or 'no adapter'}",
@@ -1380,6 +1415,8 @@ def execute_tool_call(
                 esc_id, target_pane, "", "REJECT", feedback,
                 approver=approver, human_note=(feedback if directive else None),
             )
+            if isinstance(timeline, GatekeeperTimeline):
+                timeline.finish("rejected", "gatekeeper_rejected", "complete")
 
             return json.dumps({
                 "status": "success",
@@ -1389,6 +1426,8 @@ def execute_tool_call(
                 "feedback": feedback,
             }, ensure_ascii=False)
         except Exception as e:
+            if isinstance(timeline, GatekeeperTimeline):
+                timeline.finish("deferred", "adjudication_internal_error", "failed")
             return json.dumps({"status": "error", "error": str(e)})
 
     elif name == "create_feature_request":
@@ -1786,6 +1825,7 @@ class SchengenAgentChat:
         # Command-slot head excludes questions (INV-QN-1/2).
         active_esc = get_current_command_escalation()
         active_id = active_esc["id"] if active_esc else None
+        timeline = GatekeeperTimeline.load(active_id) if active_id else None
 
         if active_id != self._current_esc_id:
             self._current_esc_id = active_id
@@ -1820,7 +1860,12 @@ class SchengenAgentChat:
         )
 
         async def _post_with_adaptive_retry(
-            client: Any, url: str, headers: Dict[str, str], payload: Dict[str, Any], phase_name: str
+            client: Any,
+            url: str,
+            headers: Dict[str, str],
+            payload: Dict[str, Any],
+            phase_name: str,
+            turn_number: int,
         ) -> Tuple[Optional[Any], Optional[str]]:
             """Execute POST with adaptive exponential retry (up to 10 attempts) for network/API errors."""
             max_retries = 10
@@ -1828,31 +1873,97 @@ class SchengenAgentChat:
             last_err_msg = ""
             for attempt in range(1, max_retries + 1):
                 if self._cancel_requested:
+                    if timeline:
+                        timeline.record(
+                            "llm_attempt", outcome="cancelled", phase=phase_name,
+                            turn=turn_number, attempt=attempt,
+                        )
                     return None, "🛑 [Interrupted]: LLM call was aborted by user."
+                attempt_started_ns = time.monotonic_ns()
                 try:
                     resp = await client.post(url, json=payload, headers=headers)
+                    attempt_finished_ns = time.monotonic_ns()
                     if self._cancel_requested:
+                        if timeline:
+                            timeline.record(
+                                "llm_attempt", started_ns=attempt_started_ns,
+                                finished_ns=attempt_finished_ns, outcome="cancelled",
+                                phase=phase_name, turn=turn_number, attempt=attempt,
+                                status_code=getattr(resp, "status_code", 0),
+                            )
                         return None, "🛑 [Interrupted]: LLM call was aborted by user."
                     if resp.status_code == 200:
+                        if timeline:
+                            timeline.record(
+                                "llm_attempt", started_ns=attempt_started_ns,
+                                finished_ns=attempt_finished_ns, outcome="success",
+                                phase=phase_name, turn=turn_number, attempt=attempt,
+                                status_code=resp.status_code,
+                            )
                         return resp, None
                     if resp.status_code in retryable_statuses and attempt < max_retries:
+                        if timeline:
+                            timeline.record(
+                                "llm_attempt", started_ns=attempt_started_ns,
+                                finished_ns=attempt_finished_ns, outcome="retry",
+                                phase=phase_name, turn=turn_number, attempt=attempt,
+                                status_code=resp.status_code,
+                            )
                         retry_after = resp.headers.get("Retry-After")
                         delay = min(10.0, float(retry_after)) if retry_after and retry_after.isdigit() else min(5.0, 0.1 * (1.5 ** (attempt - 1))) + random.uniform(0, 0.05)
+                        backoff_started_ns = time.monotonic_ns()
                         await asyncio.sleep(delay)
+                        if timeline:
+                            timeline.record(
+                                "retry_backoff", started_ns=backoff_started_ns,
+                                finished_ns=time.monotonic_ns(), outcome="complete",
+                                phase=phase_name, turn=turn_number, attempt=attempt,
+                                backoff_ms=round(delay * 1000),
+                            )
                         continue
+                    if timeline:
+                        timeline.record(
+                            "llm_attempt", started_ns=attempt_started_ns,
+                            finished_ns=attempt_finished_ns, outcome="http_error",
+                            phase=phase_name, turn=turn_number, attempt=attempt,
+                            status_code=resp.status_code,
+                        )
                     return None, f"⚠️ {phase_name} API Error ({resp.status_code}): {resp.text}"
                 except _HTTP_EXCEPTIONS as exc:
                     last_err_msg = str(exc)
+                    attempt_finished_ns = time.monotonic_ns()
                     if attempt < max_retries:
+                        if timeline:
+                            timeline.record(
+                                "llm_attempt", started_ns=attempt_started_ns,
+                                finished_ns=attempt_finished_ns, outcome="retry",
+                                phase=phase_name, turn=turn_number, attempt=attempt,
+                            )
                         delay = min(5.0, 0.1 * (1.5 ** (attempt - 1))) + random.uniform(0, 0.05)
+                        backoff_started_ns = time.monotonic_ns()
                         await asyncio.sleep(delay)
+                        if timeline:
+                            timeline.record(
+                                "retry_backoff", started_ns=backoff_started_ns,
+                                finished_ns=time.monotonic_ns(), outcome="complete",
+                                phase=phase_name, turn=turn_number, attempt=attempt,
+                                backoff_ms=round(delay * 1000),
+                            )
                         continue
+                    if timeline:
+                        timeline.record(
+                            "llm_attempt", started_ns=attempt_started_ns,
+                            finished_ns=attempt_finished_ns, outcome="network_error",
+                            phase=phase_name, turn=turn_number, attempt=attempt,
+                        )
                     return None, f"⚠️ {phase_name} Network/API Error after {max_retries} retries: {last_err_msg}"
             return None, f"⚠️ {phase_name} Error: Max retries exceeded ({last_err_msg})"
 
         try:
             for loop_turn in range(4):
                 if self._cancel_requested:
+                    if timeline:
+                        timeline.finish("cancelled", "user_cancelled", "cancelled")
                     return "🛑 [Interrupted]: LLM investigation aborted by user."
                 messages = self._compact_messages_for_request(messages)
                 inspector_headers = {
@@ -1876,14 +1987,28 @@ class SchengenAgentChat:
                     "max_tokens": self.inspector_max_tokens,
                     "stream": False,
                 }
+                inspector_turn_started_ns = time.monotonic_ns()
                 resp, err = await _post_with_adaptive_retry(
                     inspector_client,
                     f"{self.inspector_base_url}/chat/completions",
                     inspector_headers,
                     payload,
                     "Inspector",
+                    loop_turn + 1,
                 )
                 if err or resp is None:
+                    if timeline:
+                        timeline.record(
+                            "inspector_turn", started_ns=inspector_turn_started_ns,
+                            finished_ns=time.monotonic_ns(), outcome="failed",
+                            phase="Inspector", turn=loop_turn + 1,
+                            completion_state="cancelled" if self._cancel_requested else "failed",
+                        )
+                        timeline.finish(
+                            "cancelled" if self._cancel_requested else "deferred",
+                            "user_cancelled" if self._cancel_requested else "inspector_api_failure",
+                            "cancelled" if self._cancel_requested else "failed",
+                        )
                     return err or "⚠️ Unknown Inspector Error"
 
                 data = resp.json()
@@ -1899,6 +2024,14 @@ class SchengenAgentChat:
                 self.total_cached_tokens += cached
 
                 choice = data["choices"][0]
+                inspector_completion_state = "truncated" if choice.get("finish_reason") == "length" else "complete"
+                if timeline:
+                    timeline.record(
+                        "inspector_turn", started_ns=inspector_turn_started_ns,
+                        finished_ns=time.monotonic_ns(), outcome="complete",
+                        phase="Inspector", turn=loop_turn + 1,
+                        completion_state=inspector_completion_state,
+                    )
                 if choice.get("finish_reason") == "length":
                     self.inspector_prompt_tokens += p_tokens
                     self.inspector_completion_tokens += c_tokens
@@ -1912,6 +2045,8 @@ class SchengenAgentChat:
                         self.inspector_max_tokens,
                     )
                     self._append_transcript(role="assistant", content=warning)
+                    if timeline:
+                        timeline.finish("deferred", "inspector_truncated", "truncated")
                     return warning
                 msg = choice["message"]
                 tool_calls = msg.get("tool_calls")
@@ -1934,14 +2069,28 @@ class SchengenAgentChat:
                             "max_tokens": self.judge_max_tokens,
                             "stream": False,
                         }
+                        judge_turn_started_ns = time.monotonic_ns()
                         judge_resp, judge_err = await _post_with_adaptive_retry(
                             judge_client,
                             f"{self.judge_base_url}/chat/completions",
                             judge_headers,
                             judge_payload,
                             "Judge",
+                            1,
                         )
                         if judge_err or judge_resp is None:
+                            if timeline:
+                                timeline.record(
+                                    "judge_turn", started_ns=judge_turn_started_ns,
+                                    finished_ns=time.monotonic_ns(), outcome="failed",
+                                    phase="Judge", turn=1,
+                                    completion_state="cancelled" if self._cancel_requested else "failed",
+                                )
+                                timeline.finish(
+                                    "cancelled" if self._cancel_requested else "deferred",
+                                    "user_cancelled" if self._cancel_requested else "judge_api_failure",
+                                    "cancelled" if self._cancel_requested else "failed",
+                                )
                             return judge_err or "⚠️ Unknown Judge Error"
 
                         judge_data = judge_resp.json()
@@ -1959,6 +2108,13 @@ class SchengenAgentChat:
                         self.judge_completion_tokens += jc_tokens
                         judge_choice = judge_data["choices"][0]
                         judge_truncated = judge_choice.get("finish_reason") == "length"
+                        if timeline:
+                            timeline.record(
+                                "judge_turn", started_ns=judge_turn_started_ns,
+                                finished_ns=time.monotonic_ns(), outcome="complete",
+                                phase="Judge", turn=1,
+                                completion_state="truncated" if judge_truncated else "complete",
+                            )
                         msg = judge_choice["message"]
                         final_phase = "Judge"
                     else:
@@ -1993,6 +2149,11 @@ class SchengenAgentChat:
                     self._append_transcript(role="assistant", content=final_content)
                     self.history.append({"role": "user", "content": user_text})
                     self.history.append({"role": "assistant", "content": final_content})
+                    if timeline:
+                        timeline.finish(
+                            "deferred", "model_no_tool_call",
+                            "truncated" if judge_truncated else "complete",
+                        )
                     return final_content
 
                 # ── Inspector Phase (tool turn) ──────────────────────────────
@@ -2012,11 +2173,40 @@ class SchengenAgentChat:
                         chunk_msg = format_tool_call_beautified(fn_name, fn_args)
                         on_chunk(chunk_msg)
 
-                    tool_result = execute_tool_call(
-                        fn_name,
-                        fn_args,
-                        context={"cwd": (active_esc or {}).get("cwd") or ""},
+                    tool_started_ns = time.monotonic_ns()
+                    tool_context = {"cwd": (active_esc or {}).get("cwd") or ""}
+                    if timeline:
+                        tool_context["telemetry"] = timeline
+                    try:
+                        tool_result = execute_tool_call(
+                            fn_name,
+                            fn_args,
+                            context=tool_context,
+                        )
+                    except Exception:
+                        if timeline:
+                            timeline.record(
+                                "tool_call", started_ns=tool_started_ns,
+                                finished_ns=time.monotonic_ns(), outcome="failed",
+                                phase="Inspector", turn=loop_turn + 1, tool=fn_name,
+                            )
+                        raise
+                    tool_finished_ns = time.monotonic_ns()
+                    try:
+                        tool_payload = json.loads(tool_result)
+                    except (TypeError, json.JSONDecodeError):
+                        tool_payload = {}
+                    tool_failed = bool(
+                        isinstance(tool_payload, dict)
+                        and (tool_payload.get("error") or tool_payload.get("status") == "error")
                     )
+                    if timeline:
+                        timeline.record(
+                            "tool_call", started_ns=tool_started_ns,
+                            finished_ns=tool_finished_ns,
+                            outcome="failed" if tool_failed else "complete",
+                            phase="Inspector", turn=loop_turn + 1, tool=fn_name,
+                        )
                     self._append_transcript(role="tool", content=tool_result)
 
                     messages.append({
@@ -2028,9 +2218,19 @@ class SchengenAgentChat:
                     if fn_name in ("approve_escalation", "reject_escalation"):
                         self.history = []
 
+        except asyncio.CancelledError:
+            if timeline:
+                timeline.finish("cancelled", "user_cancelled", "cancelled")
+            raise
+        except Exception:
+            if timeline:
+                timeline.finish("deferred", "internal_error", "failed")
+            raise
         finally:
             await inspector_client.aclose()
             if judge_client is not inspector_client:
                 await judge_client.aclose()
 
+        if timeline:
+            timeline.finish("deferred", "inspector_turn_limit", "complete")
         return "Investigation and execution completed."

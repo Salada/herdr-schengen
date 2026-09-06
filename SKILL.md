@@ -42,6 +42,7 @@ python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --search "git"
 python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --tail 20
 python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" -n 5 --json
 python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --paths
+python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --timeline 42
 python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --pending
 python3 "$SCHENGEN_HOME/scripts/cmd/schengen_history.py" --stats
 ```

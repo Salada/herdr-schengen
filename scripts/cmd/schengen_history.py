@@ -27,6 +27,7 @@ from core.guard_db import (
     tail_state_log,
 )
 from core.security_evaluator import DecisionLayer
+from core.gatekeeper_telemetry import GatekeeperTimeline, TIMELINE_DIR
 
 
 def main():
@@ -86,6 +87,12 @@ def main():
         help="Print SmartGate state file paths (DB, lockfile, logs)",
     )
     parser.add_argument(
+        "--timeline",
+        type=int,
+        metavar="ESCALATION_ID",
+        help="Print the redacted Gatekeeper timing timeline for one escalation",
+    )
+    parser.add_argument(
         "--stats",
         action="store_true",
         help="Display pattern analysis stats from DB and exit",
@@ -132,6 +139,14 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.timeline is not None:
+        timeline = GatekeeperTimeline.load(args.timeline)
+        if not timeline.loaded_from_disk:
+            print(json.dumps({"error": "timeline_not_found", "escalation_id": args.timeline}))
+            raise SystemExit(1)
+        print(json.dumps(timeline.snapshot(), indent=2))
+        return
 
     # 0. Discovery & Metadata Flags (Side-effect free)
     if args.list_layers:
@@ -242,6 +257,7 @@ def main():
     # 1. State File Paths
     if args.paths:
         paths = get_state_file_paths()
+        paths["timeline_dir"] = str(TIMELINE_DIR)
         if args.json:
             print(json.dumps(paths, indent=2))
         else:

@@ -47,6 +47,7 @@ SHARDS = {
         "tests.test_context_compaction",
         "tests.test_gatekeeper_investigation_tools",
         "tests.test_gatekeeper_prompt",
+        "tests.test_gatekeeper_turn_telemetry",
         "tests.test_herdr_agent_read_routing",
         "tests.test_herdr_client_timeouts",
         "tests.test_herdr_multiplexer_live_e2e",

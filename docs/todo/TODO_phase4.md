@@ -198,6 +198,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - Codex 작업 마일스톤 (Action Items & Milestones for Codex):
     • [x] M1: `build_system_prompt` 리팩토링 (정적 시스템 프롬프트 vs 동적 에스컬레이션 컨텍스트 분리, Forgejo #231).
     • [x] M1b: Inspector/Judge completion에 명시적 `max_tokens` 상한과 fail-closed truncation 처리를 적용 (Forgejo #235).
+    • [x] M1c: escalation별 redacted monotonic Gatekeeper turn/재시도/도구/전달 latency timeline 추가 (Forgejo #245).
     • M2: `schengen_agent_llm.py` 단일 턴 Fast-Path (Short-Circuit Adjudication) 로직 구현.
     • M3: Compaction 파라미터 튜닝 및 `tests/test_context_compaction.py` 회귀 테스트 갱신.
     • M4: 토큰 절감률(40%+) 및 레이턴시 단축 회귀 검증.

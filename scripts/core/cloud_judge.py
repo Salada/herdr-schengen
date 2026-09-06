@@ -12,6 +12,7 @@ import os
 import random
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -108,6 +109,21 @@ def parse_json_verdict(content_str: str, prefix: str = "[Cloud Judge]") -> Optio
 MAX_ADAPTIVE_RETRIES = 10
 DEFAULT_SOCKET_TIMEOUT = 10.0
 RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+_telemetry_local = threading.local()
+
+
+def set_telemetry_hook(hook) -> None:
+    """Set a worker-local metadata callback; telemetry failure is always ignored."""
+    _telemetry_local.hook = hook
+
+
+def _emit_telemetry(**event) -> None:
+    hook = getattr(_telemetry_local, "hook", None)
+    if hook:
+        try:
+            hook(event)
+        except Exception:
+            pass
 
 
 def post_cloud_judge(
@@ -121,6 +137,7 @@ def post_cloud_judge(
     timeout: float = DEFAULT_SOCKET_TIMEOUT,
 ):
     """HTTP client with adaptive exponential retry (up to 10 attempts) for network/API errors."""
+    turn_started_ns = time.monotonic_ns()
     req_body: dict[str, Any] = {
         "model": model,
         "temperature": 0.0,
@@ -144,21 +161,57 @@ def post_cloud_judge(
 
     last_err: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
+        attempt_started_ns = time.monotonic_ns()
         try:
             req = urllib.request.Request(endpoint, data=payload, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.load(resp)
+                result = json.load(resp)
+            finished_ns = time.monotonic_ns()
+            _emit_telemetry(
+                stage="llm_attempt", started_ns=attempt_started_ns,
+                finished_ns=finished_ns, outcome="success", phase="Judge",
+                turn=1, attempt=attempt, status_code=200,
+            )
+            finish_reason = ((result.get("choices") or [{}])[0].get("finish_reason") or "") if isinstance(result, dict) else ""
+            _emit_telemetry(
+                stage="judge_turn", started_ns=turn_started_ns,
+                finished_ns=finished_ns, outcome="complete", phase="Judge", turn=1,
+                completion_state="truncated" if finish_reason == "length" else "complete",
+            )
+            return result
         except urllib.error.HTTPError as e:
             last_err = e
             if e.code in RETRYABLE_HTTP_STATUSES and attempt < max_retries:
+                _emit_telemetry(
+                    stage="llm_attempt", started_ns=attempt_started_ns,
+                    finished_ns=time.monotonic_ns(), outcome="retry", phase="Judge",
+                    turn=1, attempt=attempt, status_code=e.code,
+                )
                 # Respect Retry-After header if provided
                 retry_after_header = e.headers.get("Retry-After") if e.headers else None
                 if retry_after_header and retry_after_header.isdigit():
                     sleep_sec = min(10.0, float(retry_after_header))
                 else:
                     sleep_sec = min(5.0, 0.1 * (1.5 ** (attempt - 1))) + random.uniform(0, 0.05)
+                backoff_started_ns = time.monotonic_ns()
                 time.sleep(sleep_sec)
+                _emit_telemetry(
+                    stage="retry_backoff", started_ns=backoff_started_ns,
+                    finished_ns=time.monotonic_ns(), outcome="complete", phase="Judge",
+                    turn=1, attempt=attempt, backoff_ms=round(sleep_sec * 1000),
+                )
                 continue
+            finished_ns = time.monotonic_ns()
+            _emit_telemetry(
+                stage="llm_attempt", started_ns=attempt_started_ns,
+                finished_ns=finished_ns, outcome="http_error", phase="Judge",
+                turn=1, attempt=attempt, status_code=e.code,
+            )
+            _emit_telemetry(
+                stage="judge_turn", started_ns=turn_started_ns,
+                finished_ns=finished_ns, outcome="failed", phase="Judge", turn=1,
+                completion_state="failed",
+            )
             raise
         except (
             urllib.error.URLError,
@@ -170,9 +223,31 @@ def post_cloud_judge(
         ) as e:
             last_err = e
             if attempt < max_retries:
+                _emit_telemetry(
+                    stage="llm_attempt", started_ns=attempt_started_ns,
+                    finished_ns=time.monotonic_ns(), outcome="retry", phase="Judge",
+                    turn=1, attempt=attempt,
+                )
                 sleep_sec = min(5.0, 0.1 * (1.5 ** (attempt - 1))) + random.uniform(0, 0.05)
+                backoff_started_ns = time.monotonic_ns()
                 time.sleep(sleep_sec)
+                _emit_telemetry(
+                    stage="retry_backoff", started_ns=backoff_started_ns,
+                    finished_ns=time.monotonic_ns(), outcome="complete", phase="Judge",
+                    turn=1, attempt=attempt, backoff_ms=round(sleep_sec * 1000),
+                )
                 continue
+            finished_ns = time.monotonic_ns()
+            _emit_telemetry(
+                stage="llm_attempt", started_ns=attempt_started_ns,
+                finished_ns=finished_ns, outcome="network_error", phase="Judge",
+                turn=1, attempt=attempt,
+            )
+            _emit_telemetry(
+                stage="judge_turn", started_ns=turn_started_ns,
+                finished_ns=finished_ns, outcome="failed", phase="Judge", turn=1,
+                completion_state="failed",
+            )
             raise
 
     if last_err:

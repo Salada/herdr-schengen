@@ -66,6 +66,7 @@ layer (`scripts/core/guard_db.py`, `scripts/core/feature_db.py`).
 | `schengen_history.db` | Audit logs, pattern stats, user allowlist, evaluation cache, pending escalations (SQLite). |
 | `feature_requests.db` | Feature-request / self-improvement backlog (SQLite, FTS5 trigram CJK search). |
 | `in_flight_state.json` | Watcher-published in-flight inspector state; the TUI reads it read-only (INV-PH1-2/5). |
+| `gatekeeper-timelines/escalation-<id>.json` | Metadata-only monotonic timing timeline for one escalation. It contains fixed stage/outcome labels and numeric durations, never commands, tool arguments/output, model text, paths, secrets, or exception text. Inspect it with `schengen_history.py --timeline <id>`. |
 
 Each runtime skill root also contains `.schengen-source.json`, written by the
 repository installer. New audit rows copy its exact Git revision into
@@ -76,6 +77,10 @@ fallback for packaged environments without Git metadata.
 Audit `decision_source` values are `DETERMINISTIC`, `LLM`, `HUMAN`, `DEFERRED`,
 or `NORMALIZATION_AMBIGUOUS`. A Judge briefing without an adjudication tool is
 recorded as `MODEL_NO_TOOL_CALL`/`LLM` and leaves the escalation pending.
+Each Gatekeeper timeline uses a random correlation ID and records detection,
+queueing, deterministic evaluation, Inspector/Judge attempts, retry backoff,
+tool-call duration, and terminal delivery/outcome without changing the SQLite
+schema or decision behavior.
 
 ## 5. OpenCode Plugin Configuration
 
