@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import core.guard_db as guard_db
 from core.guard_db import enqueue_pending_escalation
 from tools.schengen_agent_llm import _inject_rejection, execute_tool_call, reject_batch_escalations
+from adapters.agent_adapters.agy import AgyAdapter
 from adapters.agent_adapters.codex import CodexAdapter
 from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
 from adapters.agent_adapters import INJECT_SKIP_CHANGED
@@ -127,6 +128,39 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
         mock_rec.assert_not_called()
         pending = guard_db.get_pending_escalations(include_delivered=False)
         self.assertTrue(any(e["id"] == esc_id for e in pending), "escalation must stay PENDING after failure")
+
+    def _assert_builtin_delivery_failure_stays_pending(self, agent_kind, adapter, run_cmd_target):
+        esc_id = self._seed_escalation(agent_kind=agent_kind)
+        with patch(run_cmd_target, return_value=None), patch(
+            "tools.schengen_agent_llm.resolve_escalation"
+        ) as mock_resolve, patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_rec, patch(
+            "tools.schengen_agent_llm._get_escalation_row",
+            return_value=self._esc_row(agent_kind=agent_kind),
+        ), patch("tools.schengen_agent_llm.get_adapter", return_value=adapter):
+            res = execute_tool_call(
+                "approve_escalation",
+                {"escalation_id": esc_id, "english_feedback": "x"},
+            )
+
+        out = json.loads(res)
+        self.assertEqual(out["status"], "error")
+        self.assertIn("delivery unknown", out["error"])
+        mock_resolve.assert_not_called()
+        mock_rec.assert_not_called()
+        pending = guard_db.get_pending_escalations(include_delivered=False)
+        self.assertTrue(any(e["id"] == esc_id for e in pending))
+
+    def test_agy_timeout_delivery_failure_stays_pending(self):
+        self._assert_builtin_delivery_failure_stays_pending(
+            "agy", AgyAdapter(), "adapters.agent_adapters.agy.run_cmd"
+        )
+
+    def test_codex_timeout_delivery_failure_stays_pending(self):
+        self._assert_builtin_delivery_failure_stays_pending(
+            "codex", CodexAdapter(), "adapters.agent_adapters.codex.run_cmd"
+        )
 
     def test_approve_deferred_when_dialog_changed(self):
         # FIX 4: an INJECT_SKIP_CHANGED reason (dialog trampolined to a different

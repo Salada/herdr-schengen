@@ -238,8 +238,9 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
     • M3: `scripts/tools/schengen_agent_llm.py`의 `investigate_pane_history` 핸들러에서 에이전트 스레드 우선 읽기 적용.
     • M4: 단위 테스트 추가 (`tests/test_herdr_agent_read_routing.py` - 유효 세션 vs 일반 셸 분기 테스트).
 
-[] [Deferred/Hardening/Low] `herdr_client.run_cmd`의 `agent list`/`agent read` subprocess timeout 도입 (#219 피어리뷰 후속):
-  - 현재 공통 helper는 timeout이 없어 Herdr CLI hang 시 Inspector가 지연될 수 있다. 모든 기존 caller의 timeout 의미를 함께 검토한 별도 변경으로 처리한다.
+[x] [Hardening] `herdr_client.run_cmd`의 bounded subprocess timeout 도입 (#219 후속, Forgejo #229):
+  - 공통 helper에 5초 기본 timeout과 명시적 `timeout=None` opt-out을 적용한다. timeout/non-zero exit는 기존 `None` 실패 계약을 따르고, missing binary `OSError`는 계속 전파한다.
+  - AGY/Codex 승인 주입은 delivery가 불명확한 `None`을 성공으로 기록하지 않고 fail-closed한다. #224의 별도 2초/12초 readiness/prompt 경로는 변경하지 않는다.
 
 ---
 

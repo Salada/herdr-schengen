@@ -10,17 +10,31 @@ import os
 import subprocess
 
 
+DEFAULT_HERDR_TIMEOUT_SECONDS = 5.0
+
+
 # ``done`` retains a completed thread for post-hoc inspection; an expired
 # session returns empty and immediately falls back to the raw pane.
 AGENT_THREAD_READ_STATUSES = frozenset({"working", "idle", "done", "blocked"})
 
 
-def run_cmd(args):
-    """Run a subprocess command and return stdout (None on failure)."""
+def run_cmd(args, timeout=DEFAULT_HERDR_TIMEOUT_SECONDS):
+    """Run a Herdr command with a bounded default; ``None`` disables it.
+
+    A non-zero exit or timeout follows the existing ``None`` failure contract.
+    ``OSError`` intentionally remains loud so a missing Herdr binary is not
+    mistaken for a transient CLI failure.
+    """
     try:
-        res = subprocess.run(args, capture_output=True, text=True, check=True)
+        res = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
+        )
         return res.stdout
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
 
