@@ -351,6 +351,38 @@ GUARD_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "view_file_slice",
+            "description": "Read a bounded, numbered text slice from a specific grep_search hit in the active escalation's Git worktree.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "relative_path": {
+                        "type": "string",
+                        "description": "File path relative to the active Git worktree root.",
+                        "maxLength": 1024,
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "First line to read, 1-based and inclusive (default: 1).",
+                        "default": 1,
+                        "minimum": 1,
+                        "maximum": 1000000,
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Last line to read, 1-based and inclusive (default: 100; at most 100 lines).",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 1000000,
+                    },
+                },
+                "required": ["relative_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "approve_escalation",
             "description": "Approve the escalation and send approval keystrokes (Tab Amend + Enter for AGY) along with an English Security Gatekeeper note.",
             "parameters": {
@@ -805,26 +837,24 @@ def _redacted_json(payload: Dict[str, Any]) -> str:
     return redact_for_cloud(json.dumps(payload, ensure_ascii=False))
 
 
-def _grep_search(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
-    query = args.get("query")
-    if not isinstance(query, str) or not query or len(query) > 512:
-        return _redacted_json({"error": "query must be a non-empty regular expression of at most 512 characters"})
-
-    raw_relative = args.get("relative_path", ".")
+def _resolve_repository_target(
+    raw_relative: Any,
+    context: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Path], Optional[Path], Optional[str]]:
     if not isinstance(raw_relative, str) or len(raw_relative) > 1024:
-        return _redacted_json({"error": "relative_path must be a string of at most 1024 characters"})
+        return None, None, "relative_path must be a string of at most 1024 characters"
     raw_relative = raw_relative or "."
     relative = Path(raw_relative)
     if raw_relative.startswith("~") or relative.is_absolute() or ".." in relative.parts:
-        return _redacted_json({"error": "Path traversal or external access forbidden"})
+        return None, None, "Path traversal or external access forbidden"
     if any(part.startswith(".") and part != "." for part in relative.parts):
-        return _redacted_json({"error": "Explicit hidden-path access forbidden"})
+        return None, None, "Explicit hidden-path access forbidden"
     if _is_sensitive_target(raw_relative):
-        return _redacted_json({"error": "Access to sensitive path denied"})
+        return None, None, "Access to sensitive path denied"
 
     cwd = str((context or {}).get("cwd") or "")
     if not cwd:
-        return _redacted_json({"error": "Active escalation working directory unavailable"})
+        return None, None, "Active escalation working directory unavailable"
 
     try:
         cwd_path = canonicalize_path(cwd)
@@ -837,25 +867,44 @@ def _grep_search(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str
             timeout=5.0,
         )
         if root_result.returncode != 0 or not root_result.stdout.strip():
-            return _redacted_json({"error": "Active escalation is not inside a Git worktree"})
+            return None, None, "Active escalation is not inside a Git worktree"
 
         repo_root = canonicalize_path(root_result.stdout.strip())
         if not repo_root.is_dir() or repo_root == repo_root.parent:
-            return _redacted_json({"error": "Unsafe Git worktree root"})
+            return None, None, "Unsafe Git worktree root"
         try:
             cwd_path.relative_to(repo_root)
         except ValueError:
-            return _redacted_json({"error": "Active working directory escaped its Git worktree"})
+            return None, None, "Active working directory escaped its Git worktree"
         target = canonicalize_path(str(repo_root / relative))
         try:
             target.relative_to(repo_root)
         except ValueError:
-            return _redacted_json({"error": "Path traversal or external access forbidden"})
+            return None, None, "Path traversal or external access forbidden"
         if not target.exists():
-            return _redacted_json({"error": "Search path does not exist"})
+            return None, None, "Search path does not exist"
         if _is_sensitive_target(str(target)):
-            return _redacted_json({"error": "Access to sensitive path denied"})
+            return None, None, "Access to sensitive path denied"
+        return repo_root, target, None
+    except FileNotFoundError:
+        return None, None, "required executable unavailable"
+    except subprocess.TimeoutExpired:
+        return None, None, "Git worktree lookup timed out"
+    except (OSError, ValueError) as exc:
+        return None, None, str(exc)
 
+
+def _grep_search(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
+    query = args.get("query")
+    if not isinstance(query, str) or not query or len(query) > 512:
+        return _redacted_json({"error": "query must be a non-empty regular expression of at most 512 characters"})
+
+    raw_relative = args.get("relative_path", ".")
+    repo_root, target, error = _resolve_repository_target(raw_relative, context)
+    if error or repo_root is None or target is None:
+        return _redacted_json({"error": error or "Repository target unavailable"})
+
+    try:
         rg = shutil.which("rg")
         if not rg:
             return _redacted_json({"error": "rg unavailable"})
@@ -955,6 +1004,93 @@ def _grep_search(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str
     return safe_result
 
 
+def _view_file_slice(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
+    raw_relative = args.get("relative_path")
+    if not isinstance(raw_relative, str) or not raw_relative:
+        return _redacted_json({"error": "relative_path must be a non-empty string"})
+
+    start_line = args.get("start_line", 1)
+    end_line = args.get("end_line", 100)
+    if type(start_line) is not int or type(end_line) is not int:
+        return _redacted_json({"error": "start_line and end_line must be integers"})
+    if not (1 <= start_line <= 1_000_000 and 1 <= end_line <= 1_000_000):
+        return _redacted_json({"error": "start_line and end_line must be between 1 and 1000000"})
+    if start_line > end_line:
+        return _redacted_json({"error": "start_line must not exceed end_line"})
+    if end_line - start_line + 1 > 100:
+        return _redacted_json({"error": "file slice must contain at most 100 lines"})
+
+    repo_root, target, error = _resolve_repository_target(raw_relative, context)
+    if error or repo_root is None or target is None:
+        return _redacted_json({"error": error or "Repository target unavailable"})
+
+    fd = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(target, flags)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return _redacted_json({"error": "Target is not a regular file"})
+
+        sample = os.read(fd, 8192)
+        if b"\x00" in sample:
+            return _redacted_json({"error": "Binary file access denied"})
+        os.lseek(fd, 0, os.SEEK_SET)
+
+        lines: List[str] = []
+        truncated = False
+        with os.fdopen(fd, "r", encoding="utf-8", errors="strict") as handle:
+            fd = -1
+            line_number = 0
+            while line_number < end_line:
+                chunk = handle.readline(2001)
+                if chunk == "":
+                    break
+                if "\x00" in chunk:
+                    return _redacted_json({"error": "Binary file access denied"})
+                line_number += 1
+                overlong = len(chunk) == 2001 and not chunk.endswith("\n")
+                retained = chunk[:2000]
+                if overlong:
+                    while chunk and not chunk.endswith("\n"):
+                        chunk = handle.readline(2001)
+                    truncated = True
+                    retained += "… [TRUNCATED]"
+                retained = retained.rstrip("\r\n")
+                if line_number >= start_line:
+                    lines.append(redact_for_cloud(f"{line_number:4d} | {retained}"))
+    except UnicodeDecodeError:
+        return _redacted_json({"error": "Binary or non-UTF-8 file access denied"})
+    except OSError as exc:
+        return _redacted_json({"error": f"Unable to open repository file safely: {exc}"})
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    base = {
+        "relative_path": raw_relative,
+        "start_line": start_line,
+        "end_line": end_line,
+        "content": [],
+        "truncated": truncated,
+    }
+    bounded: List[str] = []
+    for line in lines:
+        candidate = {**base, "content": [*bounded, line]}
+        if len(_redacted_json(candidate)) > 4000:
+            truncated = True
+            break
+        bounded.append(line)
+    if truncated:
+        marker = "[TRUNCATED]"
+        while bounded and len(_redacted_json({**base, "content": [*bounded, marker], "truncated": True})) > 4000:
+            bounded.pop()
+        bounded.append(marker)
+    result = _redacted_json({**base, "content": bounded, "truncated": truncated})
+    if len(result) > 4000:
+        return _redacted_json({"error": "view_file_slice output exceeded the safe bound"})
+    return result
+
+
 def execute_tool_call(
     name: str,
     args: Dict[str, Any],
@@ -1027,6 +1163,9 @@ def execute_tool_call(
 
     elif name == "grep_search":
         return _grep_search(args, context)
+
+    elif name == "view_file_slice":
+        return _view_file_slice(args, context)
 
     elif name == "approve_escalation":
         raw_id = args.get("escalation_id")
@@ -1314,6 +1453,12 @@ def format_tool_call_beautified(fn_name: str, fn_args: Dict[str, Any]) -> str:
         target = fn_args.get("relative_path", ".")
         return f"🔎 **[Repository Search]**: `{query}` in `{target}`"
 
+    elif fn_name == "view_file_slice":
+        target = fn_args.get("relative_path", "")
+        start = fn_args.get("start_line", 1)
+        end = fn_args.get("end_line", 100)
+        return f"📖 **[Repository Slice]**: `{target}` lines {start}-{end}"
+
     elif fn_name == "approve_escalation":
         esc_id = fn_args.get("escalation_id", "")
         note = fn_args.get("english_feedback", "")
@@ -1416,6 +1561,7 @@ STEP 0 — RISK BRIEFING (produce this BEFORE any action):
 STEP 1 — INVESTIGATION (optional; use tools to verify facts):
 - Verify unverified claims with `investigate_path_details`, `investigate_pane_history`, or `read_file_snippet` as appropriate.
 - Use `grep_search` only for a specific, named, unresolved red flag inside the active Git worktree. Broad or exploratory searches are forbidden.
+- Use `view_file_slice` only to inspect a specific file and line range returned by `grep_search`; it is not a general file browser.
 - You may skip tools when the command is Tier B (obvious-safe) or Tier A (unambiguous critical) with certainty. "It looks simple" alone is NOT a skip reason — the command must match the closed Tier-B form.
 
 STEP 2 — TRIAGE (choose exactly one tier, driven by the Decision Layer). OVERALL BIAS — APPROVE BY DEFAULT: you are a flow-enabler, not a blocker. Withhold approval only on a concrete, named red flag — never on vague unease, and never because you cannot prove a negative.
