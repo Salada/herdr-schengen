@@ -40,7 +40,65 @@ DeepSeek Chat Completions endpoint uses `max_tokens`. Revalidate the payload
 field before switching to a provider that requires `max_completion_tokens`
 instead.
 
-## 3. `config/schengen_watcher.json`
+## 3. Canonical user settings
+
+`~/.config/herdr-schengen/settings.json` is the sole live settings authority.
+The schema-v1 document has exactly 13 top-level keys: `schema_version` plus all
+12 settings below. Missing, unknown, incorrectly typed, non-finite, or
+out-of-range values reject the whole candidate; values are never partially
+applied.
+
+```json
+{
+  "answer_language": "korean",
+  "batch_approval_enabled": true,
+  "channel_approve": false,
+  "cloud_judge_min_confidence": 0.9,
+  "complexity_tax_enabled": true,
+  "complexity_threshold": 6,
+  "human_approval_ttl_seconds": 3600,
+  "origin_weighting_enabled": true,
+  "pane_direct_confirm_polls": 2,
+  "pane_direct_eviction_enabled": true,
+  "schema_version": 1,
+  "send_approve_instruction": false,
+  "send_reject_instruction": true
+}
+```
+
+| Setting | Type and accepted range |
+| :--- | :--- |
+| `send_approve_instruction`, `send_reject_instruction`, `channel_approve` | JSON boolean |
+| `complexity_tax_enabled`, `origin_weighting_enabled`, `batch_approval_enabled`, `pane_direct_eviction_enabled` | JSON boolean |
+| `answer_language` | `english`, `korean`, or `japanese` |
+| `complexity_threshold` | integer `1..10000` |
+| `cloud_judge_min_confidence` | finite number `0.7..1.0` |
+| `human_approval_ttl_seconds` | integer `60..86400` |
+| `pane_direct_confirm_polls` | integer `1..5` |
+
+The file must be a regular non-symlink owned by the current user and must not
+be group- or world-writable. Valid external edits become visible as one whole
+snapshot within five seconds. On a malformed or unsafe update, processes keep
+their last known-good snapshot and emit a local diagnostic; they resume from a
+later valid repair without changing the invalid file.
+
+On first use when the file is absent, legacy `guard_config` SQLite values are
+validated, merged with compiled defaults, and exported once as a complete
+mode-`0600` document. SQLite is not consulted after the canonical file exists.
+Every SettingsModal change takes a cross-process lock and atomically replaces
+the same complete document, so concurrent changes to different fields are
+preserved. The current Modal exposes seven values; the other five remain
+directly file-configurable.
+
+The recovery-only snapshot is
+`~/.local/state/herdr-schengen/settings.last-good.json`. It is atomically
+written only from a validated canonical document or the first migration and
+has the same file-trust requirements. It is consulted only when an existing
+canonical file is invalid at cold start; if recovery is unavailable or invalid,
+compiled defaults are used. Recovery never acts as a live authority and never
+repairs or replaces the canonical file.
+
+## 4. `config/schengen_watcher.json`
 
 Read at daemon startup; absent or invalid values safely fall back to built-in defaults, and
 command-line flags override file values. Built-in defaults:
@@ -56,7 +114,7 @@ command-line flags override file values. Built-in defaults:
 Add future watcher-wide tunables to this file and `WATCHER_DEFAULTS` in
 `scripts/cmd/schengen_watcher.py`.
 
-## 4. Runtime State: `~/.local/state/herdr-schengen/`
+## 5. Runtime State: `~/.local/state/herdr-schengen/`
 
 XDG-compliant state directory (no skill/repo pollution). Created lazily by the persistence
 layer (`scripts/core/guard_db.py`, `scripts/core/feature_db.py`).
@@ -66,6 +124,7 @@ layer (`scripts/core/guard_db.py`, `scripts/core/feature_db.py`).
 | `schengen_history.db` | Audit logs, pattern stats, user allowlist, evaluation cache, pending escalations (SQLite). |
 | `feature_requests.db` | Feature-request / self-improvement backlog (SQLite, FTS5 trigram CJK search). |
 | `in_flight_state.json` | Watcher-published in-flight inspector state; the TUI reads it read-only (INV-PH1-2/5). |
+| `settings.last-good.json` | Recovery-only last validated schema-v1 settings snapshot; never a competing live authority. |
 | `gatekeeper-timelines/escalation-<id>.json` | Metadata-only monotonic timing timeline for one escalation. It contains fixed stage/outcome labels and numeric durations, never commands, tool arguments/output, model text, paths, secrets, or exception text. Inspect it with `schengen_history.py --timeline <id>`. |
 
 Each runtime skill root also contains `.schengen-source.json`, written by the
@@ -82,7 +141,7 @@ queueing, deterministic evaluation, Inspector/Judge attempts, retry backoff,
 tool-call duration, and terminal delivery/outcome without changing the SQLite
 schema or decision behavior.
 
-## 5. OpenCode Plugin Configuration
+## 6. OpenCode Plugin Configuration
 
 The plugin (`opencode/plugins/schengen-host.js`) forwards a minimal allowlist of
 environment variables to spawned processes (ADR-008) and reads:
@@ -93,7 +152,7 @@ environment variables to spawned processes (ADR-008) and reads:
 | `SCHENGEN_OPENCODE_MAX_INJECT` | Max injection attempts for a permission dialog. |
 | `SCHENGEN_OPENCODE_REPOLL_SECONDS` | Repoll interval for permission decisions. |
 
-## 6. Approval Semantics
+## 7. Approval Semantics
 
 Which command grants **unconditional** approval vs **gatekeeper-mediated**
 approval:

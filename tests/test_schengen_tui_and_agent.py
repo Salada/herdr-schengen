@@ -12,6 +12,7 @@ Verifies:
 import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -2360,6 +2361,75 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("OFF", modal.query_one("#set-pane-direct", Button).label.plain)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_all_seven_modal_controls_preserve_the_complete_canonical_document(self):
+        """Each existing Modal control atomically changes only its own JSON field."""
+        import core.guard_db as guard_db
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
+        from contextlib import ExitStack
+        from core.settings_config import read_trusted
+        from textual.widgets import Button, RadioButton
+
+        with tempfile.TemporaryDirectory() as temporary:
+            db_path = Path(temporary) / "guard.db"
+            with patch.object(guard_db, "DB_PATH", db_path):
+                guard_db._reset_settings_resolver_cache()
+                guard_db.init_db()
+                guard_db.set_complexity_tax_config(threshold=77)
+                guard_db.set_cloud_judge_config(min_confidence=0.77)
+                guard_db.set_batch_approval_config(ttl_seconds=777)
+                guard_db.set_pane_direct_config(confirm_polls=4)
+                settings_path, _ = guard_db._settings_storage_paths()
+
+                app = SchengenTUIApp()
+                with ExitStack() as stack:
+                    stack.enter_context(patch("cmd.schengen_tui.list_active_guard_locks", return_value=[]))
+                    stack.enter_context(patch("cmd.schengen_tui.get_current_active_escalation", return_value=None))
+                    stack.enter_context(patch("cmd.schengen_tui.get_pending_escalations", return_value=[]))
+                    stack.enter_context(patch("cmd.schengen_tui.get_recent_audit_logs", return_value=[]))
+                    async with app.run_test(size=(120, 40)) as pilot:
+                        app.action_open_settings()
+                        await pilot.pause()
+                        modal = app.screen
+                        self.assertIsInstance(modal, SettingsModal)
+
+                        async def assert_one_change(control_id, field):
+                            before = read_trusted(settings_path).to_dict()
+                            modal.query_one(control_id, Button).press()
+                            await pilot.pause()
+                            after = read_trusted(settings_path).to_dict()
+                            self.assertEqual(set(after), set(before))
+                            self.assertEqual(len(after), 13)
+                            self.assertNotEqual(after[field], before[field])
+                            self.assertEqual(
+                                {key: value for key, value in after.items() if key != field},
+                                {key: value for key, value in before.items() if key != field},
+                            )
+
+                        await assert_one_change("#set-approve-instr", "send_approve_instruction")
+                        await assert_one_change("#set-reject-instr", "send_reject_instruction")
+                        await assert_one_change("#set-channel-approve", "channel_approve")
+                        await assert_one_change("#set-batch-approval", "batch_approval_enabled")
+                        await assert_one_change("#set-origin-weighting", "origin_weighting_enabled")
+                        await assert_one_change("#set-pane-direct", "pane_direct_eviction_enabled")
+
+                        before = read_trusted(settings_path).to_dict()
+                        modal.query_one("#lang-english", RadioButton).value = True
+                        await pilot.pause()
+                        after = read_trusted(settings_path).to_dict()
+                        self.assertEqual(after["answer_language"], "english")
+                        self.assertEqual(
+                            {key: value for key, value in after.items() if key != "answer_language"},
+                            {key: value for key, value in before.items() if key != "answer_language"},
+                        )
+                        self.assertEqual(after["complexity_threshold"], 77)
+                        self.assertEqual(after["cloud_judge_min_confidence"], 0.77)
+                        self.assertEqual(after["human_approval_ttl_seconds"], 777)
+                        self.assertEqual(after["pane_direct_confirm_polls"], 4)
+                        if app.tui_lock_fd:
+                            app.tui_lock_fd.close()
+                guard_db._reset_settings_resolver_cache()
 
 
 class TestQuestionNonBlockingTUI(unittest.TestCase):
