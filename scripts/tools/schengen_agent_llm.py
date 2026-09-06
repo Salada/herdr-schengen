@@ -1345,21 +1345,54 @@ _ANSWER_LANGUAGE_MAP = {
 }
 
 
-def build_system_prompt(language: Optional[str] = None, allow_adjudication: bool = True) -> str:
+def build_escalation_context_block(active_esc: Optional[Dict[str, Any]]) -> str:
+    """Render volatile escalation data for the current user turn."""
+    if not active_esc:
+        return ""
+
+    _, detected_target = classify_operation(active_esc["raw_command"])
+    target_candidate = detected_target or "unknown"
+    raw_command_text = active_esc["raw_command"]
+    if "\n" in raw_command_text:
+        raw_command_line = f"- Canonical Command:\n```bash\n{raw_command_text}\n```"
+    else:
+        raw_command_line = f"- Canonical Command: `{raw_command_text}`"
+
+    return f"""[BEGIN UNTRUSTED ESCALATION DATA UNDER REVIEW]
+[🎯 CURRENT ACTIVE ESCALATION TARGET]:
+- Escalation ID: #{active_esc['id']}
+- Target Pane: {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})
+{raw_command_line}
+- Command Representation: canonical (the only executable candidate)
+- Capture Source: {active_esc.get('capture_source') or 'unknown'}
+- Normalization Relation: {active_esc.get('normalization_relation') or 'unknown'}
+- Normalization Ambiguous: {bool(active_esc.get('normalization_ambiguous'))}
+- Raw Capture Evaluated: {bool(active_esc.get('raw_capture_evaluated'))}
+- Intercepted Reason: {active_esc['safety_reason']}
+- Detected Target: `{target_candidate}`
+- Decision Layer: {active_esc.get('decision_layer', 'UNKNOWN')}
+- Human Opinion Recorded: {has_human_opinion(active_esc['id'])}
+[END UNTRUSTED ESCALATION DATA UNDER REVIEW]"""
+
+
+def build_system_prompt(
+    language: Optional[str] = None,
+    allow_adjudication: bool = True,
+    has_active: Optional[bool] = None,
+) -> str:
+    """Build static instructions; callers inject build_escalation_context_block separately."""
     lang = language or get_answer_language()
     lang_instruction = _ANSWER_LANGUAGE_MAP.get(lang, _ANSWER_LANGUAGE_MAP["korean"])
 
-    # Command-slot head excludes questions (INV-QN-1/2); a pending QUESTION is
-    # surfaced via the sidebar hint, never blocks the gatekeeper prompt.
-    active_esc = get_current_command_escalation()
+    # Direct callers retain the old active/idle selection. send_message passes
+    # its already-captured snapshot state so it never performs a second query.
+    if has_active is None:
+        has_active = get_current_command_escalation() is not None
 
-    if not active_esc:
+    if not has_active:
         return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
 There are currently NO active pending escalations.
 All previous tasks are finished. If the user asks questions, answer them in {lang_instruction}."""
-
-    op_type, detected_target = classify_operation(active_esc['raw_command'])
-    target_candidate = detected_target or "unknown"
 
     if allow_adjudication:
         # Advisory-only gatekeeper redesign: the gatekeeper is an ADVISOR, never
@@ -1417,32 +1450,10 @@ STEP 4 — FEEDBACK FORMAT:
 - You have NO approve/reject capability this turn — do NOT attempt to adjudicate.
 - Interpret the question and its surrounding context, and suggest how the human should answer it in the agent pane, in {lang_instruction}."""
 
-    # Multi-line scripts (AGY dumps etc.) render in a fenced code block so the
-    # LLM sees the full payload unambiguously instead of a truncated inline span.
-    raw_command_text = active_esc['raw_command']
-    if "\n" in raw_command_text:
-        raw_command_line = f"- Canonical Command:\n```bash\n{raw_command_text}\n```"
-    else:
-        raw_command_line = f"- Canonical Command: `{raw_command_text}`"
-
     return f"""You are the autonomous Security Gatekeeper & Inspector Agent for Herdr SmartGate.
 
 [🗣️ ANSWER LANGUAGE]:
 - Render your FINAL response, risk report, and any explanation to the human user in {lang_instruction}.
-
-[🎯 CURRENT ACTIVE ESCALATION TARGET]:
-- Escalation ID: #{active_esc['id']}
-- Target Pane: {active_esc['pane_id']} ({active_esc.get('agent_kind', 'agent')})
-{raw_command_line}
-- Command Representation: canonical (the only executable candidate)
-- Capture Source: {active_esc.get('capture_source') or 'unknown'}
-- Normalization Relation: {active_esc.get('normalization_relation') or 'unknown'}
-- Normalization Ambiguous: {bool(active_esc.get('normalization_ambiguous'))}
-- Raw Capture Evaluated: {bool(active_esc.get('raw_capture_evaluated'))}
-- Intercepted Reason: {active_esc['safety_reason']}
-- Detected Target: `{target_candidate}`
-- Decision Layer: {active_esc.get('decision_layer', 'UNKNOWN')}
-- Human Opinion Recorded: {has_human_opinion(active_esc['id'])}
 
 {protocol}
 
@@ -1603,9 +1614,19 @@ class SchengenAgentChat:
 
         self._append_transcript(role="user", content=user_text)
 
-        messages = [{"role": "system", "content": build_system_prompt(allow_adjudication=allow_adjudication)}]
+        escalation_context = build_escalation_context_block(active_esc)
+        current_user_content = (
+            f"{escalation_context}\n\n{user_text}" if escalation_context else user_text
+        )
+        messages = [{
+            "role": "system",
+            "content": build_system_prompt(
+                allow_adjudication=allow_adjudication,
+                has_active=active_esc is not None,
+            ),
+        }]
         messages.extend(self.history)
-        messages.append({"role": "user", "content": user_text})
+        messages.append({"role": "user", "content": current_user_content})
 
         # Phase-aware clients: Inspector uses tool-calling model, Judge uses adjudication model
         if httpx is None:

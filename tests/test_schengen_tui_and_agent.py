@@ -24,6 +24,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from tools.schengen_agent_llm import (
     SchengenAgentChat,
+    build_escalation_context_block,
     clean_llm_response,
     build_system_prompt,
     get_current_active_escalation,
@@ -152,7 +153,9 @@ Approved. All files verified safely."""
             "decision_layer": "GRAY_ZONE",
         }
         prompt = build_system_prompt()
-        self.assertIn("Escalation ID: #123", prompt)
+        with patch("tools.schengen_agent_llm.has_human_opinion", return_value=False):
+            context = build_escalation_context_block(mock_get_active.return_value)
+        self.assertIn("Escalation ID: #123", context)
         self.assertIn("investigate_path_details", prompt)
         self.assertIn("investigate_pane_history", prompt)
         self.assertIn("read_file_snippet", prompt)
@@ -160,7 +163,7 @@ Approved. All files verified safely."""
         self.assertIn("TRIAGE", prompt)
         self.assertIn("OBVIOUS-SAFE FORM", prompt)
         self.assertIn("NO AUTONOMOUS REJECT", prompt)
-        self.assertIn("- Decision Layer: GRAY_ZONE", prompt)
+        self.assertIn("- Decision Layer: GRAY_ZONE", context)
         self.assertNotIn("DISAGREE & COMMIT", prompt)
 
     @patch("tools.schengen_agent_llm.get_current_command_escalation")
