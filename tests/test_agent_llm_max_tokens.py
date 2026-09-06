@@ -66,8 +66,8 @@ class TestCompletionTokenConfig(unittest.TestCase):
             os.environ.pop("SCHENGEN_INSPECTOR_MAX_TOKENS", None)
             os.environ.pop("SCHENGEN_JUDGE_MAX_TOKENS", None)
             defaulted = SchengenAgentChat(api_key="test")
-        self.assertEqual(defaulted.inspector_max_tokens, 800)
-        self.assertEqual(defaulted.judge_max_tokens, 600)
+        self.assertEqual(defaulted.inspector_max_tokens, 4096)
+        self.assertEqual(defaulted.judge_max_tokens, 4096)
 
         with patch.dict(os.environ, {
             "SCHENGEN_INSPECTOR_MAX_TOKENS": "64",
@@ -90,8 +90,8 @@ class TestCompletionTokenConfig(unittest.TestCase):
                 "SCHENGEN_JUDGE_MAX_TOKENS": value,
             }):
                 chat = SchengenAgentChat(api_key="test")
-                self.assertEqual(chat.inspector_max_tokens, 800)
-                self.assertEqual(chat.judge_max_tokens, 600)
+                self.assertEqual(chat.inspector_max_tokens, 4096)
+                self.assertEqual(chat.judge_max_tokens, 4096)
 
 
 class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
@@ -103,7 +103,40 @@ class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
             chat = _chat(client)
             await chat.send_message("review")
 
-        self.assertEqual([payload["max_tokens"] for payload in client.payloads], [800, 600])
+        self.assertEqual([payload["max_tokens"] for payload in client.payloads], [4096, 4096])
+
+    async def test_inspector_can_execute_tool_call_beyond_old_800_token_ceiling(self):
+        tool_calls = [{
+            "id": "complete",
+            "type": "function",
+            "function": {
+                "name": "investigate_path_details",
+                "arguments": '{"target_path":"."}',
+            },
+        }]
+        client = _SequenceClient([
+            _Response(
+                content=None,
+                finish_reason="tool_calls",
+                tool_calls=tool_calls,
+                completion_tokens=801,
+            ),
+            _Response(content="Investigation complete."),
+        ])
+        with patch("tools.schengen_agent_llm.get_current_command_escalation", return_value=None), patch(
+            "tools.schengen_agent_llm.httpx.AsyncClient", return_value=client
+        ), patch("tools.schengen_agent_llm.execute_tool_call", return_value='{"exists":true}') as execute:
+            chat = _chat(client)
+            chat.judge_model = chat.inspector_model
+            result = await chat.send_message("review escalation 5620")
+
+        self.assertEqual(client.payloads[0]["max_tokens"], 4096)
+        execute.assert_called_once_with(
+            "investigate_path_details",
+            {"target_path": "."},
+            context={"cwd": ""},
+        )
+        self.assertEqual(result, "Investigation complete.")
 
     async def test_custom_ceiling_is_stable_across_turns(self):
         client = _SequenceClient([_Response(), _Response()])
@@ -128,7 +161,7 @@ class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
             await chat.send_message("review")
 
         self.assertEqual(len(client.payloads), 2)
-        self.assertTrue(all(payload["max_tokens"] == 800 for payload in client.payloads))
+        self.assertTrue(all(payload["max_tokens"] == 4096 for payload in client.payloads))
 
     async def test_inspector_length_drops_every_tool_call_and_accounts_usage(self):
         tool_calls = [{
@@ -142,7 +175,7 @@ class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
                 finish_reason="length",
                 tool_calls=tool_calls,
                 prompt_tokens=11,
-                completion_tokens=800,
+                completion_tokens=4096,
             )
         ])
         with patch("tools.schengen_agent_llm.get_current_command_escalation", return_value=None), patch(
@@ -154,10 +187,10 @@ class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
         execute.assert_not_called()
         self.assertIn("[MAX_TOKENS_REACHED]", result)
         self.assertIn("Inspector", result)
-        self.assertIn("800-token ceiling", result)
+        self.assertIn("4096-token ceiling", result)
         self.assertIn("remains pending", result)
-        self.assertEqual(chat.total_completion_tokens, 800)
-        self.assertEqual(chat.inspector_completion_tokens, 800)
+        self.assertEqual(chat.total_completion_tokens, 4096)
+        self.assertEqual(chat.inspector_completion_tokens, 4096)
 
     async def test_judge_length_is_visible_and_preserves_pending_audit(self):
         escalation = {
@@ -175,7 +208,7 @@ class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
                 content="Partial risk briefing",
                 finish_reason="length",
                 prompt_tokens=7,
-                completion_tokens=600,
+                completion_tokens=4096,
             ),
         ])
         with patch("tools.schengen_agent_llm.get_current_command_escalation", return_value=escalation), patch(
@@ -189,13 +222,13 @@ class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
         record.assert_called_once_with(escalation, "Judge")
         self.assertIn("[MODEL_NO_TOOL_CALL]", result)
         self.assertIn("[MAX_TOKENS_REACHED]", result)
-        self.assertIn("600-token ceiling", result)
+        self.assertIn("4096-token ceiling", result)
         self.assertIn("Partial risk briefing", result)
         self.assertIn("remains pending", result)
         self.assertEqual(chat.total_prompt_tokens, 12)
-        self.assertEqual(chat.total_completion_tokens, 604)
+        self.assertEqual(chat.total_completion_tokens, 4100)
         self.assertEqual(chat.inspector_completion_tokens, 4)
-        self.assertEqual(chat.judge_completion_tokens, 600)
+        self.assertEqual(chat.judge_completion_tokens, 4096)
 
 
 if __name__ == "__main__":
