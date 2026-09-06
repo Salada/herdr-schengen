@@ -140,7 +140,7 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
       - **타 에이전트 일반화 (Universal Extension)**: AGY의 `ctrl+g`뿐만 아니라 OpenCode(`ctrl+f`), Codex(`ctrl+a` fullscreen) 등 단축키만 다를 뿐 전개/확대 시 다이얼로그 레이아웃이 변형되는 모든 에이전트 어댑터에 공통 적용되는 일반화 아키텍처 과제임.
     • 따라서 전개 덤프 중에는 일시적 다이얼로그 부재를 즉시 승인/소멸로 간주하지 않도록 가드 락(Liveness Eviction Hold)을 반드시 연계해야 함.
 
-[] [Bug/Codex/P1] Codex 거절 피드백 주입 시 모달 복귀 타이밍 레이스로 인한 Enter 누락 및 프롬프트 미전송 (#5096):
+[x] [Bug/Codex/P1] Codex 거절 피드백 주입 시 모달 복귀 타이밍 레이스로 인한 Enter 누락 및 프롬프트 미전송 (#5096, Forgejo #223):
   - 현상 및 사례 (Escalation #5096):
     • TUI에서 `/reject 5096 <사유>` 실행 시, `_inject_rejection`([`schengen_agent_llm.py`](file:///Users/kyjbusan/code/herdr-schengen/scripts/tools/schengen_agent_llm.py))이 실행되어 승인 모달 닫기(`escape`) 후 프롬프트 피드백 텍스트(`# [SECURITY GATEKEEPER]: ...`)와 `enter` 키를 전송함.
     • 그러나 Codex 터미널 화면상에는 주입된 텍스트가 프롬프트 버퍼에 타이핑된 채로만 멈춰 있고 `enter`가 처리되지 않아 에이전트에 메시지가 전송되지 않고 계속 `blocked` 상태로 대기하는 현상 발생.
@@ -148,11 +148,11 @@ Phase 4는 **"멀티에이전트 고속 동시성(Concurrency)과 무마찰 사�
   - 원인 분석 (Root Cause):
     • 이전 패치(Commit `0ac56ea`)에서 `herdr pane send-keys`를 `herdr agent send-keys`로 전환하여 키맵 문제는 해결되었으나,
     • 모달 닫기(`escape`)와 프롬프트 복귀 사이 Codex(ratatui TUI)의 화면 재렌더링 전이 지연(0.1~0.3초 프레임 드롭) 동안 곧바로 텍스트 주입 및 Enter가 날아가며 키 이벤트가 버퍼에서 유실됨.
-  - 해결 후보 방안 (※ 정확한 기술적 해결책은 추가 아키텍처 논의 후 확정):
-    • Option A (Transition Sleep/Delay): `escape` 모달 해제 후 프롬프트 활성화까지의 렌더링 안정화 지연(`time.sleep(0.3)`) 및 텍스트와 Enter 사이 미세 지연(`time.sleep(0.1)`) 추가. (단순하지만 임의 슬립 의존)
-    • Option B (상태 기반 이벤트 대기): `herdr agent get <pane>` 또는 `herdr agent wait <pane> --until idle` 등 상태 폴링을 통해 모달이 완전히 닫히고 프롬프트 입력 상태로 전이된 것을 확인한 후 주입.
-    • Option C (고수준 Atomic Prompt 사용): 분리된 `send-text` + `enter` 대신 `herdr agent prompt <pane> "<feedback>"` 명령으로 단일 원자적 제출 위임 (bracketed paste 및 Enter 보장).
-  - [Note] 정확한 아키텍처 및 구현 방식은 피어 에이전트 및 팀 논의 후 정식 결정하여 진행.
+  - 해결 (Forgejo #223):
+    • Codex adapter가 `escape`로 모달을 해제한 뒤 `herdr agent wait --until working --until idle --until done --timeout 1000`으로 blocked/unknown이 아닌 prompt-ready 상태를 제한 시간 안에 확인한다.
+    • 준비 확인 뒤 분리된 `send-text` + `enter` 대신 `herdr agent prompt ... --wait --timeout 10000`으로 피드백과 Enter를 원자적으로 제출한다.
+    • readiness/prompt 실패(제출 직후 새 blocked 상태 포함) 시 raw key fallback 없이 fail-closed로 반환하여 escalation을 PENDING으로 유지한다. 고정 sleep은 결과를 보장하지 못하므로 사용하지 않는다.
+    • 새 경로는 Codex에만 적용하고 AGY/OpenCode adapter 흐름은 유지한다.
 
 [] [Deferred/TUI] `SettingsModal` 내 잔여 설정 토글 연동 (Approval Bias, Fast-Track, approve_advisory):
   - 1) `SettingsModal` (Automation 섹션) 내 `approve_advisory` On/Off 토글 스위치 연동 (PR #180 후속).

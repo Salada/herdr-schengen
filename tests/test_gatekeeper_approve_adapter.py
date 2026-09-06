@@ -7,6 +7,7 @@ injection fails.
 """
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,7 +20,8 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import core.guard_db as guard_db
 from core.guard_db import enqueue_pending_escalation
-from tools.schengen_agent_llm import execute_tool_call, reject_batch_escalations
+from tools.schengen_agent_llm import _inject_rejection, execute_tool_call, reject_batch_escalations
+from adapters.agent_adapters.codex import CodexAdapter
 from adapters.agent_adapters.base import INJECT_REJECT_NOT_IMPLEMENTED
 from adapters.agent_adapters import INJECT_SKIP_CHANGED
 from adapters.auto_advance import AutoAdvanceResult
@@ -51,6 +53,14 @@ class _FakeAdapter:
     def inject_reject(self, pane_id, req_cmd):
         self.reject_calls.append((pane_id, req_cmd))
         return self.rej_ok, self.rej_reason
+
+
+def _herdr_result(status="idle"):
+    return json.dumps({"id": "cli:agent:test", "result": {"agent": {"agent_status": status}}})
+
+
+def _herdr_error(code):
+    return json.dumps({"id": "cli:agent:test", "error": {"code": code, "message": code}})
 
 
 class TestGatekeeperApproveAdapter(unittest.TestCase):
@@ -361,6 +371,119 @@ class TestGatekeeperApproveAdapter(unittest.TestCase):
         mock_rec.assert_not_called()
         pending = guard_db.get_pending_escalations(include_delivered=False)
         self.assertTrue(any(e["id"] == esc_id for e in pending), "escalation must stay PENDING on real reject failure")
+
+    def test_codex_reject_waits_for_readiness_then_prompts_atomically(self):
+        """#5096: Esc -> bounded ready wait -> atomic prompt, never raw Enter."""
+        results = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, _herdr_result("idle"), ""),
+            subprocess.CompletedProcess([], 0, _herdr_result("working"), ""),
+        ]
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=CodexAdapter()), patch(
+            "tools.schengen_agent_llm.subprocess.run", side_effect=results
+        ) as mock_run:
+            ok, reason = _inject_rejection("w1D:p1", "codex", "rm file", "use trash", True)
+
+        self.assertTrue(ok, reason)
+        calls = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(calls[0], ["herdr", "agent", "send-keys", "w1D:p1", "escape"])
+        self.assertEqual(calls[1], [
+            "herdr", "agent", "wait", "w1D:p1",
+            "--until", "working", "--until", "idle", "--until", "done", "--timeout", "1000",
+        ])
+        self.assertEqual(calls[2], [
+            "herdr", "agent", "prompt", "w1D:p1", "# [SECURITY GATEKEEPER]: use trash",
+            "--wait", "--until", "working", "--until", "idle", "--until", "done",
+            "--timeout", "10000",
+        ])
+        self.assertFalse(any(call[:3] == ["herdr", "pane", "send-text"] for call in calls))
+        self.assertFalse(any(call[-1:] == ["enter"] for call in calls))
+
+    def test_codex_reject_readiness_timeout_has_no_send_fallback(self):
+        results = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, _herdr_error("timeout"), ""),
+        ]
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=CodexAdapter()), patch(
+            "tools.schengen_agent_llm.subprocess.run", side_effect=results
+        ) as mock_run:
+            ok, reason = _inject_rejection("w1D:p1", "codex", "rm file", "use trash", True)
+
+        self.assertFalse(ok)
+        self.assertIn("readiness failed", reason)
+        self.assertEqual(mock_run.call_count, 2)
+        calls = [call.args[0] for call in mock_run.call_args_list]
+        self.assertFalse(any("prompt" in call or "send-text" in call or "enter" in call for call in calls))
+
+    def test_codex_reject_python_timeout_has_no_send_fallback(self):
+        results = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.TimeoutExpired(["herdr", "agent", "wait"], 2.0),
+        ]
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=CodexAdapter()), patch(
+            "tools.schengen_agent_llm.subprocess.run", side_effect=results
+        ) as mock_run:
+            ok, reason = _inject_rejection("w1D:p1", "codex", "rm file", "use trash", True)
+
+        self.assertFalse(ok)
+        self.assertIn("readiness failed", reason)
+        self.assertEqual(mock_run.call_count, 2)
+
+    def test_codex_reject_prompt_failures_have_no_raw_fallback(self):
+        for failure in ("agent_blocked", "agent_prompt_stalled"):
+            with self.subTest(failure=failure):
+                results = [
+                    subprocess.CompletedProcess([], 0, "", ""),
+                    subprocess.CompletedProcess([], 0, _herdr_result("idle"), ""),
+                    subprocess.CompletedProcess([], 0, _herdr_error(failure), ""),
+                ]
+                with patch("tools.schengen_agent_llm.get_adapter", return_value=CodexAdapter()), patch(
+                    "tools.schengen_agent_llm.subprocess.run", side_effect=results
+                ) as mock_run:
+                    ok, reason = _inject_rejection("w1D:p1", "codex", "rm file", "use trash", True)
+
+                self.assertFalse(ok)
+                self.assertIn(failure, reason)
+                calls = [call.args[0] for call in mock_run.call_args_list]
+                self.assertFalse(any(call[:3] == ["herdr", "pane", "send-text"] for call in calls))
+                self.assertFalse(any(call[-1:] == ["enter"] for call in calls))
+
+    def test_agy_reject_instruction_keeps_legacy_sequence(self):
+        fake = _FakeAdapter(rej_ok=True, rej_reason="rejected")
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=fake), patch(
+            "tools.schengen_agent_llm.subprocess.run"
+        ) as mock_run:
+            mock_run.return_value = None
+            ok, reason = _inject_rejection("w1D:p1", "agy", "rm file", "use trash", True)
+
+        self.assertTrue(ok, reason)
+        calls = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(calls, [
+            ["herdr", "pane", "send-text", "w1D:p1", "# [SECURITY GATEKEEPER]: use trash"],
+            ["herdr", "agent", "send-keys", "w1D:p1", "enter"],
+        ])
+
+    def test_codex_reject_readiness_failure_keeps_escalation_pending(self):
+        esc_id = self._seed_escalation(agent_kind="codex")
+        results = [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, _herdr_error("timeout"), ""),
+        ]
+        with patch("tools.schengen_agent_llm.get_adapter", return_value=CodexAdapter()), patch(
+            "tools.schengen_agent_llm.subprocess.run", side_effect=results
+        ), patch("tools.schengen_agent_llm.resolve_escalation") as mock_resolve, patch(
+            "tools.schengen_agent_llm.record_adjudication"
+        ) as mock_record:
+            out = json.loads(execute_tool_call(
+                "reject_escalation",
+                {"escalation_id": esc_id, "english_feedback": "use trash", "directive": True},
+            ))
+
+        self.assertEqual(out["status"], "error")
+        self.assertIn("readiness failed", out["error"])
+        mock_resolve.assert_not_called()
+        mock_record.assert_not_called()
+        self.assertTrue(any(row["id"] == esc_id for row in guard_db.get_pending_escalations()))
 
 
 if __name__ == "__main__":
