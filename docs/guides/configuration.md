@@ -92,6 +92,17 @@ approval:
 | `/allow <pattern> [description]` (and `/allow-last`) | **Persistent allowlist**. A full-match regex rule reviewed by the human; applies from then on (revocable, never deleted). | `created_by="human-tui"` |
 | `/allow-url <hostname-or-origin> [description]` | **Persistent exact-host policy for read-only network access**. Applies to `network_access` and curl GET/stdout; upload/auth/output/redirect flags, mixed hosts, mutation, and non-read-only pipelines never match. Use `/allow-url-list` to inspect and `/revoke-url <id-or-host>` to revoke. | `created_by="human-tui"` |
 
+For an exact recurring command such as `chezmoi status`, let it reach human
+review once and use `/allow-last`; the stored rule is escaped and matched with
+`re.fullmatch`. Global home-directory allowlist files are intentionally not a
+supported configuration surface: agents share the human OS uid, so an
+agent-writable global Fast-Track file would be a self-authorization path. Use
+the TUI-managed SQLite rules for global policy and `<repo>/.schengen/allowlist.json`
+for repository-scoped policy. The repo-local file is also writable by agents
+sharing the OS uid; it is not a human-only trust store. Its authority is bounded
+to that repository, denylist layers still take precedence, and automatic rule
+promotion requires an explicit `human-tui` approval.
+
 The former `approve_advisory` switch was removed by ADR-015. Ordinary prose is
 still sent to the Gatekeeper as advice; only the closed directive grammar above
 can mutate an escalation without an LLM round trip.
