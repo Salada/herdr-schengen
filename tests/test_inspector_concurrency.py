@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from unittest import mock
 
@@ -18,6 +19,55 @@ from core.session_memory import PaneSessionMemory
 
 
 class TestInspectorConcurrency(unittest.TestCase):
+    class _ImmediateExecutor:
+        def submit(self, callback, *args):
+            future = Future()
+            try:
+                future.set_result(callback(*args))
+            except BaseException as exc:
+                future.set_exception(exc)
+            return future
+
+        def shutdown(self, **_kwargs):
+            return None
+
+    class _FailingExecutor(_ImmediateExecutor):
+        def submit(self, callback, *args):
+            raise RuntimeError("submit failed")
+
+    def test_submit_publishes_phase_box_before_immediate_worker_runs(self):
+        coordinator = InspectorCoordinator(max_workers=1)
+        coordinator.executor.shutdown(wait=True)
+        coordinator.executor = self._ImmediateExecutor()
+        observed = {}
+
+        def evaluate():
+            request, phase_box, future = coordinator.in_flight["pane-immediate"]
+            observed.update(request=request, phase_box=phase_box, future=future)
+            return True, "safe", "FAST_TRACK_AST", {}
+
+        try:
+            request = ("echo safe",)
+            self.assertTrue(coordinator.submit("pane-immediate", request, evaluate))
+            self.assertEqual(observed["request"], request)
+            self.assertEqual(observed["phase_box"]["phase"], "inspector")
+            self.assertIsNone(observed["future"])
+            self.assertIsInstance(coordinator.in_flight["pane-immediate"][2], Future)
+        finally:
+            coordinator.close()
+
+    def test_submit_failure_rolls_back_in_flight_and_matching_owner(self):
+        coordinator = InspectorCoordinator(max_workers=1)
+        coordinator.executor.shutdown(wait=True)
+        coordinator.executor = self._FailingExecutor()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "submit failed"):
+                coordinator.submit("pane-failed", ("echo safe",), lambda: None)
+            self.assertNotIn("pane-failed", coordinator.in_flight)
+            self.assertNotIn("pane-failed", coordinator.owned)
+        finally:
+            coordinator.close()
+
     def test_per_pane_dedup_and_parallel_completion(self):
         coordinator = InspectorCoordinator(max_workers=2)
         both_started = threading.Event()
