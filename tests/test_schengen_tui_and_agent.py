@@ -2125,6 +2125,44 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
             if confirm_polls is not None:
                 state["pd"]["pane_direct_confirm_polls"] = confirm_polls
 
+        def _set_complexity(enabled=None, threshold=None):
+            if enabled is not None:
+                state["complexity"]["complexity_tax_enabled"] = enabled
+            if threshold is not None:
+                state["complexity"]["complexity_threshold"] = threshold
+
+        def _set_numeric(**values):
+            expected = values.pop("expected")
+            force = values.pop("force", False)
+            state["numeric_calls"].append({
+                **values,
+                "expected": expected,
+                "force": force,
+            })
+            if state.get("numeric_error") is not None:
+                raise state["numeric_error"]
+            if state.get("numeric_conflict") is not None and not force:
+                raise state["numeric_conflict"]
+            state["complexity"]["complexity_threshold"] = values["complexity_threshold"]
+            state["cloud"]["cloud_judge_min_confidence"] = values["cloud_judge_min_confidence"]
+            state["batch"]["human_approval_ttl_seconds"] = values["human_approval_ttl_seconds"]
+            state["pd"]["pane_direct_confirm_polls"] = values["pane_direct_confirm_polls"]
+            return dict(values)
+
+        def _get_settings():
+            return {
+                "schema_version": 1,
+                "send_approve_instruction": state["instr"]["send_approve_instruction"],
+                "send_reject_instruction": state["instr"]["send_reject_instruction"],
+                "answer_language": state["lang"],
+                "channel_approve": state["chan"],
+                **state["complexity"],
+                **state["origin"],
+                **state["cloud"],
+                **state["batch"],
+                **state["pd"],
+            }
+
         return [
             patch("cmd.schengen_tui.list_active_guard_locks", side_effect=lambda: state["locks"]),
             patch("cmd.schengen_tui.get_instruction_delivery_config", side_effect=lambda: dict(state["instr"])),
@@ -2133,6 +2171,11 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
             patch("cmd.schengen_tui.set_answer_language", side_effect=lambda lang: state.update(lang=lang)),
             patch("cmd.schengen_tui.get_channel_approve_config", side_effect=lambda: state["chan"]),
             patch("cmd.schengen_tui.set_channel_approve_config", side_effect=lambda v: state.update(chan=v)),
+            patch("cmd.schengen_tui.get_complexity_tax_config", side_effect=lambda: dict(state["complexity"])),
+            patch("cmd.schengen_tui.set_complexity_tax_config", side_effect=_set_complexity),
+            patch("cmd.schengen_tui.get_cloud_judge_config", side_effect=lambda: dict(state["cloud"])),
+            patch("cmd.schengen_tui.set_numeric_tuning_config", side_effect=_set_numeric),
+            patch("cmd.schengen_tui.get_settings_config", side_effect=_get_settings),
             patch("cmd.schengen_tui.get_batch_approval_config", side_effect=lambda: dict(state["batch"])),
             patch("cmd.schengen_tui.set_batch_approval_config", side_effect=_set_batch),
             patch("cmd.schengen_tui.get_origin_weighting_config", side_effect=lambda: dict(state["origin"])),
@@ -2151,9 +2194,12 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
             "instr": {"send_approve_instruction": False, "send_reject_instruction": True},
             "lang": "korean",
             "chan": False,
-            "batch": {"batch_approval_enabled": True},
+            "complexity": {"complexity_tax_enabled": True, "complexity_threshold": 6},
+            "cloud": {"cloud_judge_min_confidence": 0.9},
+            "batch": {"batch_approval_enabled": True, "human_approval_ttl_seconds": 3600},
             "origin": {"origin_weighting_enabled": True},
-            "pd": {"pane_direct_eviction_enabled": True},
+            "pd": {"pane_direct_eviction_enabled": True, "pane_direct_confirm_polls": 2},
+            "numeric_calls": [],
         }
 
     @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
@@ -2359,6 +2405,290 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertFalse(state["pd"]["pane_direct_eviction_enabled"])
                 self.assertIn("OFF", modal.query_one("#set-pane-direct", Button).label.plain)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_validates_previews_and_applies_numeric_group_once(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
+        from contextlib import ExitStack
+        from textual.widgets import Button, Input, Static
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 50)) as pilot:
+                app.action_open_settings()
+                await pilot.pause()
+                modal = app.screen
+                self.assertIsInstance(modal, SettingsModal)
+                apply = modal.query_one("#apply-numeric-settings", Button)
+                self.assertTrue(apply.disabled)
+
+                modal.query_one("#tuning-complexity-threshold", Input).value = "7"
+                modal.query_one("#tuning-cloud-confidence", Input).value = "0.8"
+                modal.query_one("#tuning-approval-ttl", Input).value = "7200"
+                modal.query_one("#tuning-pane-polls", Input).value = "3"
+                await pilot.pause()
+                impact = str(modal.query_one("#settings-tuning-impact", Static).content)
+                self.assertIn("6 → 7 · scrutiny ↓", impact)
+                self.assertIn("0.9 → 0.8 · approval bar ↓", impact)
+                self.assertIn("3600 → 7200 · approval-memory window ↑", impact)
+                self.assertIn("2 → 3 · liveness wait ↑", impact)
+                self.assertFalse(apply.disabled)
+
+                modal.query_one("#tuning-cloud-confidence", Input).value = "NaN"
+                await pilot.pause()
+                self.assertTrue(apply.disabled)
+                error = str(modal.query_one("#tuning-cloud-confidence-error", Static).content)
+                self.assertIn("finite number", error)
+                modal._apply_numeric_settings()
+                self.assertEqual(state["numeric_calls"], [])
+                self.assertEqual(
+                    modal.query_one("#tuning-complexity-threshold", Input).value,
+                    "7",
+                )
+
+                modal.query_one("#tuning-cloud-confidence", Input).value = "0.8"
+                await pilot.pause()
+                apply.press()
+                await pilot.pause()
+                self.assertEqual(len(state["numeric_calls"]), 1)
+                self.assertEqual(state["numeric_calls"][0]["expected"], {
+                    "complexity_threshold": 6,
+                    "cloud_judge_min_confidence": 0.9,
+                    "human_approval_ttl_seconds": 3600,
+                    "pane_direct_confirm_polls": 2,
+                })
+                self.assertFalse(state["numeric_calls"][0]["force"])
+                self.assertEqual(state["complexity"]["complexity_threshold"], 7)
+                self.assertEqual(state["cloud"]["cloud_judge_min_confidence"], 0.8)
+                self.assertEqual(state["batch"]["human_approval_ttl_seconds"], 7200)
+                self.assertEqual(state["pd"]["pane_direct_confirm_polls"], 3)
+                self.assertTrue(apply.disabled)
+                self.assertFalse(modal._numeric_dirty)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_dependency_toggles_preserve_and_apply_drafts(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
+        from contextlib import ExitStack
+        from textual.widgets import Button, Input, Static
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 50)) as pilot:
+                app.action_open_settings()
+                await pilot.pause()
+                modal = app.screen
+                self.assertIsInstance(modal, SettingsModal)
+                threshold = modal.query_one("#tuning-complexity-threshold", Input)
+                polls = modal.query_one("#tuning-pane-polls", Input)
+                threshold.value = "8"
+                polls.value = "4"
+                await pilot.pause()
+
+                modal.query_one("#set-complexity-tax", Button).press()
+                modal.query_one("#set-pane-direct", Button).press()
+                await pilot.pause()
+                self.assertFalse(state["complexity"]["complexity_tax_enabled"])
+                self.assertFalse(state["pd"]["pane_direct_eviction_enabled"])
+                self.assertTrue(threshold.disabled)
+                self.assertTrue(polls.disabled)
+                self.assertEqual(threshold.value, "8")
+                self.assertEqual(polls.value, "4")
+                self.assertIn(
+                    "reduces scrutiny",
+                    str(modal.query_one("#settings-tax-warning", Static).content),
+                )
+                modal._poll_external_settings()
+                self.assertEqual(
+                    str(modal.query_one("#settings-external-change", Static).content),
+                    "",
+                )
+
+                modal.query_one("#apply-numeric-settings", Button).press()
+                await pilot.pause()
+                self.assertEqual(state["complexity"]["complexity_threshold"], 8)
+                self.assertEqual(state["pd"]["pane_direct_confirm_polls"], 4)
+                self.assertEqual(len(state["numeric_calls"]), 1)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_external_reload_refreshes_clean_but_preserves_dirty(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsModal
+        from contextlib import ExitStack
+        from textual.widgets import Button, Input, Static
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 50)) as pilot:
+                app.action_open_settings()
+                await pilot.pause()
+                modal = app.screen
+                self.assertIsInstance(modal, SettingsModal)
+                threshold = modal.query_one("#tuning-complexity-threshold", Input)
+
+                state["complexity"]["complexity_threshold"] = 9
+                modal._poll_external_settings()
+                self.assertEqual(threshold.value, "9")
+                self.assertEqual(modal._numeric_baseline["complexity_threshold"], 9)
+
+                threshold.value = "10"
+                await pilot.pause()
+                state["chan"] = True
+                modal._poll_external_settings()
+                self.assertEqual(threshold.value, "10")
+                self.assertTrue(modal._numeric_dirty)
+                self.assertIn(
+                    "changed externally",
+                    str(modal.query_one("#settings-external-change", Static).content),
+                )
+                self.assertIn("ON", modal.query_one("#set-channel-approve", Button).label.plain)
+
+                modal.query_one("#apply-numeric-settings", Button).press()
+                await pilot.pause()
+                self.assertEqual(state["complexity"]["complexity_threshold"], 10)
+                self.assertTrue(state["chan"])
+                self.assertFalse(modal._numeric_dirty)
+                self.assertEqual(len(state["numeric_calls"]), 1)
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_conflict_reload_cancel_overwrite_and_write_failure(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsDecisionModal, SettingsModal
+        from contextlib import ExitStack
+        from core.settings_config import (
+            DEFAULT_SETTINGS,
+            SettingsConflictError,
+            SettingsError,
+            validate_settings,
+        )
+        from textual.widgets import Input, Static
+
+        state = self._fresh_state()
+        current = validate_settings({
+            **DEFAULT_SETTINGS.to_dict(),
+            "complexity_threshold": 11,
+        })
+        state["numeric_conflict"] = SettingsConflictError(
+            ("complexity_threshold",), current
+        )
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 50)) as pilot:
+                app.action_open_settings()
+                await pilot.pause()
+                modal = app.screen
+                self.assertIsInstance(modal, SettingsModal)
+                threshold = modal.query_one("#tuning-complexity-threshold", Input)
+                threshold.value = "12"
+                await pilot.pause()
+
+                modal._apply_numeric_settings()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsDecisionModal)
+                app.screen.query_one("#settings-decision-cancel").press()
+                await pilot.pause()
+                self.assertIs(app.screen, modal)
+                self.assertEqual(threshold.value, "12")
+
+                modal._apply_numeric_settings()
+                await pilot.pause()
+                app.screen.query_one("#settings-decision-reload").press()
+                await pilot.pause()
+                self.assertIs(app.screen, modal)
+                self.assertEqual(threshold.value, "11")
+                self.assertFalse(modal._numeric_dirty)
+
+                threshold.value = "12"
+                await pilot.pause()
+                modal._apply_numeric_settings()
+                await pilot.pause()
+                app.screen.query_one("#settings-decision-overwrite").press()
+                await pilot.pause()
+                self.assertEqual(state["numeric_calls"][-1]["force"], True)
+                self.assertEqual(state["complexity"]["complexity_threshold"], 12)
+                self.assertFalse(modal._numeric_dirty)
+
+                threshold.value = "13"
+                await pilot.pause()
+                state["numeric_error"] = SettingsError("canonical settings rejected")
+                before = dict(state["complexity"])
+                modal._apply_numeric_settings()
+                self.assertEqual(state["complexity"], before)
+                self.assertEqual(threshold.value, "13")
+                self.assertTrue(modal._numeric_dirty)
+                self.assertIn(
+                    "not written",
+                    str(modal.query_one("#settings-external-change", Static).content),
+                )
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_settings_modal_dirty_close_requires_discard_but_keeps_immediate_toggle(self):
+        from cmd.schengen_tui import SchengenTUIApp, SettingsDecisionModal, SettingsModal
+        from contextlib import ExitStack
+        from textual.widgets import Button, Input
+
+        state = self._fresh_state()
+        app = SchengenTUIApp()
+        with ExitStack() as stack:
+            for p in self._config_patches(state):
+                stack.enter_context(p)
+            async with app.run_test(size=(120, 50)) as pilot:
+                app.action_open_settings()
+                await pilot.pause()
+                modal = app.screen
+                self.assertIsInstance(modal, SettingsModal)
+                modal.query_one("#set-complexity-tax", Button).press()
+                modal.query_one("#tuning-complexity-threshold", Input).value = "8"
+                await pilot.pause()
+
+                await pilot.press("q")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsDecisionModal)
+                app.screen.query_one("#settings-decision-cancel").press()
+                await pilot.pause()
+                self.assertIs(app.screen, modal)
+                self.assertEqual(
+                    modal.query_one("#tuning-complexity-threshold", Input).value,
+                    "8",
+                )
+
+                await pilot.press("escape")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsDecisionModal)
+                app.screen.query_one("#settings-decision-cancel").press()
+                await pilot.pause()
+                self.assertIs(app.screen, modal)
+                self.assertEqual(
+                    modal.query_one("#tuning-complexity-threshold", Input).value,
+                    "8",
+                )
+
+                modal.query_one("#modal-close").press()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsDecisionModal)
+                app.screen.query_one("#settings-decision-discard").press()
+                await pilot.pause()
+                self.assertNotIsInstance(app.screen, SettingsModal)
+                self.assertFalse(state["complexity"]["complexity_tax_enabled"])
+                self.assertEqual(state["complexity"]["complexity_threshold"], 6)
                 if app.tui_lock_fd:
                     app.tui_lock_fd.close()
 

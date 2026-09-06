@@ -92,6 +92,8 @@ from core.guard_db import (
     get_audit_log_by_id,
     get_batch_approval_config,
     get_channel_approve_config,
+    get_cloud_judge_config,
+    get_complexity_tax_config,
     get_escalation_approver,
     get_escalation_resolution,
     get_instruction_delivery_config,
@@ -101,6 +103,7 @@ from core.guard_db import (
     get_pending_escalations,
     get_recent_audit_logs,
     get_session_dashboard_summary,
+    get_settings_config,
     group_pending_escalations,
     list_allowlist_rules,
     list_url_allowlist,
@@ -112,10 +115,13 @@ from core.guard_db import (
     set_answer_language,
     set_batch_approval_config,
     set_channel_approve_config,
+    set_complexity_tax_config,
     set_instruction_delivery_config,
+    set_numeric_tuning_config,
     set_origin_weighting_config,
     set_pane_direct_config,
 )
+from core.settings_config import SettingsConflictError, SettingsError
 from tools.schengen_agent_llm import (
     SchengenAgentChat,
     approve_batch_escalations,
@@ -1510,7 +1516,60 @@ class AuditDetailModal(ModalCloseMixin, ModalScreen):
 
 
 
-class SettingsModal(ModalCloseMixin, ModalScreen):
+class SettingsDecisionModal(ModalScreen[str]):
+    """Small settings-only choice dialog used for discard and CAS conflicts."""
+
+    CSS = """
+    SettingsDecisionModal {
+        align: center middle;
+        background: rgba(0, 0, 0, 0.85);
+    }
+    #settings-decision-dialog {
+        width: 64;
+        height: auto;
+        background: $surface-darken-1;
+        border: tall $warning;
+        padding: 1 2;
+    }
+    #settings-decision-message {
+        margin: 1 0;
+    }
+    #settings-decision-actions {
+        height: 3;
+        align-horizontal: right;
+    }
+    #settings-decision-actions > Button {
+        margin-left: 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, title: str, message: str, choices: tuple[tuple[str, str], ...]) -> None:
+        super().__init__()
+        self.title_text = title
+        self.message = message
+        self.choices = choices
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="settings-decision-dialog"):
+            yield Label(self.title_text)
+            yield Static(self.message, id="settings-decision-message")
+            with Horizontal(id="settings-decision-actions"):
+                for choice, label in self.choices:
+                    yield Button(label, id=f"settings-decision-{choice}")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        choice = str(event.button.id or "").removeprefix("settings-decision-")
+        if any(choice == item[0] for item in self.choices):
+            event.stop()
+            self.dismiss(choice)
+
+    def action_cancel(self) -> None:
+        self.dismiss("cancel")
+
+
+class SettingsModal(ModalScreen):
     """Consolidated settings window (^s / F2 / settings button / /config / /settings).
 
     Every control reads from and writes to the EXISTING guard_config setters
@@ -1520,13 +1579,34 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
     Fast-Track) are intentionally absent — see docs/todo/TODO_phase3.md.
     """
 
+    NUMERIC_FIELDS = (
+        "complexity_threshold",
+        "cloud_judge_min_confidence",
+        "human_approval_ttl_seconds",
+        "pane_direct_confirm_polls",
+    )
+    INPUT_IDS = {
+        "complexity_threshold": "tuning-complexity-threshold",
+        "cloud_judge_min_confidence": "tuning-cloud-confidence",
+        "human_approval_ttl_seconds": "tuning-approval-ttl",
+        "pane_direct_confirm_polls": "tuning-pane-polls",
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._numeric_baseline: dict[str, object] = {}
+        self._settings_baseline: dict[str, object] = {}
+        self._loading_numeric = False
+        self._numeric_dirty = False
+        self._external_settings_changed = False
+
     CSS = """
     SettingsModal {
         align: center middle;
         background: rgba(0, 0, 0, 0.85);
     }
     #settings-dialog {
-        width: 64;
+        width: 76;
         max-width: 90%;
         height: auto;
         max-height: 92%;
@@ -1559,6 +1639,25 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
         min-width: 24;
         padding: 0 1;
     }
+    .settings-row > Input {
+        width: 24;
+        height: 3;
+    }
+    .settings-error {
+        height: auto;
+        min-height: 0;
+        color: $error;
+        text-align: right;
+    }
+    #settings-tuning-impact, #settings-external-change, #settings-tax-warning {
+        height: auto;
+        min-height: 0;
+        color: $warning;
+    }
+    #apply-numeric-settings {
+        width: 100%;
+        margin-top: 1;
+    }
     .settings-row > Static {
         width: 24;
         height: 3;
@@ -1574,8 +1673,8 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
     CSS += MODAL_CLOSE_CSS
 
     BINDINGS = [
-        Binding("escape", "app.pop_screen", "Close (ESC)", show=True),
-        Binding("q", "app.pop_screen", "Close (q)", show=False),
+        Binding("escape", "request_close", "Close (ESC)", show=True),
+        Binding("q", "request_close", "Close (q)", show=False),
     ]
 
     def compose(self) -> ComposeResult:
@@ -1610,17 +1709,68 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
             with Horizontal(classes="settings-row"):
                 yield Label("Pane-direct auto-eviction")
                 yield Button("—", id="set-pane-direct")
+            yield Label("🎛 Tuning", classes="settings-category")
+            with Horizontal(classes="settings-row"):
+                yield Label("Complexity tax")
+                yield Button("—", id="set-complexity-tax")
+            yield Static("", id="settings-tax-warning")
+            with Horizontal(classes="settings-row"):
+                yield Label("Complexity threshold [1..10000]")
+                yield Input(id="tuning-complexity-threshold", type="integer")
+            yield Static("", id="tuning-complexity-threshold-error", classes="settings-error")
+            with Horizontal(classes="settings-row"):
+                yield Label("Cloud judge min confidence [0.7..1.0]")
+                yield Input(id="tuning-cloud-confidence", type="number")
+            yield Static("", id="tuning-cloud-confidence-error", classes="settings-error")
+            with Horizontal(classes="settings-row"):
+                yield Label("Human approval TTL seconds [60..86400]")
+                yield Input(id="tuning-approval-ttl", type="integer")
+            yield Static("", id="tuning-approval-ttl-error", classes="settings-error")
+            with Horizontal(classes="settings-row"):
+                yield Label("Pane-direct confirm polls [1..5]")
+                yield Input(id="tuning-pane-polls", type="integer")
+            yield Static("", id="tuning-pane-polls-error", classes="settings-error")
+            yield Static("", id="settings-external-change")
+            yield Static("", id="settings-tuning-impact")
+            yield Button("Apply numeric settings", id="apply-numeric-settings", disabled=True)
             yield Label("🗣️ Answer Language", classes="settings-category")
             with RadioSet(id="settings-lang-set"):
                 yield RadioButton("English", id="lang-english")
                 yield RadioButton("한국어", id="lang-korean", value=True)
                 yield RadioButton("日本語", id="lang-japanese")
-            yield Label("[dim]Changes apply immediately · ESC / q closes · ^s or F2 reopens[/]", id="settings-help")
+            yield Label("[dim]Toggles apply immediately · numeric drafts require Apply · ESC / q closes[/]", id="settings-help")
 
     def on_mount(self) -> None:
-        self._refresh()
+        self._refresh(refresh_numeric=True)
+        self.set_interval(1.0, self._poll_external_settings)
 
-    def _refresh(self) -> None:
+    def _read_numeric_values(
+        self, settings: Optional[dict[str, object]] = None
+    ) -> dict[str, object]:
+        current = settings if settings is not None else get_settings_config()
+        return {name: current[name] for name in self.NUMERIC_FIELDS}
+
+    def _load_numeric_values(
+        self,
+        values: dict[str, object],
+        *,
+        settings_baseline: Optional[dict[str, object]] = None,
+    ) -> None:
+        self._loading_numeric = True
+        try:
+            for name, value in values.items():
+                self.query_one(f"#{self.INPUT_IDS[name]}", Input).value = str(value)
+        finally:
+            self._loading_numeric = False
+        self._numeric_baseline = dict(values)
+        if settings_baseline is not None:
+            self._settings_baseline = dict(settings_baseline)
+        self._numeric_dirty = False
+        self._external_settings_changed = False
+        self.query_one("#settings-external-change", Static).update("")
+        self._validate_numeric_drafts()
+
+    def _refresh(self, *, refresh_numeric: bool = False) -> None:
         """Re-read live config and daemon state into the modal controls."""
         app = getattr(self, "app", None)
         try:
@@ -1654,8 +1804,9 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
             pass
         # automation toggles (existing guard_config keys, human-only setters)
         try:
+            batch_cfg = get_batch_approval_config()
             self.query_one("#set-batch-approval", Button).label = (
-                "Batch Approval: ON" if get_batch_approval_config().get("batch_approval_enabled", True) else "Batch Approval: OFF"
+                "Batch Approval: ON" if batch_cfg.get("batch_approval_enabled", True) else "Batch Approval: OFF"
             )
         except Exception:
             pass
@@ -1666,11 +1817,37 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
         except Exception:
             pass
         try:
+            pane_cfg = get_pane_direct_config()
+            pane_enabled = pane_cfg.get("pane_direct_eviction_enabled", True)
             self.query_one("#set-pane-direct", Button).label = (
-                "Pane-Direct: ON" if get_pane_direct_config().get("pane_direct_eviction_enabled", True) else "Pane-Direct: OFF"
+                "Pane-Direct: ON" if pane_enabled else "Pane-Direct: OFF"
+            )
+            self.query_one("#tuning-pane-polls", Input).disabled = not pane_enabled
+        except Exception:
+            pass
+        try:
+            complexity_cfg = get_complexity_tax_config()
+            tax_enabled = complexity_cfg.get("complexity_tax_enabled", True)
+            self.query_one("#set-complexity-tax", Button).label = (
+                "Complexity Tax: ON" if tax_enabled else "Complexity Tax: OFF"
+            )
+            self.query_one("#tuning-complexity-threshold", Input).disabled = not tax_enabled
+            self.query_one("#settings-tax-warning", Static).update(
+                "[bold yellow]⚠ Complexity Tax OFF reduces scrutiny.[/]" if not tax_enabled else ""
             )
         except Exception:
             pass
+        if refresh_numeric:
+            try:
+                settings = get_settings_config()
+                self._load_numeric_values(
+                    self._read_numeric_values(settings),
+                    settings_baseline=settings,
+                )
+            except Exception as exc:
+                self.query_one("#settings-external-change", Static).update(
+                    f"[red]Unable to load tuning settings: {rich_escape(exc)}[/]"
+                )
         # language radios
         try:
             lang = get_answer_language()
@@ -1680,6 +1857,167 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
                 btn.value = True
         except Exception:
             pass
+
+    @staticmethod
+    def _parse_numeric_value(name: str, text: str) -> object:
+        messages = {
+            "complexity_threshold": "Enter an integer from 1 to 10000.",
+            "cloud_judge_min_confidence": "Enter a finite number from 0.7 to 1.0.",
+            "human_approval_ttl_seconds": "Enter integer seconds from 60 to 86400.",
+            "pane_direct_confirm_polls": "Enter an integer from 1 to 5.",
+        }
+        try:
+            value = json.loads(text.strip())
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(messages[name]) from exc
+        if name == "cloud_judge_min_confidence":
+            valid = type(value) in (int, float) and value == value and value not in (float("inf"), float("-inf"))
+            valid = valid and 0.7 <= float(value) <= 1.0
+            if valid:
+                return float(value)
+        else:
+            ranges = {
+                "complexity_threshold": (1, 10000),
+                "human_approval_ttl_seconds": (60, 86400),
+                "pane_direct_confirm_polls": (1, 5),
+            }
+            low, high = ranges[name]
+            if type(value) is int and low <= value <= high:
+                return value
+        raise ValueError(messages[name])
+
+    def _validate_numeric_drafts(self) -> tuple[dict[str, object], dict[str, str]]:
+        values: dict[str, object] = {}
+        errors: dict[str, str] = {}
+        for name in self.NUMERIC_FIELDS:
+            input_id = self.INPUT_IDS[name]
+            try:
+                values[name] = self._parse_numeric_value(
+                    name, self.query_one(f"#{input_id}", Input).value
+                )
+                message = ""
+            except ValueError as exc:
+                errors[name] = str(exc)
+                message = str(exc)
+            self.query_one(f"#{input_id}-error", Static).update(message)
+
+        self._numeric_dirty = bool(self._numeric_baseline) and any(
+            values.get(name) != self._numeric_baseline.get(name) for name in self.NUMERIC_FIELDS
+        )
+        self.query_one("#apply-numeric-settings", Button).disabled = bool(errors) or not self._numeric_dirty
+        self.query_one("#settings-tuning-impact", Static).update(
+            self._format_tuning_impact(values) if not errors else ""
+        )
+        return values, errors
+
+    def _format_tuning_impact(self, values: dict[str, object]) -> str:
+        descriptions = {
+            "complexity_threshold": ("Complexity threshold", "scrutiny"),
+            "cloud_judge_min_confidence": ("Cloud confidence", "approval bar"),
+            "human_approval_ttl_seconds": ("Approval TTL", "approval-memory window"),
+            "pane_direct_confirm_polls": ("Pane-direct polls", "liveness wait"),
+        }
+        lines = []
+        for name in self.NUMERIC_FIELDS:
+            old = self._numeric_baseline.get(name)
+            new = values.get(name)
+            if old is None or new is None or old == new:
+                continue
+            label, effect = descriptions[name]
+            direction = "↑" if new > old else "↓"
+            risk_direction = (
+                "↓" if direction == "↑" else "↑"
+            ) if name == "complexity_threshold" else direction
+            lines.append(f"{label}: {old} → {new} · {effect} {risk_direction}")
+        return "\n".join(lines)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if not self._loading_numeric and event.input.id in self.INPUT_IDS.values():
+            self._validate_numeric_drafts()
+
+    def _poll_external_settings(self) -> None:
+        try:
+            current_settings = get_settings_config()
+            current = self._read_numeric_values(current_settings)
+            self._refresh()
+        except Exception as exc:
+            self.query_one("#settings-external-change", Static).update(
+                f"[red]Settings reload failed: {rich_escape(exc)}[/]"
+            )
+            return
+        if current_settings == self._settings_baseline:
+            return
+        if self._numeric_dirty:
+            self._external_settings_changed = True
+            self.query_one("#settings-external-change", Static).update(
+                "[yellow]⚠ settings.json changed externally; Apply will check for conflicts.[/]"
+            )
+        else:
+            self._load_numeric_values(current, settings_baseline=current_settings)
+
+    def _apply_numeric_settings(self, *, force: bool = False) -> None:
+        values, errors = self._validate_numeric_drafts()
+        if errors:
+            return
+        try:
+            set_numeric_tuning_config(
+                complexity_threshold=int(values["complexity_threshold"]),
+                cloud_judge_min_confidence=float(values["cloud_judge_min_confidence"]),
+                human_approval_ttl_seconds=int(values["human_approval_ttl_seconds"]),
+                pane_direct_confirm_polls=int(values["pane_direct_confirm_polls"]),
+                expected=dict(self._numeric_baseline),
+                force=force,
+            )
+        except SettingsConflictError as exc:
+            self._conflict_settings = exc.current.to_dict()
+            self._conflict_values = self._read_numeric_values(self._conflict_settings)
+            self._external_settings_changed = True
+            self.app.push_screen(
+                SettingsDecisionModal(
+                    "[bold yellow]Settings changed externally[/]",
+                    "Reload the latest numeric values, overwrite them with all visible drafts, or keep editing.",
+                    (("reload", "Reload"), ("overwrite", "Overwrite"), ("cancel", "Cancel")),
+                ),
+                self._handle_conflict_choice,
+            )
+            return
+        except (OSError, SettingsError, ValueError) as exc:
+            self.query_one("#settings-external-change", Static).update(
+                f"[red]Settings were not written: {rich_escape(exc)}[/]"
+            )
+            return
+        self._refresh(refresh_numeric=True)
+        self.app.notify("Numeric settings applied.")
+
+    def _handle_conflict_choice(self, choice: Optional[str]) -> None:
+        if choice == "reload":
+            self._load_numeric_values(
+                self._conflict_values,
+                settings_baseline=self._conflict_settings,
+            )
+            self._refresh()
+        elif choice == "overwrite":
+            self._apply_numeric_settings(force=True)
+
+    def action_request_close(self) -> None:
+        self._request_close()
+
+    def _request_close(self) -> None:
+        if not self._numeric_dirty:
+            self.dismiss()
+            return
+        self.app.push_screen(
+            SettingsDecisionModal(
+                "[bold yellow]Discard numeric drafts?[/]",
+                "Immediate toggles are already saved and will not be reverted.",
+                (("discard", "Discard"), ("cancel", "Keep editing")),
+            ),
+            self._handle_discard_choice,
+        )
+
+    def _handle_discard_choice(self, choice: Optional[str]) -> None:
+        if choice == "discard":
+            self.dismiss()
 
     def _notify_app(self) -> None:
         """Sync the first-screen status card after a change.
@@ -1696,10 +2034,16 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
         except Exception:
             pass
 
+    def _record_immediate_change(self, name: str, value: object) -> None:
+        if self._settings_baseline:
+            self._settings_baseline[name] = value
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         bid = getattr(event.button, "id", None)
         if bid == "modal-close":
-            return  # ModalCloseMixin's handler (MRO) pops the screen once
+            event.stop()
+            self._request_close()
+            return
         app = getattr(self, "app", None)
         if bid == "set-guard-daemon":
             if app is not None and hasattr(app, "toggle_guard_daemon"):
@@ -1710,21 +2054,41 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
                     pass
         elif bid == "set-approve-instr":
             cfg = get_instruction_delivery_config()
-            set_instruction_delivery_config(send_approve_instruction=not cfg.get("send_approve_instruction", False))
+            value = not cfg.get("send_approve_instruction", False)
+            set_instruction_delivery_config(send_approve_instruction=value)
+            self._record_immediate_change("send_approve_instruction", value)
         elif bid == "set-reject-instr":
             cfg = get_instruction_delivery_config()
-            set_instruction_delivery_config(send_reject_instruction=not cfg.get("send_reject_instruction", True))
+            value = not cfg.get("send_reject_instruction", True)
+            set_instruction_delivery_config(send_reject_instruction=value)
+            self._record_immediate_change("send_reject_instruction", value)
         elif bid == "set-channel-approve":
-            set_channel_approve_config(not get_channel_approve_config())
+            value = not get_channel_approve_config()
+            set_channel_approve_config(value)
+            self._record_immediate_change("channel_approve", value)
         elif bid == "set-batch-approval":
             cfg = get_batch_approval_config()
-            set_batch_approval_config(enabled=not cfg.get("batch_approval_enabled", True))
+            value = not cfg.get("batch_approval_enabled", True)
+            set_batch_approval_config(enabled=value)
+            self._record_immediate_change("batch_approval_enabled", value)
         elif bid == "set-origin-weighting":
             cfg = get_origin_weighting_config()
-            set_origin_weighting_config(enabled=not cfg.get("origin_weighting_enabled", True))
+            value = not cfg.get("origin_weighting_enabled", True)
+            set_origin_weighting_config(enabled=value)
+            self._record_immediate_change("origin_weighting_enabled", value)
         elif bid == "set-pane-direct":
             cfg = get_pane_direct_config()
-            set_pane_direct_config(enabled=not cfg.get("pane_direct_eviction_enabled", True))
+            value = not cfg.get("pane_direct_eviction_enabled", True)
+            set_pane_direct_config(enabled=value)
+            self._record_immediate_change("pane_direct_eviction_enabled", value)
+        elif bid == "set-complexity-tax":
+            cfg = get_complexity_tax_config()
+            value = not cfg.get("complexity_tax_enabled", True)
+            set_complexity_tax_config(enabled=value)
+            self._record_immediate_change("complexity_tax_enabled", value)
+        elif bid == "apply-numeric-settings":
+            self._apply_numeric_settings()
+            return
         else:
             return
         self._refresh()
@@ -1735,7 +2099,8 @@ class SettingsModal(ModalCloseMixin, ModalScreen):
         if not lang:
             return
         event.stop()  # the app-level handler targets the sidebar RadioSet
-        set_answer_language(lang)
+        lang = set_answer_language(lang)
+        self._record_immediate_change("answer_language", lang)
         self._refresh()
         self._notify_app()
 

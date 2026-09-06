@@ -21,6 +21,7 @@ import core.settings_config as settings_config
 from core.settings_config import (
     DEFAULT_SETTINGS,
     SETTINGS_KEYS,
+    SettingsConflictError,
     SettingsError,
     SettingsResolver,
     atomic_write,
@@ -219,6 +220,78 @@ class TestSettingsLifecycle(ResolverTestCase):
         self.assertTrue(final.channel_approve)
         self.assertEqual(final.complexity_threshold, 42)
 
+    def test_compare_and_update_conflict_is_zero_write_and_reports_current(self):
+        initial = validate_settings({**DEFAULT_SETTINGS.to_dict(), "complexity_threshold": 10})
+        external = validate_settings({
+            **initial.to_dict(),
+            "complexity_threshold": 11,
+            "channel_approve": True,
+        })
+        atomic_write(self.settings_path, external)
+        resolver = self.resolver()
+        before = self.settings_path.read_bytes()
+
+        with self.assertRaises(SettingsConflictError) as raised:
+            resolver.compare_and_update(
+                {"complexity_threshold": 12},
+                {"complexity_threshold": 10},
+                lambda: DEFAULT_SETTINGS.to_dict(),
+            )
+
+        self.assertEqual(raised.exception.fields, ("complexity_threshold",))
+        self.assertEqual(raised.exception.current, external)
+        self.assertEqual(self.settings_path.read_bytes(), before)
+
+    def test_compare_and_update_rejects_invalid_or_unsafe_canonical_without_repair(self):
+        cases = (
+            ("malformed", "{broken", 0o600),
+            ("peer-writable", json.dumps(DEFAULT_SETTINGS.to_dict()), 0o660),
+        )
+        for label, document, mode in cases:
+            with self.subTest(label=label):
+                self.write_raw(self.settings_path, document, mode=mode)
+                before = self.settings_path.read_bytes()
+                before_mode = self.settings_path.stat().st_mode & 0o777
+
+                with self.assertRaises(SettingsError):
+                    self.resolver().compare_and_update(
+                        {"complexity_threshold": 12},
+                        {"complexity_threshold": 6},
+                        lambda: DEFAULT_SETTINGS.to_dict(),
+                    )
+
+                self.assertEqual(self.settings_path.read_bytes(), before)
+                self.assertEqual(self.settings_path.stat().st_mode & 0o777, before_mode)
+                self.assertFalse(self.recovery_path.exists())
+
+    def test_compare_and_update_force_uses_latest_document(self):
+        current = validate_settings({
+            **DEFAULT_SETTINGS.to_dict(),
+            "complexity_threshold": 11,
+            "channel_approve": True,
+        })
+        atomic_write(self.settings_path, current)
+
+        updated = self.resolver().compare_and_update(
+            {"complexity_threshold": 12},
+            {"complexity_threshold": 10},
+            lambda: DEFAULT_SETTINGS.to_dict(),
+            force=True,
+        )
+
+        self.assertEqual(updated.complexity_threshold, 12)
+        self.assertTrue(updated.channel_approve)
+        self.assertEqual(read_trusted(self.settings_path), updated)
+
+    def test_compare_and_update_requires_matching_expected_fields(self):
+        atomic_write(self.settings_path, DEFAULT_SETTINGS)
+        with self.assertRaises(SettingsError):
+            self.resolver().compare_and_update(
+                {"complexity_threshold": 12},
+                {},
+                lambda: DEFAULT_SETTINGS.to_dict(),
+            )
+
 
 class TestSettingsTrust(ResolverTestCase):
     def test_symlink_nonregular_wrong_owner_and_peer_writable_are_rejected(self):
@@ -323,6 +396,41 @@ class TestGuardDbSettingsCompatibility(unittest.TestCase):
         self.assertEqual(guard_db.get_cloud_judge_config()["cloud_judge_min_confidence"], 0.75)
         self.assertEqual(guard_db.get_batch_approval_config()["human_approval_ttl_seconds"], 7200)
         self.assertEqual(guard_db.get_pane_direct_config()["pane_direct_confirm_polls"], 5)
+
+    def test_numeric_tuning_bulk_update_detects_conflict_and_preserves_unrelated(self):
+        settings_path, _ = guard_db._settings_storage_paths()
+        baseline = {
+            "complexity_threshold": 6,
+            "cloud_judge_min_confidence": 0.9,
+            "human_approval_ttl_seconds": 3600,
+            "pane_direct_confirm_polls": 2,
+        }
+        guard_db.get_complexity_tax_config()
+        guard_db.set_channel_approve_config(True)
+        guard_db.set_complexity_tax_config(threshold=7)
+
+        with self.assertRaises(SettingsConflictError):
+            guard_db.set_numeric_tuning_config(
+                complexity_threshold=8,
+                cloud_judge_min_confidence=0.8,
+                human_approval_ttl_seconds=7200,
+                pane_direct_confirm_polls=3,
+                expected=baseline,
+            )
+        self.assertEqual(read_trusted(settings_path).complexity_threshold, 7)
+
+        result = guard_db.set_numeric_tuning_config(
+            complexity_threshold=8,
+            cloud_judge_min_confidence=0.8,
+            human_approval_ttl_seconds=7200,
+            pane_direct_confirm_polls=3,
+            expected=baseline,
+            force=True,
+        )
+        self.assertEqual(result["complexity_threshold"], 8)
+        document = read_trusted(settings_path)
+        self.assertTrue(document.channel_approve)
+        self.assertEqual(document.pane_direct_confirm_polls, 3)
 
     def test_patched_database_uses_injected_storage_not_operator_home(self):
         with patch.object(

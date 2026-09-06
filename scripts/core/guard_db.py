@@ -1341,6 +1341,46 @@ def _update_settings(**changes):
     return _get_settings_resolver().update(changes, _legacy_settings_snapshot)
 
 
+def get_settings_config() -> dict[str, object]:
+    """Return one complete canonical settings snapshot for read-only UI comparison."""
+    return _settings_snapshot().to_dict()
+
+
+_NUMERIC_TUNING_FIELDS = (
+    "complexity_threshold",
+    "cloud_judge_min_confidence",
+    "human_approval_ttl_seconds",
+    "pane_direct_confirm_polls",
+)
+
+
+def set_numeric_tuning_config(
+    *,
+    complexity_threshold: int,
+    cloud_judge_min_confidence: float,
+    human_approval_ttl_seconds: int,
+    pane_direct_confirm_polls: int,
+    expected: dict[str, object],
+    force: bool = False,
+) -> dict[str, object]:
+    """Human-only atomic compare-and-update for SettingsModal numeric drafts."""
+    changes = {
+        "complexity_threshold": complexity_threshold,
+        "cloud_judge_min_confidence": cloud_judge_min_confidence,
+        "human_approval_ttl_seconds": human_approval_ttl_seconds,
+        "pane_direct_confirm_polls": pane_direct_confirm_polls,
+    }
+    if set(expected) != set(_NUMERIC_TUNING_FIELDS):
+        raise ValueError("expected must contain every numeric tuning field")
+    snapshot = _get_settings_resolver().compare_and_update(
+        changes,
+        expected,
+        _legacy_settings_snapshot,
+        force=force,
+    )
+    return {name: getattr(snapshot, name) for name in _NUMERIC_TUNING_FIELDS}
+
+
 def get_instruction_delivery_config() -> dict[str, bool]:
     """Return the instruction-delivery config: whether to send the gatekeeper
     feedback (instruction) to the target pane on approve/reject.

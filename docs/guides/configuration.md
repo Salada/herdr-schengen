@@ -85,10 +85,23 @@ later valid repair without changing the invalid file.
 On first use when the file is absent, legacy `guard_config` SQLite values are
 validated, merged with compiled defaults, and exported once as a complete
 mode-`0600` document. SQLite is not consulted after the canonical file exists.
-Every SettingsModal change takes a cross-process lock and atomically replaces
-the same complete document, so concurrent changes to different fields are
-preserved. The current Modal exposes seven values; the other five remain
-directly file-configurable.
+SettingsModal exposes all 12 settings. Its eight boolean/language controls
+apply immediately. The four numeric controls are validated as one draft group
+and use one explicit **Apply numeric settings** action; an invalid field writes
+nothing. The preview shows each old-to-new value and whether the change raises
+or lowers scrutiny, the approval bar, the approval-memory window, or the
+pane-direct liveness wait. Disabling Complexity Tax or Pane-Direct eviction
+disables its dependent numeric input without discarding that draft.
+
+Every SettingsModal write takes a cross-process lock and atomically replaces
+the same complete document, so unrelated concurrent changes are preserved.
+The grouped numeric write additionally compares its four baseline values while
+holding that lock. A concurrent numeric change writes nothing and offers
+**Reload**, **Overwrite**, or **Cancel**; overwrite applies all four visible
+drafts to the newest trusted complete document. Closing a dirty Modal asks
+before discarding numeric drafts, while already-applied immediate controls are
+not reverted. Valid external changes refresh clean drafts automatically;
+dirty drafts are retained and marked as externally changed.
 
 The recovery-only snapshot is
 `~/.local/state/herdr-schengen/settings.last-good.json`. It is atomically
