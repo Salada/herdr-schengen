@@ -29,8 +29,8 @@ the documented defaults.
 | `GUARD_REASONING_EFFORT` | `low` | Reasoning-effort tier for the cloud judge. |
 | `SCHENGEN_INSPECTOR_API_KEY` / `SCHENGEN_INSPECTOR_BASE_URL` / `SCHENGEN_INSPECTOR_MODEL` | shared key/url / `gpt-5.6-luna` | TUI Inspector phase (tool-calling subagent). |
 | `SCHENGEN_JUDGE_API_KEY` / `SCHENGEN_JUDGE_BASE_URL` / `SCHENGEN_JUDGE_MODEL` | shared key/url / `gpt-5.6-luna` | TUI Judge phase (final adjudication). |
-| `SCHENGEN_INSPECTOR_MAX_TOKENS` | `800` | Inspector completion ceiling. ASCII decimal integer `64..4096`; invalid values fall back to the default. |
-| `SCHENGEN_JUDGE_MAX_TOKENS` | `600` | Judge completion ceiling. ASCII decimal integer `64..4096`; invalid values fall back to the default. |
+| `SCHENGEN_INSPECTOR_MAX_TOKENS` | `4096` | Inspector completion ceiling. ASCII decimal integer `64..4096`; invalid values fall back to the default. |
+| `SCHENGEN_JUDGE_MAX_TOKENS` | `4096` | Judge completion ceiling. ASCII decimal integer `64..4096`; invalid values fall back to the default. |
 | `SCHENGEN_LLM_PROVIDER` | `openai` | Logical provider selector. **Note**: no code reads this variable today — provider routing is performed via `OPENAI_BASE_URL` (ADR-011). |
 | `OPENCODE_MODEL` / `OPENCODE_SUBAGENT_MODEL` | unset | Model overrides for the OpenCode host runtime adapter. |
 
