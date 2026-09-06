@@ -9,22 +9,21 @@ from pathlib import Path
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
+from core.cloud_judge import resolve_guard_llm_config
 from core.security_evaluator import audit_dynamic_substitution_with_llm
 
 SKIP_CI_REASON = "Live LLM integration tests require OPENAI_API_KEY / endpoint and are skipped by default in CI."
 
 
 @unittest.skipIf(
-    os.environ.get("CI", "").lower() in ("true", "1") or not os.environ.get("RUN_LIVE_LLM_TESTS"),
+    os.environ.get("RUN_LIVE_LLM_TESTS") != "1",
     SKIP_CI_REASON,
 )
 class TestLLMEvaluatorIntegration(unittest.TestCase):
     """Integration test suite for LLM Dynamic Substitution Tool-Calling Inspector."""
 
     def setUp(self):
-        self.endpoint = os.environ.get("GUARD_LLM_ENDPOINT")
-        self.model = os.environ.get("GUARD_LLM_MODEL")
-        self.api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("GUARD_LLM_API_KEY") or ""
+        self.endpoint, self.model, self.api_key = resolve_guard_llm_config()
 
         if not self.endpoint or not self.model or not self.api_key:
             self.skipTest("Live LLM credentials not configured in environment.")
