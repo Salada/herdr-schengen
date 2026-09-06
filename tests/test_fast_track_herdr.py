@@ -16,6 +16,7 @@ class TestHerdrQueryFastTrack(unittest.TestCase):
         safe, reason, layer = audit_shell_command(command)
         self.assertTrue(safe, f"Expected fast-track for {command!r}: {reason}")
         self.assertEqual(layer, DecisionLayer.FAST_TRACK_AST)
+        self.assertEqual(reason, "Fast-track verified safe Herdr CLI query")
 
     def assertNotFastTrack(self, command):
         safe, reason, layer = audit_shell_command(command)
