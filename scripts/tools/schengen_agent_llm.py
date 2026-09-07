@@ -1206,7 +1206,7 @@ def _find_by_name(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> st
         return _redacted_json({"error": "Hidden or sensitive basename access denied"})
 
     entry_type = args.get("entry_type", "any")
-    if entry_type not in {"any", "file", "directory"}:
+    if not isinstance(entry_type, str) or entry_type not in {"any", "file", "directory"}:
         return _redacted_json({"error": "entry_type must be any, file, or directory"})
 
     raw_relative = args.get("relative_path", ".")

@@ -380,6 +380,18 @@ class TestFindByName(unittest.TestCase):
         file_start = self._find({"name": "target.bin", "relative_path": "src/target.bin"})
         self.assertIn("without following symlinks", file_start["error"])
 
+    def test_non_string_entry_type_is_structured_error_before_traversal(self):
+        for entry_type in ([], {}):
+            with self.subTest(entry_type=entry_type), patch(
+                "tools.schengen_agent_llm.subprocess.run"
+            ) as run, patch("tools.schengen_agent_llm.os.open") as open_directory:
+                result = json.loads(execute_tool_call(
+                    "find_by_name", {"name": "target.bin", "entry_type": entry_type}, context=self.context,
+                ))
+                self.assertIn("entry_type", result["error"])
+                run.assert_not_called()
+                open_directory.assert_not_called()
+
     def test_rejects_invalid_hidden_sensitive_and_external_inputs(self):
         invalid_names = ["", ".", "..", "a/b", ".hidden", "credentials.json", "x" * 256]
         for name in invalid_names:
