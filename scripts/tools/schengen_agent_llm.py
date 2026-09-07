@@ -132,6 +132,11 @@ COMPACTION_TOOL_RESULT_THRESHOLD = 1_000
 COMPACTION_HEAD_EXCERPT_CHARS = 300
 COMPACTION_TAIL_EXCERPT_CHARS = 300
 
+FIND_BY_NAME_MAX_DEPTH = 16
+FIND_BY_NAME_MAX_ENTRIES = 10_000
+FIND_BY_NAME_MAX_MATCHES = 50
+INVESTIGATION_TIMEOUT_SECONDS = 5.0
+
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_INSPECTOR_MAX_TOKENS = 4096
@@ -406,6 +411,51 @@ GUARD_TOOLS = [
                     },
                 },
                 "required": ["relative_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_by_name",
+            "description": "Find one exact basename in a bounded portion of the active escalation's Git worktree without following symlinks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact case-sensitive basename to find; glob and regular-expression matching are unsupported.",
+                        "minLength": 1,
+                        "maxLength": 255,
+                    },
+                    "relative_path": {
+                        "type": "string",
+                        "description": "Optional directory relative to the active Git worktree root.",
+                        "default": ".",
+                        "maxLength": 1024,
+                    },
+                    "entry_type": {
+                        "type": "string",
+                        "description": "Restrict matches to files or directories (default: any).",
+                        "enum": ["any", "file", "directory"],
+                        "default": "any",
+                    },
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_diff_stat",
+            "description": "Summarize changed-file counts and line totals for the active escalation's Git worktree without returning diff content.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
             },
         },
     },
@@ -1120,6 +1170,282 @@ def _view_file_slice(args: Dict[str, Any], context: Optional[Dict[str, Any]]) ->
     return result
 
 
+def _open_repository_directory(repo_root: Path, raw_relative: str) -> int:
+    """Open a repository-relative directory without following any path symlink."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(repo_root, flags)
+    try:
+        for part in Path(raw_relative or ".").parts:
+            if part in {"", "."}:
+                continue
+            child_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise NotADirectoryError(raw_relative)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _find_by_name(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
+    if set(args) - {"name", "relative_path", "entry_type"}:
+        return _redacted_json({"error": "find_by_name received an unsupported argument"})
+    name = args.get("name")
+    if (
+        not isinstance(name, str)
+        or not name
+        or len(name) > 255
+        or name in {".", ".."}
+        or "/" in name
+        or "\x00" in name
+    ):
+        return _redacted_json({"error": "name must be one exact basename of 1 to 255 characters"})
+    if name.startswith(".") or _is_sensitive_target(name):
+        return _redacted_json({"error": "Hidden or sensitive basename access denied"})
+
+    entry_type = args.get("entry_type", "any")
+    if entry_type not in {"any", "file", "directory"}:
+        return _redacted_json({"error": "entry_type must be any, file, or directory"})
+
+    raw_relative = args.get("relative_path", ".")
+    repo_root, _target, error = _resolve_repository_target(raw_relative, context)
+    if error or repo_root is None:
+        return _redacted_json({"error": error or "Repository target unavailable"})
+
+    state: Dict[str, Any] = {
+        "visited_entries": 0,
+        "hidden_paths_omitted": 0,
+        "sensitive_paths_omitted": 0,
+        "symlinks_omitted": 0,
+        "truncated": False,
+    }
+    matches: List[Dict[str, str]] = []
+    deadline = time.monotonic() + INVESTIGATION_TIMEOUT_SECONDS
+    start_relative = Path(raw_relative or ".")
+
+    def result_payload() -> Dict[str, Any]:
+        return {
+            "name": name,
+            "relative_path": raw_relative or ".",
+            "entry_type": entry_type,
+            "matches": matches,
+            "match_count": len(matches),
+            **state,
+            "completion_state": "truncated" if state["truncated"] else "complete",
+        }
+
+    def walk(directory_fd: int, relative: Path, depth: int) -> bool:
+        if time.monotonic() >= deadline:
+            state["truncated"] = True
+            return True
+        with os.scandir(directory_fd) as scan:
+            entries = sorted(scan, key=lambda item: item.name)
+        for entry in entries:
+            if time.monotonic() >= deadline or state["visited_entries"] >= FIND_BY_NAME_MAX_ENTRIES:
+                state["truncated"] = True
+                return True
+            state["visited_entries"] += 1
+            if entry.name.startswith("."):
+                state["hidden_paths_omitted"] += 1
+                continue
+
+            display = relative / entry.name
+            display_text = display.as_posix()
+            if _is_sensitive_target(entry.name) or _is_sensitive_target(display_text):
+                state["sensitive_paths_omitted"] += 1
+                continue
+            if entry.is_symlink():
+                state["symlinks_omitted"] += 1
+                continue
+
+            mode = entry.stat(follow_symlinks=False).st_mode
+            kind = "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "other"
+            if entry.name == name and (entry_type == "any" or entry_type == kind):
+                record = {"path": display_text, "entry_type": kind}
+                if len(matches) >= FIND_BY_NAME_MAX_MATCHES:
+                    state["truncated"] = True
+                    return True
+                matches.append(record)
+                if len(_redacted_json(result_payload())) > 4000:
+                    matches.pop()
+                    state["truncated"] = True
+                    return True
+
+            if kind == "directory":
+                if depth >= FIND_BY_NAME_MAX_DEPTH:
+                    state["truncated"] = True
+                    continue
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                child_fd = os.open(entry.name, flags, dir_fd=directory_fd)
+                try:
+                    if walk(child_fd, display, depth + 1):
+                        return True
+                finally:
+                    os.close(child_fd)
+        return False
+
+    directory_fd = -1
+    try:
+        directory_fd = _open_repository_directory(repo_root, str(raw_relative or "."))
+        walk(directory_fd, start_relative, 0)
+    except OSError:
+        return _redacted_json({"error": "Repository path could not be traversed without following symlinks"})
+    finally:
+        if directory_fd >= 0:
+            os.close(directory_fd)
+
+    result = _redacted_json(result_payload())
+    if len(result) > 4000:
+        return _redacted_json({"error": "find_by_name output exceeded the safe bound"})
+    return result
+
+
+def _git_diff_stat(args: Dict[str, Any], context: Optional[Dict[str, Any]]) -> str:
+    if args:
+        return _redacted_json({"error": "git_diff_stat accepts no arguments"})
+
+    repo_root, _target, error = _resolve_repository_target(".", context)
+    if error or repo_root is None:
+        return _redacted_json({"error": error or "Repository target unavailable"})
+
+    env = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "LC_ALL": "C",
+        "LANG": "C",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PAGER": "cat",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    }
+    base = [
+        "git", "--no-optional-locks",
+        "-c", "core.fsmonitor=false",
+        "-c", "submodule.recurse=false",
+        "-C", str(repo_root),
+    ]
+    commands = [
+        [*base, "status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=all", "--no-renames"],
+        [*base, "diff", "--no-ext-diff", "--no-textconv", "--numstat", "--no-renames", "--ignore-submodules=all", "-z", "HEAD", "--"],
+    ]
+    try:
+        status_result, diff_result = [
+            subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                shell=False,
+                timeout=INVESTIGATION_TIMEOUT_SECONDS,
+                env=env,
+            )
+            for command in commands
+        ]
+    except FileNotFoundError:
+        return _redacted_json({"error": "required executable unavailable"})
+    except subprocess.TimeoutExpired:
+        return _redacted_json({"error": "git_diff_stat timed out"})
+    except (OSError, ValueError) as exc:
+        return _redacted_json({"error": str(exc)})
+
+    for label, completed in (("git status", status_result), ("git diff", diff_result)):
+        if completed.returncode != 0:
+            stderr = completed.stderr.decode("utf-8", "replace") if isinstance(completed.stderr, bytes) else str(completed.stderr or "")
+            detail = redact_for_cloud(stderr.strip() or f"{label} failed")[:500]
+            return _redacted_json({"error": detail})
+
+    def output_bytes(value: Any) -> bytes:
+        return value if isinstance(value, bytes) else str(value or "").encode("utf-8", "surrogateescape")
+
+    status_output = output_bytes(status_result.stdout)
+    diff_output = output_bytes(diff_result.stdout)
+    if (status_output and not status_output.endswith(b"\0")) or (diff_output and not diff_output.endswith(b"\0")):
+        return _redacted_json({"error": "Malformed Git metadata output"})
+
+    statuses: Dict[str, str] = {}
+    staged_count = unstaged_count = untracked_count = 0
+    records = status_output.split(b"\0")[:-1] if status_output else []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        if len(record) < 4 or record[2:3] != b" ":
+            return _redacted_json({"error": "Malformed git status output"})
+        code = record[:2].decode("ascii", "replace")
+        path = record[3:].decode("utf-8", "replace")
+        if not path:
+            return _redacted_json({"error": "Malformed git status output"})
+        statuses[path] = code
+        if code == "??":
+            untracked_count += 1
+        else:
+            staged_count += int(code[0] not in {" ", "?", "!"})
+            unstaged_count += int(code[1] not in {" ", "?", "!"})
+        if "R" in code or "C" in code:
+            index += 1
+            if index >= len(records) or not records[index]:
+                return _redacted_json({"error": "Malformed git status rename output"})
+        index += 1
+
+    stats_by_path: Dict[str, Dict[str, Any]] = {}
+    additions = deletions = binary_files = 0
+    for record in diff_output.split(b"\0")[:-1] if diff_output else []:
+        fields = record.split(b"\t", 2)
+        if len(fields) != 3:
+            return _redacted_json({"error": "Malformed git diff output"})
+        added, deleted, raw_path = fields
+        path = raw_path.decode("utf-8", "replace")
+        if not path:
+            return _redacted_json({"error": "Malformed git diff output"})
+        if added == b"-" and deleted == b"-":
+            binary_files += 1
+            stats_by_path[path] = {"binary": True}
+            continue
+        if not added.isdigit() or not deleted.isdigit():
+            return _redacted_json({"error": "Malformed git diff output"})
+        added_count, deleted_count = int(added), int(deleted)
+        additions += added_count
+        deletions += deleted_count
+        stats_by_path[path] = {"additions": added_count, "deletions": deleted_count}
+
+    all_paths = sorted(set(statuses) | set(stats_by_path))
+    sensitive_paths = {path for path in all_paths if _is_sensitive_target(path)}
+    visible_paths = [path for path in all_paths if path not in sensitive_paths]
+    result: Dict[str, Any] = {
+        "clean": not all_paths,
+        "changed_file_count": len(all_paths),
+        "staged_entry_count": staged_count,
+        "unstaged_entry_count": unstaged_count,
+        "untracked_entry_count": untracked_count,
+        "additions": additions,
+        "deletions": deletions,
+        "binary_file_count": binary_files,
+        "sensitive_paths_omitted": len(sensitive_paths),
+        "files": [],
+        "truncated": False,
+        "completion_state": "complete",
+    }
+    for path in visible_paths:
+        record = {"path": path}
+        if path in statuses:
+            record["status"] = statuses[path]
+        record.update(stats_by_path.get(path, {}))
+        if len(result["files"]) >= FIND_BY_NAME_MAX_MATCHES:
+            result["truncated"] = True
+            break
+        candidate = {**result, "files": [*result["files"], record]}
+        if len(_redacted_json(candidate)) > 4000:
+            result["truncated"] = True
+            break
+        result["files"].append(record)
+    if result["truncated"]:
+        result["completion_state"] = "truncated"
+    encoded = _redacted_json(result)
+    if len(encoded) > 4000:
+        return _redacted_json({"error": "git_diff_stat output exceeded the safe bound"})
+    return encoded
+
+
 def execute_tool_call(
     name: str,
     args: Dict[str, Any],
@@ -1196,6 +1522,12 @@ def execute_tool_call(
 
     elif name == "view_file_slice":
         return _view_file_slice(args, context)
+
+    elif name == "find_by_name":
+        return _find_by_name(args, context)
+
+    elif name == "git_diff_stat":
+        return _git_diff_stat(args, context)
 
     elif name == "approve_escalation":
         raw_id = args.get("escalation_id")
@@ -1525,6 +1857,14 @@ def format_tool_call_beautified(fn_name: str, fn_args: Dict[str, Any]) -> str:
         end = fn_args.get("end_line", 100)
         return f"📖 **[Repository Slice]**: `{target}` lines {start}-{end}"
 
+    elif fn_name == "find_by_name":
+        name = fn_args.get("name", "")
+        target = fn_args.get("relative_path", ".")
+        return f"🧭 **[Repository Find]**: `{name}` under `{target}`"
+
+    elif fn_name == "git_diff_stat":
+        return "📊 **[Git Diff Stat]**: active worktree"
+
     elif fn_name == "approve_escalation":
         esc_id = fn_args.get("escalation_id", "")
         note = fn_args.get("english_feedback", "")
@@ -1628,6 +1968,8 @@ STEP 1 — INVESTIGATION (optional; use tools to verify facts):
 - Verify unverified claims with `investigate_path_details`, `investigate_pane_history`, or `read_file_snippet` as appropriate.
 - Use `grep_search` only for a specific, named, unresolved red flag inside the active Git worktree. Broad or exploratory searches are forbidden.
 - Use `view_file_slice` only to inspect a specific file and line range returned by `grep_search`; it is not a general file browser.
+- Use `find_by_name` only for one exact, specifically named, unresolved repository target. Glob, regex, and broad enumeration are forbidden.
+- Use `git_diff_stat` only for a concrete unexpected-scope or mass-change red flag around commit or push. It returns advisory metadata, not diff content, and never proves payload safety.
 - You may skip tools when the command is Tier B (obvious-safe) or Tier A (unambiguous critical) with certainty. "It looks simple" alone is NOT a skip reason — the command must match the closed Tier-B form.
 
 STEP 2 — TRIAGE (choose exactly one tier, driven by the Decision Layer). OVERALL BIAS — APPROVE BY DEFAULT: you are a flow-enabler, not a blocker. Withhold approval only on a concrete, named red flag — never on vague unease, and never because you cannot prove a negative.
