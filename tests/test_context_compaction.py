@@ -32,6 +32,8 @@ from tools.schengen_agent_llm import (
     _message_chars,
     _secure_append_session_line,
     _sweep_old_session_logs,
+    _trusted_session_directory,
+    _trusted_session_file,
 )
 from tools import schengen_agent_llm
 
@@ -311,7 +313,22 @@ class TestContextCompaction(unittest.TestCase):
         self.assertEqual(chat._growth_headroom("judge"), 4_096)
         chat._context_budget["inspector"]["effective_input_cap_tokens"] = 4_096
         chat._context_budget["inspector"]["samples"] = [(100, 100), (200, 2_000)]
+        chat._context_budget["inspector"]["positive_prompt_deltas"] = [1_900]
         self.assertEqual(chat._growth_headroom("inspector"), 1_900)
+
+    def test_growth_headroom_retains_last_four_positive_deltas(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {
+            "SCHENGEN_INSPECTOR_CONTEXT_WINDOW": "8192",
+        }):
+            chat = SchengenAgentChat(api_key="test", sessions_dir=Path(tmpdir))
+            for prompt_tokens in (100, 2_100, 2_000, 5_000, 4_000, 8_000, 13_000):
+                chat._context_budget["inspector"]["prepared_payload_bytes"] = 20_000
+                chat._record_context_usage("inspector", prompt_tokens)
+        self.assertEqual(
+            chat._context_budget["inspector"]["positive_prompt_deltas"],
+            [2_000, 3_000, 4_000, 5_000],
+        )
+        self.assertEqual(chat._growth_headroom("inspector"), 5_000)
 
     def test_configured_budget_runs_stage1_then_atomic_stage2(self):
         messages = _large_messages(old_size=25_000, latest_size=8_000)
@@ -434,6 +451,16 @@ class TestSessionRetention(unittest.TestCase):
             self.assertTrue(_secure_append_session_line(created, b"ok\n"))
             self.assertEqual(created.read_bytes(), b"ok\n")
             self.assertEqual(created.stat().st_mode & 0o777, 0o600)
+
+    def test_trust_checks_reject_wrong_uid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            transcript = directory / "session_owned.jsonl"
+            transcript.write_text("data", encoding="utf-8")
+            transcript.chmod(0o600)
+            with patch("tools.schengen_agent_llm.os.getuid", return_value=os.getuid() + 1):
+                self.assertFalse(_trusted_session_directory(directory))
+                self.assertFalse(_trusted_session_file(transcript))
 
     def test_retention_removes_only_trusted_exact_old_logs_and_throttles(self):
         with tempfile.TemporaryDirectory() as tmpdir:

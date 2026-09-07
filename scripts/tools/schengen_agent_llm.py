@@ -2398,6 +2398,7 @@ class SchengenAgentChat:
                 "context_cap_defers": 0,
                 "diagnostic": diagnostic,
                 "samples": [],
+                "positive_prompt_deltas": [],
                 "prepared_payload_bytes": None,
             }
             if diagnostic:
@@ -2455,13 +2456,7 @@ class SchengenAgentChat:
     def _growth_headroom(self, phase: str) -> int:
         budget = self._context_budget[phase]
         floor = min(int(budget["effective_input_cap_tokens"] * 0.25), 4096)
-        prompt_samples = [prompt_tokens for _, prompt_tokens in budget["samples"]]
-        positive_deltas = [
-            current - previous
-            for previous, current in zip(prompt_samples, prompt_samples[1:])
-            if current > previous
-        ][-4:]
-        return max([floor, *positive_deltas])
+        return max([floor, *budget["positive_prompt_deltas"]])
 
     def _record_context_usage(self, phase: str, prompt_tokens: Any) -> None:
         budget = self._context_budget[phase]
@@ -2480,8 +2475,12 @@ class SchengenAgentChat:
                 self._context_runtime_warnings.add(warning)
                 _LOGGER.warning("CONTEXT_USAGE_MISSING phase=%s", phase)
             return
-        budget["samples"].append((payload_bytes, prompt_tokens))
-        budget["samples"] = budget["samples"][-5:]
+        if budget["samples"]:
+            delta = prompt_tokens - budget["samples"][-1][1]
+            if delta > 0:
+                budget["positive_prompt_deltas"].append(delta)
+                budget["positive_prompt_deltas"] = budget["positive_prompt_deltas"][-4:]
+        budget["samples"] = [(payload_bytes, prompt_tokens)]
 
     def _defer_over_context_cap(
         self,
