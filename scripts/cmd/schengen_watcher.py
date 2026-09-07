@@ -1067,6 +1067,87 @@ def agent_matches(agent_kind: str, agent_filter) -> bool:
     return agent_kind in agent_filter
 
 
+_SHELL_WRAPPER_IDENTITY_MODULE = "adapters.shell_wrapper_identity"
+_SHELL_WRAPPER_TOP_LEVELS = frozenset({"", "shell", "unknown"})
+
+
+def _load_shell_wrapper_identity():
+    """Load the removable workaround without masking its internal failures.
+
+    A deployment may intentionally omit the helper to disable only the hybrid
+    AGY fallback.  A dependency/import defect *inside* the present helper is a
+    real packaging fault and must remain visible rather than masquerading as
+    an intentionally absent workaround.
+    """
+    try:
+        return importlib.import_module(_SHELL_WRAPPER_IDENTITY_MODULE)
+    except ModuleNotFoundError as exc:
+        if exc.name == _SHELL_WRAPPER_IDENTITY_MODULE:
+            return None
+        raise
+
+
+def _may_be_shell_wrapper(pane_info):
+    if not isinstance(pane_info, dict):
+        return False
+    raw_agent = pane_info.get("agent")
+    return raw_agent is None or (
+        isinstance(raw_agent, str) and raw_agent in _SHELL_WRAPPER_TOP_LEVELS
+    )
+
+
+def resolve_watcher_agent_kind(pane_info, agent_filter, visible_text=None):
+    """Return a direct agent kind or the narrowly corroborated AGY fallback.
+
+    Direct registered kinds remain authoritative, including when the caller's
+    filter excludes them.  Only shell/unknown/missing top-level identities may
+    enter the removable workaround.  Raw ``pane_info`` is never rewritten.
+
+    For a hybrid candidate the normal AGY adapter must first identify a live
+    non-question permission dialog.  Only then may the isolated helper issue a
+    fixed-argv process-info read and require actual foreground AGY executable
+    evidence.  Every mismatch or runtime lookup error skips fail-closed.
+    """
+    if not isinstance(pane_info, dict):
+        return None
+    raw_agent = pane_info.get("agent")
+    direct_kinds = target_agent_kinds()
+    if raw_agent in direct_kinds:
+        return raw_agent if agent_matches(raw_agent, agent_filter) else None
+    if not _may_be_shell_wrapper(pane_info) or not agent_matches("agy", agent_filter):
+        return None
+
+    helper = _load_shell_wrapper_identity()
+    if helper is None:
+        return None
+    try:
+        if not helper.is_agy_shell_wrapper_candidate(pane_info):
+            return None
+    except Exception:
+        return None
+    if not isinstance(visible_text, str):
+        return None
+
+    adapter = get_adapter("agy")
+    try:
+        permission_dialog_live = bool(
+            adapter
+            and adapter.parse_permission_request(visible_text)
+            and adapter.dialog_is_live(visible_text)
+            and not adapter.question_is_live(visible_text)
+        )
+    except Exception:
+        return None
+    if not permission_dialog_live:
+        return None
+
+    try:
+        process_info = helper.get_pane_process_info(pane_info.get("pane_id"))
+        return helper.resolve_agent_kind(pane_info, True, process_info)
+    except Exception:
+        return None
+
+
 def escalate_request(
     pane_id,
     pane_info,
@@ -1155,8 +1236,12 @@ def find_blocked_panes(agent_filter=frozenset(), exclude_panes=None):
         if pane_id in exclude_panes:
             continue
 
-        agent_kind = pane.get("agent", "")
-        if not agent_matches(agent_kind, agent_filter):
+        visible_text = None
+        agent_kind = resolve_watcher_agent_kind(pane, agent_filter)
+        if agent_kind is None and _may_be_shell_wrapper(pane):
+            visible_text = get_pane_text(pane_id, lines=80)
+            agent_kind = resolve_watcher_agent_kind(pane, agent_filter, visible_text)
+        if agent_kind is None:
             continue
 
         status = pane.get("agent_status", "")
@@ -1164,7 +1249,7 @@ def find_blocked_panes(agent_filter=frozenset(), exclude_panes=None):
             blocked.append(pane_id)
         else:
             adapter = get_adapter(agent_kind)
-            text = get_pane_text(pane_id, lines=50)
+            text = visible_text if visible_text is not None else get_pane_text(pane_id, lines=50)
             if adapter and any(p in text for p in adapter.blocked_markers):
                 blocked.append(pane_id)
     return list(set(blocked))
@@ -1186,9 +1271,16 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
         telemetry_trace = getattr(inspector, "pop_completed_trace", lambda _pane: {})(pane_id)
         req_cmd, state_seq, agent_status, pane_info, visible_text = request
         live_info = get_pane_info(pane_id)
-        adapter = get_adapter(live_info.get("agent", "")) if live_info else None
-        if adapter:
+        if live_info:
             live_text = get_pane_text(pane_id, lines=80)
+            live_agent_kind = resolve_watcher_agent_kind(
+                live_info, target_agent_kinds(), live_text
+            )
+            adapter = get_adapter(live_agent_kind or "")
+        else:
+            live_agent_kind = None
+            adapter = None
+        if adapter:
             live_cmd, _ = canonical_request(adapter, pane_id, live_text)
         else:
             live_cmd = None
@@ -1200,7 +1292,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
             # Unsafe -> delegated to the human queue. The audit row documents the
             # delegation (unchanged behavior).
             record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision="MANUAL_DELEGATED",
-                safety_reason=reason or "", agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
+                safety_reason=reason or "", agent_kind=live_agent_kind or "unknown", decision_layer=layer,
                 origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
                 mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
                 shadow_mode=tax.get("shadow_mode", False))
@@ -1238,7 +1330,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
                     current_text = get_pane_text(pane_id, lines=80)
                     current_req, _ = canonical_request(adapter, pane_id, current_text)
                     if current_req is None:
-                        print(f"🚀 Auto-approving {live_info.get('agent', 'unknown')} via permission.reply for {pane_id}...", flush=True)
+                        print(f"🚀 Auto-approving {live_agent_kind or 'unknown'} via permission.reply for {pane_id}...", flush=True)
                 if ch_reason == INJECT_SKIP_CHANGED:
                     deferred = True
                     print(f"⏭️  [SKIP] Pane {pane_id} channel request changed during evaluation; deferring to next poll.", flush=True)
@@ -1252,7 +1344,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
                         print(f"⏭️  [SKIP] Pane {pane_id} dialog changed during evaluation; deferring to next poll.", flush=True)
                     elif not approved:
                         approval_failed_reason = inject_reason
-                        print(f"🚨 [{live_info.get('agent', 'unknown')}] {inject_reason} on {pane_id}", flush=True)
+                        print(f"🚨 [{live_agent_kind or 'unknown'}] {inject_reason} on {pane_id}", flush=True)
                 elif current_req is not None:
                     deferred = True
                     print(f"⏭️  [SKIP] Pane {pane_id} prompt changed during evaluation; deferring to next poll.", flush=True)
@@ -1261,7 +1353,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
             # AUTO_DEFERRED entry, never AUTO_APPROVED.
             record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision="AUTO_DEFERRED",
                 safety_reason=f"dialog changed mid-evaluation; approval not delivered: {reason or ''}".strip(),
-                agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
+                agent_kind=live_agent_kind or "unknown", decision_layer=layer,
                 origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
                 mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
                 shadow_mode=tax.get("shadow_mode", False))
@@ -1272,7 +1364,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
             # AUTO_APPROVED row is written (the approval was not delivered).
             escalate_request(
                 pane_id, live_info, req_cmd, approval_failed_reason,
-                "OPENCODE_FAILSAFE", live_info.get("agent", "unknown"), visible_text=visible_text,
+                "OPENCODE_FAILSAFE", live_agent_kind or "unknown", visible_text=visible_text,
                 evaluation_context=tax,
                 telemetry_trace=telemetry_trace,
             )
@@ -1282,7 +1374,7 @@ def drain_completed_inspections(inspector, last_processed_prompt, dry_run=False)
         # VERIFIED inject success (or dry-run simulation): AUTO_APPROVED audit
         # row written ONLY now (INV-AA-8).
         record_audit_log(pane_id=pane_id, raw_command=req_cmd, decision="AUTO_APPROVED",
-            safety_reason=reason or "", agent_kind=live_info.get("agent", "unknown"), decision_layer=layer,
+            safety_reason=reason or "", agent_kind=live_agent_kind or "unknown", decision_layer=layer,
             origin=tax.get("origin", "A"), consequence=tax.get("consequence", "NONE"),
             mechanism=tax.get("mechanism", "none"), gate_state=tax.get("gate_state", "ENFORCE"),
             shadow_mode=tax.get("shadow_mode", False))
@@ -1470,10 +1562,13 @@ def main():
             # remain silent in memory until its dialog clears.
             def human_request_is_live(pane_id, command):
                 info = get_pane_info(pane_id)
-                adapter = get_adapter(info.get("agent", "")) if info else None
-                if not adapter:
+                if not info:
                     return False
                 visible = get_pane_text(pane_id, lines=80)
+                live_kind = resolve_watcher_agent_kind(info, target_agent_kinds(), visible)
+                adapter = get_adapter(live_kind or "")
+                if not adapter:
+                    return False
                 request, _ = canonical_request(adapter, pane_id, visible)
                 return request == command
 
@@ -1487,13 +1582,16 @@ def main():
                     pane_id, pane_info, req_cmd, reason, layer, visible_text,
                     state_seq, agent_status, evaluation_context,
                 ) = queued
-                adapter = get_adapter(pane_info.get("agent", ""))
                 visible = get_pane_text(pane_id, lines=80)
+                queued_agent_kind = resolve_watcher_agent_kind(
+                    pane_info, target_agent_kinds(), visible
+                )
+                adapter = get_adapter(queued_agent_kind or "")
                 canonical, _ = canonical_request(adapter, pane_id, visible) if adapter else (None, "")
                 if adapter and canonical == req_cmd:
                     escalate_request(
                         pane_id, pane_info, req_cmd, reason, layer,
-                        pane_info.get("agent", "unknown"), visible_text,
+                        queued_agent_kind or "unknown", visible_text,
                         evaluation_context=evaluation_context,
                         telemetry_trace=inspector.pop_queued_trace(pane_id),
                     )
@@ -1532,8 +1630,13 @@ def main():
                 else:
                     pane_info = get_pane_info(args.target)
                     if pane_info:
-                        agent_kind = pane_info.get("agent", "")
-                        if not agent_matches(agent_kind, agent_filter_set):
+                        agent_kind = resolve_watcher_agent_kind(pane_info, agent_filter_set)
+                        if agent_kind is None and _may_be_shell_wrapper(pane_info):
+                            target_text = get_pane_text(args.target, lines=80)
+                            agent_kind = resolve_watcher_agent_kind(
+                                pane_info, agent_filter_set, target_text
+                            )
+                        if agent_kind is None:
                             target_panes = []
                         else:
                             target_panes = [args.target]
@@ -1572,8 +1675,14 @@ def main():
                 if not pane_info:
                     continue
 
-                agent_kind = pane_info.get("agent", "unknown")
-                if not agent_matches(agent_kind, agent_filter_set):
+                visible_text = None
+                agent_kind = resolve_watcher_agent_kind(pane_info, agent_filter_set)
+                if agent_kind is None and _may_be_shell_wrapper(pane_info):
+                    visible_text = get_pane_text(pane_id, lines=80)
+                    agent_kind = resolve_watcher_agent_kind(
+                        pane_info, agent_filter_set, visible_text
+                    )
+                if agent_kind is None:
                     continue
 
                 adapter = get_adapter(agent_kind)
@@ -1583,7 +1692,8 @@ def main():
                 state_seq = pane_info.get("state_change_seq", 0)
                 agent_status = pane_info.get("agent_status", "")
 
-                visible_text = get_pane_text(pane_id, lines=80)
+                if visible_text is None:
+                    visible_text = get_pane_text(pane_id, lines=80)
                 raw_req_cmd = adapter.parse_permission_request(visible_text)
                 req_cmd, _capture_source = canonical_request(adapter, pane_id, visible_text)
 

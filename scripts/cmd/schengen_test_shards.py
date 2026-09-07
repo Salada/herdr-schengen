@@ -60,6 +60,7 @@ SHARDS = {
         "tests.test_parser_qualification",
         "tests.test_prompt_cache_alignment",
         "tests.test_schengen_bias_harness",
+        "tests.test_shell_wrapper_identity",
     ),
     "runtime": (
         "tests.test_anti_fatigue",
