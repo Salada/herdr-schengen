@@ -1,0 +1,187 @@
+{
+  "cases": [
+    {
+      "command": "printf qualification",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "benchmark_static"
+    },
+    {
+      "command": "printf '%s' 'left && right | tail'",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "quoted_controls"
+    },
+    {
+      "command": "printf foo\\;bar",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "escaped_control"
+    },
+    {
+      "command": "printf '%s' 'single quoted'",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "single_quote"
+    },
+    {
+      "command": "printf \"%s\" \"$HOME\"",
+      "expected": {"dynamic": true, "valid": true},
+      "id": "double_quote_expansion"
+    },
+    {
+      "command": "printf '%s' \"$(printf '%s' \"$(date)\")\"",
+      "expected": {"dynamic": true, "valid": true},
+      "id": "nested_command_substitution"
+    },
+    {
+      "command": "printf '%s' `date`",
+      "expected": {"dynamic": true, "valid": true},
+      "id": "legacy_backticks"
+    },
+    {
+      "command": "printf '%s' \"${VALUE:-fallback}\"",
+      "expected": {"dynamic": true, "valid": true},
+      "id": "parameter_expansion"
+    },
+    {
+      "command": "printf '%s' \"$((1 + VALUE))\"",
+      "expected": {"dynamic": true, "valid": true},
+      "id": "arithmetic_expansion"
+    },
+    {
+      "command": "diff <(printf a) <(printf b)",
+      "expected": {"dynamic": true, "valid": true},
+      "id": "process_substitution"
+    },
+    {
+      "command": "cat <<EOF\n$VALUE\nEOF\n",
+      "expected": {"dynamic": true, "valid": true},
+      "id": "heredoc_expandable"
+    },
+    {
+      "command": "cat <<'EOF'\n$VALUE\nEOF\n",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "heredoc_quoted"
+    },
+    {
+      "command": "cat <<-EOF\n\ttabbed\n\tEOF\n",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "heredoc_tab_stripping"
+    },
+    {
+      "command": "cat <<< \"value\"",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "here_string"
+    },
+    {
+      "command": "printf x 2>&1 >out",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "redirection_order"
+    },
+    {
+      "command": "rev >output <<< hello",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "redirect_then_here_string"
+    },
+    {
+      "command": "true && printf x",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "and_chain"
+    },
+    {
+      "command": "false || printf x",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "or_chain"
+    },
+    {
+      "command": "printf a; printf b",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "sequence_chain"
+    },
+    {
+      "command": "printf a | cat",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "pipeline"
+    },
+    {
+      "command": "printf a & wait",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "background_chain"
+    },
+    {
+      "command": "bash -c 'printf x && printf y'",
+      "expected": {"dynamic": false, "valid": true, "wrapper_payload_opaque": true},
+      "id": "bash_c_wrapper"
+    },
+    {
+      "command": "printf 'unterminated",
+      "expected": {"dynamic": false, "valid": false},
+      "id": "malformed_quote"
+    },
+    {
+      "command": "printf $(date",
+      "expected": {"dynamic": true, "valid": false},
+      "id": "malformed_substitution"
+    },
+    {
+      "command": "cat <<EOF\nunterminated\n",
+      "expected": {"dynamic": false, "valid": false},
+      "id": "malformed_heredoc"
+    },
+    {
+      "command": "if true; then printf x",
+      "expected": {"dynamic": false, "valid": false},
+      "id": "malformed_conditional"
+    },
+    {
+      "command": "for item in a b; do printf x",
+      "expected": {"dynamic": false, "valid": false},
+      "id": "malformed_loop"
+    },
+    {
+      "command": "printf valid; 'unterminated",
+      "expected": {"dynamic": false, "valid": false},
+      "id": "valid_prefix_malformed_suffix"
+    },
+    {
+      "command": "{𱡀",
+      "expected": {"known_linux_crash_seed": true, "valid": false},
+      "id": "known_astral_crash_seed"
+    },
+    {
+      "command": "printf 한글",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "korean_byte_span",
+      "span_markers": ["한글"]
+    },
+    {
+      "command": "printf 😀",
+      "expected": {"dynamic": false, "valid": true},
+      "id": "astral_byte_span",
+      "span_markers": ["😀"]
+    },
+    {
+      "expected": {"at_input_cap": true},
+      "generator": {"kind": "utf8_bytes", "value": 65536},
+      "id": "input_64k_boundary"
+    },
+    {
+      "expected": {"over_input_cap": true},
+      "generator": {"kind": "utf8_bytes", "value": 65537},
+      "id": "input_64k_over"
+    },
+    {
+      "expected": {"dynamic": true, "requested_depth": 63},
+      "generator": {"kind": "nested_substitution", "value": 63},
+      "id": "depth_63"
+    },
+    {
+      "expected": {"dynamic": true, "requested_depth": 64},
+      "generator": {"kind": "nested_substitution", "value": 64},
+      "id": "depth_64"
+    },
+    {
+      "expected": {"dynamic": true, "requested_depth": 65},
+      "generator": {"kind": "nested_substitution", "value": 65},
+      "id": "depth_65"
+    }
+  ],
+  "schema_version": 1
+}

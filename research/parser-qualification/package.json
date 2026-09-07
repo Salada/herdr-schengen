@@ -1,0 +1,11 @@
+{
+  "name": "herdr-schengen-parser-qualification",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22.22.1"
+  },
+  "dependencies": {
+    "unbash": "4.0.10"
+  }
+}

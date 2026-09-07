@@ -1,0 +1,79 @@
+name: Parser Qualification Research
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux-x86_64:
+    name: Isolated tree-sitter-bash qualification (Linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify runner platform
+        run: |
+          test "$(uname -m)" = x86_64
+          uname -a
+
+      - name: Fetch and hash-verify locked research artifacts
+        run: |
+          set -eu
+          cache_root=/data/.cache/herdr-schengen/parser-qualification-v1
+          if ! mkdir -p "$cache_root" || [ ! -w "$cache_root" ]; then
+            cache_root="${RUNNER_TEMP:-/tmp}/parser-qualification-artifacts"
+            mkdir -p "$cache_root"
+          fi
+          jq -r '.artifacts[] | select(.platform == "linux-x86_64" or .platform == "any") | [.filename, .url, .sha256] | @tsv' \
+            research/parser-qualification/environment.lock.json |
+          while IFS="$(printf '\t')" read -r filename url sha256; do
+            destination="$cache_root/$filename"
+            if [ ! -f "$destination" ] || [ -L "$destination" ] || ! echo "$sha256  $destination" | sha256sum -c - >/dev/null 2>&1; then
+              temporary=$(mktemp "$cache_root/.download.XXXXXX")
+              trap 'rm -f "$temporary"' EXIT
+              curl -fsSL "$url" -o "$temporary"
+              echo "$sha256  $temporary" | sha256sum -c -
+              mv -f "$temporary" "$destination"
+              trap - EXIT
+            fi
+            echo "$sha256  $destination" | sha256sum -c -
+          done
+          echo "QUALIFICATION_ARTIFACT_DIR=$cache_root" >> "$GITHUB_ENV"
+
+      - name: Provision ephemeral isolated runtimes
+        run: |
+          set -eu
+          lock=research/parser-qualification/environment.lock.json
+          environment_root="${RUNNER_TEMP:-/tmp}/parser-qualification-env"
+          mkdir -p "$environment_root/python" "$environment_root/node" "$environment_root/unbash"
+          python_archive=$(jq -r '.artifacts[] | select(.platform == "linux-x86_64" and .kind == "python") | .filename' "$lock")
+          node_archive=$(jq -r '.artifacts[] | select(.platform == "linux-x86_64" and .kind == "node") | .filename' "$lock")
+          unbash_archive=$(jq -r '.artifacts[] | select(.platform == "any" and .kind == "unbash") | .filename' "$lock")
+          tree_sitter_wheel=$(jq -r '.artifacts[] | select(.platform == "linux-x86_64" and .kind == "tree-sitter") | .filename' "$lock")
+          bash_wheel=$(jq -r '.artifacts[] | select(.platform == "linux-x86_64" and .kind == "tree-sitter-bash") | .filename' "$lock")
+          tar -xzf "$QUALIFICATION_ARTIFACT_DIR/$python_archive" -C "$environment_root/python"
+          tar -xJf "$QUALIFICATION_ARTIFACT_DIR/$node_archive" -C "$environment_root/node" --strip-components=1
+          tar -xzf "$QUALIFICATION_ARTIFACT_DIR/$unbash_archive" -C "$environment_root/unbash"
+          "$environment_root/python/python/bin/python3" -m pip install --no-index \
+            "$QUALIFICATION_ARTIFACT_DIR/$tree_sitter_wheel" \
+            "$QUALIFICATION_ARTIFACT_DIR/$bash_wheel"
+          echo "QUALIFICATION_ENV_ROOT=$environment_root" >> "$GITHUB_ENV"
+
+      - name: Run 10000-parse qualification and differential corpus
+        run: |
+          set -eu
+          report_root="${RUNNER_TEMP:-/tmp}/parser-qualification-reports"
+          "$QUALIFICATION_ENV_ROOT/python/python/bin/python3" scripts/research/parser_qualification.py \
+            --artifact-dir "$QUALIFICATION_ARTIFACT_DIR" \
+            --platform linux-x86_64 \
+            --python "$QUALIFICATION_ENV_ROOT/python/python/bin/python3" \
+            --node "$QUALIFICATION_ENV_ROOT/node/bin/node" \
+            --unbash-module "$QUALIFICATION_ENV_ROOT/unbash/package/dist/parser.js" \
+            --output-dir "$report_root"
+          for report in "$report_root"/*.json; do
+            echo "===== $report ====="
+            cat "$report"
+          done
+
+      - name: Prove repository remains artifact-free
+        run: git diff --exit-code
