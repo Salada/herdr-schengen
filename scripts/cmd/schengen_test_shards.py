@@ -57,6 +57,7 @@ SHARDS = {
         "tests.test_opencode_host",
         "tests.test_opencode_target",
         "tests.test_parser_shadow",
+        "tests.test_parser_qualification",
         "tests.test_prompt_cache_alignment",
         "tests.test_schengen_bias_harness",
     ),
