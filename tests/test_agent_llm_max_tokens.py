@@ -254,6 +254,7 @@ class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
         ), patch(
             "tools.schengen_agent_llm.record_model_no_tool_call"
         ) as record:
+            Path(tmpdir).chmod(0o700)
             chat = SchengenAgentChat(api_key="test-key", sessions_dir=Path(tmpdir))
             chat.inspector_api_key = chat.judge_api_key = "test-key"
             chat.inspector_base_url = chat.judge_base_url = "https://example.invalid/v1"

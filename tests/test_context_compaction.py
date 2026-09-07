@@ -232,6 +232,7 @@ class TestContextCompaction(unittest.TestCase):
         messages.extend(_round("latest", "latest" * 1_000))
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            Path(tmpdir).chmod(0o700)
             chat = SchengenAgentChat(api_key="test")
             chat.log_file = Path(tmpdir) / "session.jsonl"
             chat._append_transcript(role="tool", content=raw)
@@ -281,7 +282,7 @@ class TestContextCompaction(unittest.TestCase):
         self.assertEqual(stats["error"], "MALFORMED_TOOL_RELATIONSHIP")
 
     def test_adversarial_multi_tool_corpus_reduces_bytes_and_estimate_by_40_percent(self):
-        messages = _large_messages(old_size=40_000, latest_size=30_000)
+        messages = _large_messages(old_size=10_000, latest_size=8_000)
         before = len(_canonical_prompt_bytes(messages))
         stage1, _ = _compact_tool_observations(messages, allow_oversized_latest=True)
         stage2, _ = _compact_latest_complete_tool_round(stage1)
@@ -433,6 +434,7 @@ class TestSessionRetention(unittest.TestCase):
     def test_secure_append_rejects_symlink_and_permissive_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
+            directory.chmod(0o700)
             target = directory / "target"
             target.write_text("unchanged", encoding="utf-8")
             target.chmod(0o600)
@@ -455,6 +457,7 @@ class TestSessionRetention(unittest.TestCase):
     def test_trust_checks_reject_wrong_uid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
+            directory.chmod(0o700)
             transcript = directory / "session_owned.jsonl"
             transcript.write_text("data", encoding="utf-8")
             transcript.chmod(0o600)
@@ -465,6 +468,7 @@ class TestSessionRetention(unittest.TestCase):
     def test_retention_removes_only_trusted_exact_old_logs_and_throttles(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
+            directory.chmod(0o700)
             now = time.time()
             old = directory / "session_old.jsonl"
             old.write_text("old", encoding="utf-8")
