@@ -2142,7 +2142,11 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
             if state.get("numeric_error") is not None:
                 raise state["numeric_error"]
             if state.get("numeric_conflict") is not None and not force:
-                raise state["numeric_conflict"]
+                conflict = state["numeric_conflict"]
+                state["complexity"]["complexity_threshold"] = (
+                    conflict.current.complexity_threshold
+                )
+                raise conflict
             state["complexity"]["complexity_threshold"] = values["complexity_threshold"]
             state["cloud"]["cloud_judge_min_confidence"] = values["cloud_judge_min_confidence"]
             state["batch"]["human_approval_ttl_seconds"] = values["human_approval_ttl_seconds"]
@@ -2611,6 +2615,7 @@ class TestTUISettingsModalAsync(unittest.IsolatedAsyncioTestCase):
                 app.screen.query_one("#settings-decision-reload").press()
                 await pilot.pause()
                 self.assertIs(app.screen, modal)
+                modal._poll_external_settings()
                 self.assertEqual(threshold.value, "11")
                 self.assertFalse(modal._numeric_dirty)
 
