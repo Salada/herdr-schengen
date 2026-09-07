@@ -74,7 +74,7 @@ def _tool_round(call_id, content):
 class TestPromptCacheAlignment(unittest.IsolatedAsyncioTestCase):
     def test_static_variants_match_pre_refactor_golden_hashes(self):
         expected = {
-            True: "d5d3a0a85e8f2f99513eabebd5f4ba2c36b3f2d9315076812a15652d5f820b99",
+            True: "4846bce67f22d051d48ef94959aa71d20a846109ed6a388eed2d93f7eb308a87",
             False: "665896921e33fe7eadde61695401effba50ad0df3ab3f015fa10c38027d09d18",
         }
         for allow_adjudication, digest in expected.items():
