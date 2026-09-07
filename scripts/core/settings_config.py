@@ -56,6 +56,15 @@ class SettingsError(ValueError):
     """A settings document or storage path failed validation."""
 
 
+class SettingsConflictError(SettingsError):
+    """A compare-and-update baseline no longer matches the canonical file."""
+
+    def __init__(self, fields: tuple[str, ...], current: SettingsSnapshot) -> None:
+        self.fields = fields
+        self.current = current
+        super().__init__(f"settings changed externally: {', '.join(fields)}")
+
+
 def default_settings_path() -> Path:
     return Path.home() / ".config" / "herdr-schengen" / "settings.json"
 
@@ -311,6 +320,41 @@ class SettingsResolver:
             else:
                 base = validate_settings(dict(migration_factory()))
             candidate = validate_settings({**base.to_dict(), **changes})
+            atomic_write(self.settings_path, candidate)
+            self._accept(candidate)
+            self._write_recovery(candidate)
+            self._checked_at = self._clock()
+            return candidate
+
+    def compare_and_update(
+        self,
+        changes: Mapping[str, object],
+        expected: Mapping[str, object],
+        migration_factory: Callable[[], Mapping[str, object]],
+        *,
+        force: bool = False,
+    ) -> SettingsSnapshot:
+        """Update fields only when their locked canonical values match ``expected``."""
+        if (
+            not changes
+            or "schema_version" in changes
+            or not set(changes) < SETTINGS_KEYS
+            or set(expected) != set(changes)
+        ):
+            raise SettingsError("compare-and-update requires matching known setting fields")
+        with self._lock, self._write_lock():
+            exists = self.settings_path.exists() or self.settings_path.is_symlink()
+            if exists:
+                base = read_trusted(self.settings_path)
+            else:
+                base = validate_settings(dict(migration_factory()))
+            validate_settings({**base.to_dict(), **expected})
+            candidate = validate_settings({**base.to_dict(), **changes})
+            conflicts = tuple(
+                sorted(name for name, value in expected.items() if getattr(base, name) != value)
+            )
+            if conflicts and not force:
+                raise SettingsConflictError(conflicts, base)
             atomic_write(self.settings_path, candidate)
             self._accept(candidate)
             self._write_recovery(candidate)
