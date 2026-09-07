@@ -49,6 +49,7 @@ from adapters.agent_adapters import INJECT_SKIP_CHANGED, canonical_request, get_
 from adapters.capture_evaluator import evaluate_capture_pair
 from core.cloud_judge import DEFAULT_REASONING_EFFORT
 from core.gatekeeper_telemetry import GatekeeperTimeline
+from core.parser_shadow import ParserShadow
 from core.redaction import redact_for_cloud
 from core.guard_db import (
     DB_DIR,
@@ -1034,6 +1035,24 @@ def is_parent_alive(initial_ppid: int) -> bool:
         return False
 
 
+def observe_parser_shadow(parser_shadow, raw_command, result, *, input_truncated=False):
+    """Submit analysis-only shadow work after the raw decision is final.
+
+    The original result is returned by identity even if the observer itself is
+    unavailable or faulty, so parser research cannot affect adjudication.
+    """
+    try:
+        parser_shadow.observe(
+            raw_command,
+            is_safe=bool(result[0]),
+            decision_layer=result[2],
+            input_truncated=input_truncated,
+        )
+    except Exception:
+        pass
+    return result
+
+
 def agent_matches(agent_kind: str, agent_filter) -> bool:
     """Return True if agent_kind passes the agent filter.
 
@@ -1438,6 +1457,7 @@ def main():
 
     last_processed_prompt = {}
     inspector = InspectorCoordinator(max_workers=config["max_workers"])
+    parser_shadow = ParserShadow.from_environment()
     idle_count = 0
 
     try:
@@ -1704,7 +1724,10 @@ def main():
                     truncated=truncated_unrecoverable,
                 ):
                     if truncated:
-                        return truncated_evaluate_result()  # INV-EX-3: fail-closed
+                        result = truncated_evaluate_result()  # INV-EX-3: fail-closed
+                        return observe_parser_shadow(
+                            parser_shadow, req, result, input_truncated=True
+                        )
                     result = evaluate_capture_pair(
                         raw_req,
                         req,
@@ -1725,8 +1748,8 @@ def main():
                         is_whitelisted, wl_reason = False, None
                     if is_whitelisted:
                         tax = derive_taxonomy(req, DecisionLayer.ALLOWLIST, True, wl_reason or "", origin=Origin.HUMAN)
-                        return True, wl_reason, DecisionLayer.ALLOWLIST, tax
-                    return result
+                        result = True, wl_reason, DecisionLayer.ALLOWLIST, tax
+                    return observe_parser_shadow(parser_shadow, req, result)
                 inspector.submit(
                     pane_id,
                     (req_cmd, state_seq, agent_status, pane_info, visible_text),
@@ -1741,6 +1764,7 @@ def main():
 
             time.sleep(args.interval)
     finally:
+        parser_shadow.close()
         inspector.close()
         try:
             # Dead-watcher cleanup (INV-PH1-2/5): leave NO stale "Checking" —

@@ -31,6 +31,7 @@ scripts/
 │   ├── session_memory.py    # Per-pane LRU session cache (fast-path approvals)
 │   ├── session_cache.py     # Deterministic ruleset-version fingerprint cache
 │   ├── feature_db.py        # FTS5 CJK feature-request backlog
+│   ├── parser_shadow.py     # Default-off private helper transport + redacted rotating telemetry
 │   ├── redaction.py         # Sensitive-credential redaction wrapper
 │   ├── semgrep_evaluator.py # Semgrep SAST analyzer (used by security_evaluator)
 │   └── shellcheck_evaluator.py # ShellCheck SAST analyzer (used by security_evaluator)
@@ -49,6 +50,7 @@ scripts/
     ├── schengen_history.py  # Audit history & queue CLI
     ├── schengen_feature.py  # Feature backlog CLI
     ├── schengen_mcp.py      # Model Context Protocol server
+    ├── schengen_parser_helper.py # Stage-1 private framed helper (no native parser)
     ├── guard_watcher.py     # alias -> schengen_watcher.py (back-compat)
     ├── smartgate.py         # alias -> schengen_watcher.py (back-compat)
     └── trusted_clearance.py # alias -> schengen_watcher.py (back-compat)

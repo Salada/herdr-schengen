@@ -16,7 +16,24 @@ the documented defaults.
 | `SCHENGEN_DEBUG` | unset | Reserved debug toggle. **Note**: no code reads this variable today — mouse tracing uses `SCHENGEN_MOUSE_DEBUG` (read by the TUI). |
 | `SCHENGEN_MOUSE_DEBUG` | unset | TUI mouse-event debug output. |
 | `SCHENGEN_SHADOW_MODE` | unset | Kill-switch: run the gate in shadow mode (log-only, no interception). |
+| `SCHENGEN_PARSER_SHADOW` | unset | Research-only structural-shadow transport. Only the exact value `1` enables it at watcher startup; every other value is OFF. It never changes the enforced decision. |
 | `SCHENGEN_STRICT_PARENT` | unset | `1` = die-with-parent daemon lifecycle (set by the TUI when spawning; ADR-003/008). |
+
+`SCHENGEN_PARSER_SHADOW` and `SCHENGEN_SHADOW_MODE` are unrelated. The latter
+changes enforcement, while parser shadow is metadata-only observation and must
+never be used as an enforcement switch. When parser shadow is OFF, no helper is
+spawned, no parse is requested, and no parser-shadow record is written. The
+value is read only when the watcher parent starts; there is no agent, LLM,
+SettingsModal, reload, or lifecycle-control path for changing it.
+
+Stage 1 validates only the bounded subprocess transport and secure telemetry
+writer. It does not install or load a native parser and therefore reports
+`UNMODELED_OR_INVALID` with `PARSER_UNAVAILABLE` (or
+`PARSER_STAGE1_NOT_QUALIFIED` if ambient modules are merely detected). These
+statuses are expected research evidence, not production parser qualification
+or a product fallback. The helper is a private, lazily spawned child owned by
+the watcher parent. It has no network or lifecycle interface and receives a
+minimal scrubbed environment.
 
 ## 2. LLM Environment Variables
 
@@ -139,6 +156,14 @@ layer (`scripts/core/guard_db.py`, `scripts/core/feature_db.py`).
 | `in_flight_state.json` | Watcher-published in-flight inspector state; the TUI reads it read-only (INV-PH1-2/5). |
 | `settings.last-good.json` | Recovery-only last validated schema-v1 settings snapshot; never a competing live authority. |
 | `gatekeeper-timelines/escalation-<id>.json` | Metadata-only monotonic timing timeline for one escalation. It contains fixed stage/outcome labels and numeric durations, never commands, tool arguments/output, model text, paths, secrets, or exception text. Inspect it with `schengen_history.py --timeline <id>`. |
+| `parser-shadow/events.jsonl` and `.1`…`.4` | Default-off Stage-1 parser-shadow metadata. Each mode-`0600` file is limited to 10 MiB (50 MiB total); rotation never uploads data. Records contain the raw SHA-256/byte length, existing final decision/layer, fixed parser status/counters, duration, and source revision—never raw commands, source fragments, argv/literals, full IR, reserialized shell, environment, cwd, pane/model/tool text, or output. |
+
+Parser-shadow records are written only after the existing raw-command decision
+is final. Helper timeout/crash/malformed output and unsafe log paths fail to no
+record and cannot change evaluation, audit, adjudication, or delivery. Joining
+the hash metadata to the existing raw-command audit is an explicit offline
+operator action; Stage 1 provides no export tool and performs no automatic
+upload.
 
 Each runtime skill root also contains `.schengen-source.json`, written by the
 repository installer. New audit rows copy its exact Git revision into
