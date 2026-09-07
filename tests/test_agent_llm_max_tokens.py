@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -229,6 +230,156 @@ class TestCompletionTokenPayloads(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chat.total_completion_tokens, 4100)
         self.assertEqual(chat.inspector_completion_tokens, 4)
         self.assertEqual(chat.judge_completion_tokens, 4096)
+
+    async def test_configured_over_cap_defers_without_api_or_audit(self):
+        escalation = {
+            "id": 5829,
+            "pane_id": "w1D:p1",
+            "agent_kind": "codex",
+            "raw_command": "git status",
+            "decision_layer": "NOT_ALLOWLISTED",
+            "safety_reason": "manual review",
+            "origin": "A",
+        }
+        client = _SequenceClient([])
+        timeline = unittest.mock.Mock()
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {
+            "SCHENGEN_INSPECTOR_CONTEXT_WINDOW": "8192",
+        }), patch(
+            "tools.schengen_agent_llm.get_current_command_escalation", return_value=escalation
+        ), patch(
+            "tools.schengen_agent_llm.GatekeeperTimeline.load", return_value=timeline
+        ), patch(
+            "tools.schengen_agent_llm.httpx.AsyncClient", return_value=client
+        ), patch(
+            "tools.schengen_agent_llm.record_model_no_tool_call"
+        ) as record:
+            Path(tmpdir).chmod(0o700)
+            chat = SchengenAgentChat(api_key="test-key", sessions_dir=Path(tmpdir))
+            chat.inspector_api_key = chat.judge_api_key = "test-key"
+            chat.inspector_base_url = chat.judge_base_url = "https://example.invalid/v1"
+            result = await chat.send_message("X" * 8_000)
+            transcript = chat.log_file.read_text(encoding="utf-8")
+
+        self.assertIn("[CONTEXT_CAP_EXCEEDED]", result)
+        self.assertEqual(client.payloads, [])
+        record.assert_not_called()
+        timeline.finish.assert_called_once_with(
+            "deferred", "context_cap_exceeded", "truncated"
+        )
+        self.assertIn("CONTEXT_CAP_EXCEEDED", transcript)
+        stats = chat.get_token_usage_stats()
+        self.assertEqual(stats["inspector_context_budget_state"], "deferred_over_cap")
+        self.assertEqual(stats["inspector_context_cap_defers"], 1)
+        self.assertEqual(stats["api_calls"], 0)
+
+    async def test_malformed_tool_relationship_defers_before_api(self):
+        escalation = {
+            "id": 5830,
+            "pane_id": "w1D:p1",
+            "agent_kind": "codex",
+            "raw_command": "git status",
+            "decision_layer": "NOT_ALLOWLISTED",
+            "safety_reason": "manual review",
+            "origin": "A",
+        }
+        client = _SequenceClient([])
+        timeline = unittest.mock.Mock()
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {
+            "SCHENGEN_INSPECTOR_CONTEXT_WINDOW": "8192",
+        }), patch(
+            "tools.schengen_agent_llm.get_current_command_escalation", return_value=escalation
+        ), patch(
+            "tools.schengen_agent_llm.GatekeeperTimeline.load", return_value=timeline
+        ), patch("tools.schengen_agent_llm.httpx.AsyncClient", return_value=client):
+            chat = SchengenAgentChat(api_key="test-key", sessions_dir=Path(tmpdir))
+            chat._current_esc_id = escalation["id"]
+            chat.history = [{
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "missing-result",
+                    "type": "function",
+                    "function": {"name": "read_file_snippet", "arguments": "{}"},
+                }],
+            }]
+            result = await chat.send_message("X" * 8_000)
+
+        self.assertIn("[CONTEXT_CAP_EXCEEDED]", result)
+        self.assertEqual(client.payloads, [])
+        self.assertEqual(chat.history[0]["tool_calls"][0]["id"], "missing-result")
+        timeline.finish.assert_called_once_with(
+            "deferred", "context_cap_exceeded", "truncated"
+        )
+
+    async def test_judge_cap_defers_after_inspector_without_second_api_call(self):
+        client = _SequenceClient([_Response(prompt_tokens=100)])
+        timeline = unittest.mock.Mock()
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {
+            "SCHENGEN_INSPECTOR_CONTEXT_WINDOW": "300000",
+            "SCHENGEN_JUDGE_CONTEXT_WINDOW": "8192",
+        }), patch(
+            "tools.schengen_agent_llm.get_current_command_escalation", return_value=None
+        ), patch(
+            "tools.schengen_agent_llm.httpx.AsyncClient", return_value=client
+        ):
+            chat = SchengenAgentChat(api_key="test-key", sessions_dir=Path(tmpdir))
+            chat.inspector_base_url = "https://inspector.invalid/v1"
+            chat.judge_base_url = "https://judge.invalid/v1"
+            chat.inspector_model = "inspector"
+            chat.judge_model = "judge"
+            with patch("tools.schengen_agent_llm.GatekeeperTimeline.load", return_value=timeline):
+                result = await chat.send_message("X" * 8_000)
+
+        self.assertIn("[CONTEXT_CAP_EXCEEDED]", result)
+        self.assertEqual(len(client.payloads), 1)
+        self.assertEqual(chat.total_api_calls, 1)
+        self.assertEqual(
+            chat.get_token_usage_stats()["judge_context_budget_state"],
+            "deferred_over_cap",
+        )
+
+    async def test_success_samples_are_phase_local_and_flat_stats_are_updated(self):
+        client = _SequenceClient([
+            _Response(prompt_tokens=101),
+            _Response(content="Final advisory.", prompt_tokens=202),
+        ])
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {
+            "SCHENGEN_INSPECTOR_CONTEXT_WINDOW": "100000",
+            "SCHENGEN_JUDGE_CONTEXT_WINDOW": "200000",
+        }), patch(
+            "tools.schengen_agent_llm.get_current_command_escalation", return_value=None
+        ), patch("tools.schengen_agent_llm.httpx.AsyncClient", return_value=client):
+            chat = SchengenAgentChat(api_key="test-key", sessions_dir=Path(tmpdir))
+            chat.inspector_base_url = "https://inspector.invalid/v1"
+            chat.judge_base_url = "https://judge.invalid/v1"
+            chat.inspector_model = "inspector"
+            chat.judge_model = "judge"
+            await chat.send_message("review")
+
+        self.assertEqual(chat._context_budget["inspector"]["samples"][0][1], 101)
+        self.assertEqual(chat._context_budget["judge"]["samples"][0][1], 202)
+        stats = chat.get_token_usage_stats()
+        self.assertEqual(stats["inspector_context_budget_state"], "within_budget")
+        self.assertEqual(stats["judge_context_budget_state"], "within_budget")
+        self.assertGreater(stats["inspector_input_estimate_tokens"], 0)
+        self.assertGreater(stats["judge_growth_headroom_tokens"], 0)
+
+    async def test_missing_usage_adds_no_estimator_sample(self):
+        response = _Response()
+        response._payload["usage"] = {"prompt_tokens": "unknown"}
+        client = _SequenceClient([response])
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {
+            "SCHENGEN_INSPECTOR_CONTEXT_WINDOW": "100000",
+        }), patch(
+            "tools.schengen_agent_llm.get_current_command_escalation", return_value=None
+        ), patch("tools.schengen_agent_llm.httpx.AsyncClient", return_value=client):
+            chat = SchengenAgentChat(api_key="test-key", sessions_dir=Path(tmpdir))
+            chat.judge_model = chat.inspector_model
+            await chat.send_message("review")
+
+        self.assertEqual(chat._context_budget["inspector"]["samples"], [])
+        self.assertEqual(chat.total_prompt_tokens, 0)
 
 
 if __name__ == "__main__":

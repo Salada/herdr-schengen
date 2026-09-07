@@ -45,7 +45,7 @@ _TERMINAL_REASONS = frozenset({
     "user_cancelled", "inspector_turn_limit", "approval_delivery_failed",
     "rejection_delivery_failed", "adjudication_delivery_failed",
     "adjudication_internal_error", "internal_error", "dialog_changed",
-    "stale_dialog", "superseded", "tool_failure",
+    "stale_dialog", "superseded", "tool_failure", "context_cap_exceeded",
 })
 _DECISION_LAYERS = frozenset({
     "ALLOWLIST", "MANAGED_GIT_GUARD", "SAST_SHELLCHECK", "SAST_SEMGREP",
