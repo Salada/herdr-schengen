@@ -17,6 +17,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -24,6 +25,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -122,7 +124,6 @@ JUDGE_BASE_URL = os.environ.get("SCHENGEN_JUDGE_BASE_URL") or _SHARED_URL
 JUDGE_MODEL    = os.environ.get("SCHENGEN_JUDGE_MODEL")    or resolve_subagent_model("gpt-5.6-luna")
 
 SESSIONS_DIR = Path.home() / ".local" / "state" / "herdr-schengen" / "sessions"
-SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Deterministic in-flight context compaction. These limits intentionally use
 # characters instead of a model-specific tokenizer so behavior is stable
@@ -131,6 +132,23 @@ COMPACTION_TRIGGER_TOTAL_CHARS = 12_000
 COMPACTION_TOOL_RESULT_THRESHOLD = 1_000
 COMPACTION_HEAD_EXCERPT_CHARS = 300
 COMPACTION_TAIL_EXCERPT_CHARS = 300
+
+CONTEXT_WINDOW_MIN_TOKENS = 8_192
+CONTEXT_WINDOW_MAX_LENGTH = 10
+CONTEXT_WINDOW_MIN_LENGTH = 4
+CONTEXT_INPUT_CAP_MAX = 262_144
+CONTEXT_COMPLETION_RESERVE = 4_096
+CONTEXT_CAP_EXCEEDED_RESPONSE = (
+    "⚠️ [CONTEXT_CAP_EXCEEDED] The configured provider context budget cannot fit "
+    "this request after bounded evidence compaction. The escalation remains pending "
+    "for human review."
+)
+SESSION_RETENTION_SECONDS = 30 * 86_400
+SESSION_SWEEP_INTERVAL_SECONDS = 86_400
+_SESSION_IO_LOCK = threading.Lock()
+_last_session_sweep_monotonic: Optional[float] = None
+_session_io_warnings: set[str] = set()
+_context_config_warnings: set[str] = set()
 
 FIND_BY_NAME_MAX_DEPTH = 16
 FIND_BY_NAME_MAX_ENTRIES = 10_000
@@ -143,6 +161,154 @@ DEFAULT_INSPECTOR_MAX_TOKENS = 4096
 DEFAULT_JUDGE_MAX_TOKENS = 4096
 MIN_COMPLETION_MAX_TOKENS = 64
 MAX_COMPLETION_MAX_TOKENS = 4096
+
+
+def _context_window_config(name: str) -> Tuple[int, int, str, str]:
+    """Return declared window, effective cap, state, and closed diagnostic."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return 0, 0, "disabled_missing", "CONTEXT_WINDOW_MISSING"
+    if (
+        not CONTEXT_WINDOW_MIN_LENGTH <= len(raw) <= CONTEXT_WINDOW_MAX_LENGTH
+        or not raw.isascii()
+        or not raw.isdecimal()
+        or int(raw) < CONTEXT_WINDOW_MIN_TOKENS
+    ):
+        return 0, 0, "disabled_invalid", "CONTEXT_WINDOW_INVALID"
+    value = int(raw)
+    return value, min(CONTEXT_INPUT_CAP_MAX, value - CONTEXT_COMPLETION_RESERVE), "configured", ""
+
+
+def _warn_context_config_once(code: str) -> None:
+    if code not in _context_config_warnings:
+        _context_config_warnings.add(code)
+        _LOGGER.warning("%s", code)
+
+
+def _canonical_prompt_bytes(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> bytes:
+    """Serialize only provider-visible input material deterministically."""
+    material: Dict[str, Any] = {"messages": messages}
+    if tools is not None:
+        material["tools"] = tools
+    return json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _tool_relationships(
+    messages: List[Dict[str, Any]],
+) -> Optional[Tuple[Dict[str, str], Dict[str, int], List[Tuple[int, List[str]]]]]:
+    """Validate complete tool-call relationships without mutating messages."""
+    tool_names: Dict[str, str] = {}
+    tool_result_indices: Dict[str, int] = {}
+    assistant_rounds: List[Tuple[int, List[str]]] = []
+    for index, message in enumerate(messages):
+        role = message.get("role")
+        if role == "assistant" and message.get("tool_calls"):
+            calls = message["tool_calls"]
+            if not isinstance(calls, list):
+                return None
+            call_ids: List[str] = []
+            for call in calls:
+                if not isinstance(call, dict):
+                    return None
+                call_id = call.get("id")
+                function = call.get("function") or {}
+                name = function.get("name") if isinstance(function, dict) else None
+                if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
+                    return None
+                if call_id in tool_names:
+                    return None
+                tool_names[call_id] = name
+                call_ids.append(call_id)
+            assistant_rounds.append((index, call_ids))
+        elif role == "tool":
+            call_id = message.get("tool_call_id")
+            if not isinstance(call_id, str) or call_id not in tool_names or call_id in tool_result_indices:
+                return None
+            tool_result_indices[call_id] = index
+    if set(tool_names) != set(tool_result_indices):
+        return None
+    return tool_names, tool_result_indices, assistant_rounds
+
+
+def _scalar_status(content: str) -> Optional[Any]:
+    try:
+        parsed = json.loads(content)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    value = parsed.get("status")
+    if isinstance(value, bool) or isinstance(value, (str, int)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    return None
+
+
+def _latest_round_compaction_record(tool: str, call_id: str, content: str) -> str:
+    redacted = redact_for_cloud(content)
+    record: Dict[str, Any] = {
+        "_compacted": True,
+        "tool": tool,
+        "tool_call_id": call_id,
+        "original_byte_count": len(content.encode("utf-8")),
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "head_excerpt": redacted[:COMPACTION_HEAD_EXCERPT_CHARS],
+        "tail_excerpt": redacted[-COMPACTION_TAIL_EXCERPT_CHARS:],
+        "notice": "[COMPACTED LATEST-ROUND OBSERVATION: Full raw payload retained only in local JSONL transcript]",
+    }
+    status = _scalar_status(content)
+    if status is not None:
+        record["status"] = status
+    return json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _compact_latest_complete_tool_round(
+    messages: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Atomically compact every result in the latest complete tool round."""
+    before_bytes = len(_canonical_prompt_bytes(messages))
+    stats = {
+        "before_bytes": before_bytes,
+        "after_bytes": before_bytes,
+        "compacted_tool_results": 0,
+        "error": "",
+    }
+    relationships = _tool_relationships(messages)
+    if relationships is None:
+        stats["error"] = "MALFORMED_TOOL_RELATIONSHIP"
+        return messages, stats
+    tool_names, result_indices, rounds = relationships
+    if not rounds:
+        stats["error"] = "NO_COMPLETE_TOOL_ROUND"
+        return messages, stats
+    _, latest_ids = rounds[-1]
+    try:
+        candidate = copy.deepcopy(messages)
+        for call_id in latest_ids:
+            index = result_indices[call_id]
+            content = messages[index].get("content")
+            if not isinstance(content, str):
+                stats["error"] = "MALFORMED_TOOL_RESULT"
+                return messages, stats
+            candidate[index]["content"] = _latest_round_compaction_record(
+                tool_names[call_id], call_id, content
+            )
+        stats["compacted_tool_results"] = len(latest_ids)
+        stats["after_bytes"] = len(_canonical_prompt_bytes(candidate))
+        return candidate, stats
+    except Exception:
+        _LOGGER.exception("Latest-round compaction failed; retaining original evidence")
+        stats["error"] = "COMPACTION_INTERNAL_ERROR"
+        return messages, stats
 
 
 def _completion_token_limit(name: str, default: int) -> int:
@@ -167,6 +333,11 @@ def _completion_token_limit(name: str, default: int) -> int:
     return value
 
 
+def _usage_token(value: Any) -> int:
+    """Return a safe counter value without treating booleans as token counts."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
 def _message_chars(messages: List[Dict[str, Any]]) -> int:
     """Return a stable lower-bound estimate, excluding fixed protocol/schema overhead."""
     return sum(
@@ -178,6 +349,8 @@ def _message_chars(messages: List[Dict[str, Any]]) -> int:
 
 def _compact_tool_observations(
     messages: List[Dict[str, Any]],
+    *,
+    allow_oversized_latest: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Compact old large tool results while preserving the latest tool round.
 
@@ -231,11 +404,12 @@ def _compact_tool_observations(
         if latest_round_chars > COMPACTION_TRIGGER_TOTAL_CHARS:
             stats["warning"] = "latest_tool_round_exceeds_compaction_budget"
             _LOGGER.warning(
-                "Context compaction skipped: latest tool round is %d chars (budget %d)",
+                "Latest tool round is %d chars (conservative budget %d)",
                 latest_round_chars,
                 COMPACTION_TRIGGER_TOTAL_CHARS,
             )
-            return messages, stats
+            if not allow_oversized_latest:
+                return messages, stats
 
         latest_ids = set(latest_call_ids)
         candidate = copy.deepcopy(messages)
@@ -281,6 +455,125 @@ def _compact_tool_observations(
     except Exception:
         _LOGGER.exception("Context compaction failed; retaining original evidence")
         return messages, stats
+
+
+def _trusted_session_directory(path: Path, *, create: bool = False) -> bool:
+    """Accept only a current-UID, mode-0700, real directory."""
+    try:
+        if create and not path.exists():
+            path.mkdir(parents=True, mode=0o700)
+        info = path.lstat()
+        return (
+            stat.S_ISDIR(info.st_mode)
+            and not path.is_symlink()
+            and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o700
+        )
+    except OSError:
+        return False
+
+
+def _trusted_session_file(path: Path) -> bool:
+    try:
+        info = path.lstat()
+        return (
+            stat.S_ISREG(info.st_mode)
+            and not path.is_symlink()
+            and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o600
+        )
+    except OSError:
+        return False
+
+
+def _warn_session_io_once(code: str) -> None:
+    if code not in _session_io_warnings:
+        _session_io_warnings.add(code)
+        _LOGGER.warning("%s", code)
+
+
+def _secure_append_session_line(path: Path, line: bytes) -> bool:
+    """Append one JSONL record without following or repairing unsafe paths."""
+    if not _trusted_session_directory(path.parent, create=True):
+        _warn_session_io_once("SESSION_DIRECTORY_UNSAFE")
+        return False
+    if (path.exists() or path.is_symlink()) and not _trusted_session_file(path):
+        _warn_session_io_once("SESSION_FILE_UNSAFE")
+        return False
+    if not hasattr(os, "O_NOFOLLOW"):
+        _warn_session_io_once("SESSION_NOFOLLOW_UNAVAILABLE")
+        return False
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    flags |= os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            return False
+        view = memoryview(line)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                return False
+            view = view[written:]
+        return True
+    except OSError:
+        _warn_session_io_once("SESSION_APPEND_FAILED")
+        return False
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _sweep_old_session_logs(
+    directory: Path,
+    *,
+    wall_time: Optional[float] = None,
+    monotonic_time: Optional[float] = None,
+) -> int:
+    """Remove trusted session logs older than 30 days, at most daily per process."""
+    global _last_session_sweep_monotonic
+    now_mono = time.monotonic() if monotonic_time is None else monotonic_time
+    with _SESSION_IO_LOCK:
+        if (
+            _last_session_sweep_monotonic is not None
+            and now_mono - _last_session_sweep_monotonic < SESSION_SWEEP_INTERVAL_SECONDS
+        ):
+            return 0
+        _last_session_sweep_monotonic = now_mono
+        if not _trusted_session_directory(directory, create=True):
+            _warn_session_io_once("SESSION_DIRECTORY_UNSAFE")
+            return 0
+        cutoff = (time.time() if wall_time is None else wall_time) - SESSION_RETENTION_SECONDS
+        removed = 0
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            _warn_session_io_once("SESSION_RETENTION_SCAN_FAILED")
+            return 0
+        for entry in entries:
+            if not re.fullmatch(r"session_[A-Za-z0-9_]+\.jsonl", entry.name):
+                continue
+            try:
+                info = entry.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or entry.is_symlink()
+                    or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_mtime >= cutoff
+                ):
+                    continue
+                entry.unlink()
+                removed += 1
+            except OSError:
+                _warn_session_io_once("SESSION_RETENTION_ENTRY_SKIPPED")
+        return removed
 
 
 GUARD_TOOLS = [
@@ -2054,7 +2347,7 @@ def record_model_no_tool_call(active_esc: Dict[str, Any], phase: str) -> str:
 
 
 class SchengenAgentChat:
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, sessions_dir: Optional[Path] = None):
         self.inspector_api_key = api_key or INSPECTOR_API_KEY
         self.inspector_base_url = INSPECTOR_BASE_URL
         self.inspector_model = INSPECTOR_MODEL
@@ -2068,7 +2361,8 @@ class SchengenAgentChat:
             "SCHENGEN_JUDGE_MAX_TOKENS", DEFAULT_JUDGE_MAX_TOKENS
         )
         self.session_id = f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-        self.log_file = SESSIONS_DIR / f"{self.session_id}.jsonl"
+        self.sessions_dir = Path(sessions_dir) if sessions_dir is not None else SESSIONS_DIR
+        self.log_file = self.sessions_dir / f"{self.session_id}.jsonl"
         self.history: List[Dict[str, Any]] = []
         self._current_esc_id: Optional[int] = None
         self._cancel_requested: bool = False
@@ -2088,6 +2382,27 @@ class SchengenAgentChat:
         self.compacted_tool_results = 0
         self.compaction_chars_saved = 0
         self.compaction_last_warning = ""
+        self._context_runtime_warnings: set[str] = set()
+        self._context_budget: Dict[str, Dict[str, Any]] = {}
+        for phase, env_name in (
+            ("inspector", "SCHENGEN_INSPECTOR_CONTEXT_WINDOW"),
+            ("judge", "SCHENGEN_JUDGE_CONTEXT_WINDOW"),
+        ):
+            window, cap, state, diagnostic = _context_window_config(env_name)
+            self._context_budget[phase] = {
+                "context_window_tokens": window,
+                "effective_input_cap_tokens": cap,
+                "input_estimate_tokens": 0,
+                "growth_headroom_tokens": 0,
+                "context_budget_state": state,
+                "context_cap_defers": 0,
+                "diagnostic": diagnostic,
+                "samples": [],
+                "prepared_payload_bytes": None,
+            }
+            if diagnostic:
+                _warn_context_config_once(diagnostic)
+        _sweep_old_session_logs(self.sessions_dir)
 
     def cancel(self) -> None:
         """Flag current in-flight LLM call to abort immediately."""
@@ -2102,7 +2417,7 @@ class SchengenAgentChat:
         total_in = self.total_prompt_tokens
         cached = self.total_cached_tokens
         cache_ratio = (cached / total_in * 100.0) if total_in > 0 else 0.0
-        return {
+        stats = {
             "api_calls": self.total_api_calls,
             "prompt_tokens": total_in,
             "completion_tokens": self.total_completion_tokens,
@@ -2117,9 +2432,164 @@ class SchengenAgentChat:
             "compaction_chars_saved": self.compaction_chars_saved,
             "compaction_last_warning": self.compaction_last_warning,
         }
+        for phase in ("inspector", "judge"):
+            budget = self._context_budget[phase]
+            for field in (
+                "context_window_tokens",
+                "effective_input_cap_tokens",
+                "input_estimate_tokens",
+                "growth_headroom_tokens",
+                "context_budget_state",
+                "context_cap_defers",
+            ):
+                stats[f"{phase}_{field}"] = budget[field]
+        return stats
 
-    def _compact_messages_for_request(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        compacted, stats = _compact_tool_observations(messages)
+    def _estimate_input_tokens(self, phase: str, payload_bytes: int) -> int:
+        samples = self._context_budget[phase]["samples"]
+        if not samples:
+            return payload_bytes
+        last_payload_bytes, last_prompt_tokens = samples[-1]
+        return min(payload_bytes, last_prompt_tokens + max(0, payload_bytes - last_payload_bytes))
+
+    def _growth_headroom(self, phase: str) -> int:
+        budget = self._context_budget[phase]
+        floor = min(int(budget["effective_input_cap_tokens"] * 0.25), 4096)
+        prompt_samples = [prompt_tokens for _, prompt_tokens in budget["samples"]]
+        positive_deltas = [
+            current - previous
+            for previous, current in zip(prompt_samples, prompt_samples[1:])
+            if current > previous
+        ][-4:]
+        return max([floor, *positive_deltas])
+
+    def _record_context_usage(self, phase: str, prompt_tokens: Any) -> None:
+        budget = self._context_budget[phase]
+        if budget["effective_input_cap_tokens"] == 0:
+            return
+        payload_bytes = budget.get("prepared_payload_bytes")
+        budget["prepared_payload_bytes"] = None
+        if (
+            isinstance(prompt_tokens, bool)
+            or not isinstance(prompt_tokens, int)
+            or prompt_tokens < 0
+            or not isinstance(payload_bytes, int)
+        ):
+            warning = f"CONTEXT_USAGE_MISSING:{phase}"
+            if warning not in self._context_runtime_warnings:
+                self._context_runtime_warnings.add(warning)
+                _LOGGER.warning("CONTEXT_USAGE_MISSING phase=%s", phase)
+            return
+        budget["samples"].append((payload_bytes, prompt_tokens))
+        budget["samples"] = budget["samples"][-5:]
+
+    def _defer_over_context_cap(
+        self,
+        phase: str,
+        *,
+        timeline: Optional[GatekeeperTimeline],
+        diagnostic: str,
+    ) -> str:
+        budget = self._context_budget[phase]
+        budget["context_budget_state"] = "deferred_over_cap"
+        budget["context_cap_defers"] += 1
+        budget["prepared_payload_bytes"] = None
+        _LOGGER.warning("CONTEXT_CAP_EXCEEDED phase=%s diagnostic=%s", phase, diagnostic)
+        self._append_transcript(
+            role="system",
+            content=json.dumps(
+                {
+                    "event": "context_budget_defer",
+                    "code": "CONTEXT_CAP_EXCEEDED",
+                    "phase": phase,
+                    "diagnostic": diagnostic,
+                    "input_estimate_tokens": budget["input_estimate_tokens"],
+                    "growth_headroom_tokens": budget["growth_headroom_tokens"],
+                    "effective_input_cap_tokens": budget["effective_input_cap_tokens"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        if timeline:
+            timeline.finish("deferred", "context_cap_exceeded", "truncated")
+        return CONTEXT_CAP_EXCEEDED_RESPONSE
+
+    def _prepare_context_request(
+        self,
+        phase: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        timeline: Optional[GatekeeperTimeline],
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Run conservative compaction, then enforce a configured phase budget."""
+        budget = self._context_budget[phase]
+        stage1 = self._compact_messages_for_request(
+            messages,
+            allow_oversized_latest=budget["effective_input_cap_tokens"] != 0,
+        )
+        stage1_changed = stage1 is not messages
+        if budget["effective_input_cap_tokens"] == 0:
+            return stage1, None
+
+        payload_bytes = len(_canonical_prompt_bytes(stage1, tools))
+        estimate = self._estimate_input_tokens(phase, payload_bytes)
+        headroom = self._growth_headroom(phase)
+        budget["input_estimate_tokens"] = estimate
+        budget["growth_headroom_tokens"] = headroom
+        if estimate + headroom <= budget["effective_input_cap_tokens"]:
+            budget["context_budget_state"] = "stage1_compacted" if stage1_changed else "within_budget"
+            budget["prepared_payload_bytes"] = payload_bytes
+            return stage1, None
+
+        stage2, stage2_stats = _compact_latest_complete_tool_round(stage1)
+        if stage2 is stage1:
+            return stage1, self._defer_over_context_cap(
+                phase,
+                timeline=timeline,
+                diagnostic=str(stage2_stats["error"] or "STILL_OVER_CAP"),
+            )
+
+        count = int(stage2_stats["compacted_tool_results"])
+        saved = payload_bytes - len(_canonical_prompt_bytes(stage2, tools))
+        self.compaction_events += 1
+        self.compacted_tool_results += count
+        self.compaction_chars_saved += max(0, saved)
+        self._append_transcript(
+            role="system",
+            content=json.dumps(
+                {
+                    "event": "context_compaction_stage2",
+                    "compacted_tool_results": count,
+                    "bytes_saved": max(0, saved),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        stage2_bytes = len(_canonical_prompt_bytes(stage2, tools))
+        estimate = self._estimate_input_tokens(phase, stage2_bytes)
+        budget["input_estimate_tokens"] = estimate
+        if estimate + headroom > budget["effective_input_cap_tokens"]:
+            return stage2, self._defer_over_context_cap(
+                phase,
+                timeline=timeline,
+                diagnostic="STILL_OVER_CAP",
+            )
+        budget["context_budget_state"] = "stage2_compacted"
+        budget["prepared_payload_bytes"] = stage2_bytes
+        return stage2, None
+
+    def _compact_messages_for_request(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        allow_oversized_latest: bool = False,
+    ) -> List[Dict[str, Any]]:
+        compacted, stats = _compact_tool_observations(
+            messages,
+            allow_oversized_latest=allow_oversized_latest,
+        )
         if stats["warning"]:
             self.compaction_last_warning = str(stats["warning"])
         count = int(stats["compacted_tool_results"])
@@ -2146,6 +2616,7 @@ class SchengenAgentChat:
 
     def _append_transcript(self, role: str, content: Any, tool_calls: Optional[List[Dict[str, Any]]] = None) -> None:
         try:
+            _sweep_old_session_logs(self.sessions_dir)
             entry = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "session_id": self.session_id,
@@ -2154,8 +2625,9 @@ class SchengenAgentChat:
             }
             if tool_calls:
                 entry["tool_calls"] = tool_calls
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            line = (json.dumps(entry, ensure_ascii=False) + "\n").encode("utf-8")
+            with _SESSION_IO_LOCK:
+                _secure_append_session_line(self.log_file, line)
         except Exception:
             pass
 
@@ -2307,7 +2779,6 @@ class SchengenAgentChat:
                     if timeline:
                         timeline.finish("cancelled", "user_cancelled", "cancelled")
                     return "🛑 [Interrupted]: LLM investigation aborted by user."
-                messages = self._compact_messages_for_request(messages)
                 inspector_headers = {
                     "Authorization": f"Bearer {self.inspector_api_key}",
                     "Content-Type": "application/json",
@@ -2321,6 +2792,11 @@ class SchengenAgentChat:
                     t for t in GUARD_TOOLS
                     if allow_adjudication or t["function"]["name"] not in ("approve_escalation", "reject_escalation")
                 ]
+                messages, context_error = self._prepare_context_request(
+                    "inspector", messages, tools, timeline
+                )
+                if context_error:
+                    return context_error
                 payload = {
                     "model": self.inspector_model,
                     "messages": messages,
@@ -2357,9 +2833,16 @@ class SchengenAgentChat:
                 self.total_api_calls += 1
 
                 usage = data.get("usage", {})
-                p_tokens = usage.get("prompt_tokens", 0)
-                c_tokens = usage.get("completion_tokens", 0)
-                cached = usage.get("prompt_cache_hit_tokens", 0) or (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                if not isinstance(usage, dict):
+                    usage = {}
+                raw_prompt_tokens = usage.get("prompt_tokens")
+                p_tokens = _usage_token(raw_prompt_tokens)
+                c_tokens = _usage_token(usage.get("completion_tokens"))
+                details = usage.get("prompt_tokens_details")
+                if not isinstance(details, dict):
+                    details = {}
+                cached = _usage_token(usage.get("prompt_cache_hit_tokens") or details.get("cached_tokens"))
+                self._record_context_usage("inspector", raw_prompt_tokens)
 
                 self.total_prompt_tokens += p_tokens
                 self.total_completion_tokens += c_tokens
@@ -2403,7 +2886,11 @@ class SchengenAgentChat:
                     if (self.judge_api_key != self.inspector_api_key or 
                         self.judge_base_url != self.inspector_base_url or 
                         self.judge_model != self.inspector_model):
-                        messages = self._compact_messages_for_request(messages)
+                        messages, context_error = self._prepare_context_request(
+                            "judge", messages, None, timeline
+                        )
+                        if context_error:
+                            return context_error
                         judge_payload = {
                             "model": self.judge_model,
                             "messages": messages,
@@ -2438,9 +2925,18 @@ class SchengenAgentChat:
                         judge_data = judge_resp.json()
                         self.total_api_calls += 1
                         j_usage = judge_data.get("usage", {})
-                        jp_tokens = j_usage.get("prompt_tokens", 0)
-                        jc_tokens = j_usage.get("completion_tokens", 0)
-                        j_cached = j_usage.get("prompt_cache_hit_tokens", 0) or (j_usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+                        if not isinstance(j_usage, dict):
+                            j_usage = {}
+                        raw_judge_prompt_tokens = j_usage.get("prompt_tokens")
+                        jp_tokens = _usage_token(raw_judge_prompt_tokens)
+                        jc_tokens = _usage_token(j_usage.get("completion_tokens"))
+                        j_details = j_usage.get("prompt_tokens_details")
+                        if not isinstance(j_details, dict):
+                            j_details = {}
+                        j_cached = _usage_token(
+                            j_usage.get("prompt_cache_hit_tokens") or j_details.get("cached_tokens")
+                        )
+                        self._record_context_usage("judge", raw_judge_prompt_tokens)
 
                         self.total_prompt_tokens += jp_tokens
                         self.total_completion_tokens += jc_tokens

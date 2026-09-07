@@ -48,6 +48,8 @@ minimal scrubbed environment.
 | `SCHENGEN_JUDGE_API_KEY` / `SCHENGEN_JUDGE_BASE_URL` / `SCHENGEN_JUDGE_MODEL` | shared key/url / `gpt-5.6-luna` | TUI Judge phase (final adjudication). |
 | `SCHENGEN_INSPECTOR_MAX_TOKENS` | `4096` | Inspector completion ceiling. ASCII decimal integer `64..4096`; invalid values fall back to the default. |
 | `SCHENGEN_JUDGE_MAX_TOKENS` | `4096` | Judge completion ceiling. ASCII decimal integer `64..4096`; invalid values fall back to the default. |
+| `SCHENGEN_INSPECTOR_CONTEXT_WINDOW` | unset | Inspector provider context window. ASCII decimal integer with 4..10 digits and value `>=8192`; read once at chat-process startup. |
+| `SCHENGEN_JUDGE_CONTEXT_WINDOW` | unset | Judge provider context window, with the same strict syntax; configured independently from Inspector. |
 | `SCHENGEN_LLM_PROVIDER` | `openai` | Logical provider selector. **Note**: no code reads this variable today — provider routing is performed via `OPENAI_BASE_URL` (ADR-011). |
 | `OPENCODE_MODEL` / `OPENCODE_SUBAGENT_MODEL` | unset | Model overrides for the OpenCode host runtime adapter. |
 
@@ -56,6 +58,27 @@ environment change therefore takes effect only in a new process. The current
 DeepSeek Chat Completions endpoint uses `max_tokens`. Revalidate the payload
 field before switching to a provider that requires `max_completion_tokens`
 instead.
+
+Each declared context window enables adaptive input budgeting only for its own
+phase. The effective input cap is `min(262144, declared_window - 4096)`, where
+4096 tokens are reserved for completion. A missing or invalid declaration
+keeps that phase on the existing conservative 12,000-character compaction and
+emits only `CONTEXT_WINDOW_MISSING` or `CONTEXT_WINDOW_INVALID`; it does not
+guess an unknown provider limit.
+
+Before a configured request, Schengen serializes Inspector `messages + tools`
+or Judge `messages` as canonical compact UTF-8 JSON. It first compacts eligible
+old tool results using the existing thresholds. If the estimated input plus
+phase-local growth headroom still does not fit, it atomically compacts every
+tool result in the latest complete round into source-bound records. System and
+user context and assistant/tool-call relationships remain intact. A malformed
+relationship or a request that still does not fit makes no API call and leaves
+the escalation pending with `CONTEXT_CAP_EXCEEDED`; this is a human defer, not
+an approval or rejection. Successful provider usage samples refine only the
+same phase's in-memory estimate and are discarded on process restart.
+`get_token_usage_stats()` exposes flat `inspector_...` and `judge_...` fields
+for the declared window, effective cap, latest estimate, growth headroom,
+budget state, and cumulative cap defers.
 
 ## 3. Canonical user settings
 
@@ -157,6 +180,7 @@ layer (`scripts/core/guard_db.py`, `scripts/core/feature_db.py`).
 | `settings.last-good.json` | Recovery-only last validated schema-v1 settings snapshot; never a competing live authority. |
 | `gatekeeper-timelines/escalation-<id>.json` | Metadata-only monotonic timing timeline for one escalation. It contains fixed stage/outcome labels and numeric durations, never commands, tool arguments/output, model text, paths, secrets, or exception text. Inspect it with `schengen_history.py --timeline <id>`. |
 | `parser-shadow/events.jsonl` and `.1`…`.4` | Default-off Stage-1 parser-shadow metadata. Each mode-`0600` file is limited to 10 MiB (50 MiB total); rotation never uploads data. Records contain the raw SHA-256/byte length, existing final decision/layer, fixed parser status/counters, duration, and source revision—never raw commands, source fragments, argv/literals, full IR, reserialized shell, environment, cwd, pane/model/tool text, or output. |
+| `sessions/session_*.jsonl` | Local raw Gatekeeper chat transcript, never reinjected or uploaded. Trusted mode-`0600` files are retained for 30 days; cleanup runs at startup and then at most once per 24 hours. |
 
 Parser-shadow records are written only after the existing raw-command decision
 is final. Helper timeout/crash/malformed output and unsafe log paths fail to no
@@ -164,6 +188,12 @@ record and cannot change evaluation, audit, adjudication, or delivery. Joining
 the hash metadata to the existing raw-command audit is an explicit offline
 operator action; Stage 1 provides no export tool and performs no automatic
 upload.
+
+The `sessions` directory must be a real current-UID directory with mode `0700`;
+each transcript must be a real current-UID regular file with mode `0600`.
+Symlinks, wrong ownership, permissive modes, unreadable entries, and unexpected
+file names are rejected or skipped without repair. Transcript or retention I/O
+failure never changes adjudication or delivery.
 
 Each runtime skill root also contains `.schengen-source.json`, written by the
 repository installer. New audit rows copy its exact Git revision into
