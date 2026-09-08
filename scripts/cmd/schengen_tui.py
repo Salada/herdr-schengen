@@ -138,7 +138,7 @@ from cmd.schengen_watcher import list_active_guard_locks
 
 
 def format_local_time(iso_ts: str) -> str:
-    """Convert UTC ISO timestamp string into Local Time HH:MM format."""
+    """Convert a UTC ISO timestamp into full OS-local audit display time."""
     try:
         if not iso_ts:
             return ""
@@ -146,9 +146,9 @@ def format_local_time(iso_ts: str) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         local_dt = dt.astimezone()
-        return local_dt.strftime("%H:%M")
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z").rstrip()
     except Exception:
-        return iso_ts.split("T")[-1][:5] if "T" in iso_ts else iso_ts[:5]
+        return iso_ts
 
 
 def format_resolution_badge(resolution: Optional[str], short: bool = False) -> str:
@@ -265,10 +265,8 @@ def audit_verdict_badge(decision: Any, resolution: Any, approver: Any) -> str:
 
 def sidebar_audit_cells(log: dict, cmd_max_cells: int = AUDIT_CMD_MAX_CELLS) -> Tuple[str, str, str, str]:
     """The 4 sidebar cells (Time, P, V, Cmd) for one audit row."""
-    ts = str(log.get("timestamp") or "")
-    time_str = ts[11:19] if len(ts) >= 19 else ts
     return (
-        time_str,
+        format_local_time(str(log.get("timestamp") or "")),
         str(log.get("pane_id") or ""),
         audit_verdict_badge(log.get("decision"), log.get("resolution"), log.get("approver")),
         rich_escape(truncate_cmd_display(log.get("raw_command"), max_cells=cmd_max_cells)),
@@ -420,6 +418,10 @@ class AuditPageMixin:
         self._audit_fetched: int = 0                  # DB rows consumed (next offset)
         self._audit_all_loaded: bool = False
         self._audit_loading: bool = False
+        # Every head refresh starts a new paging generation. A slow historical
+        # read from an older generation may finish later, but must never append
+        # stale rows behind the new head or clear a newer request's loading flag.
+        self._audit_generation: int = 0
         self._audit_cmd_max_cells: int = AUDIT_CMD_MAX_CELLS
         # client-side search filter (empty query = show everything)
         self._audit_query: str = ""
@@ -436,6 +438,7 @@ class AuditPageMixin:
     # -- loading (records accumulate in audit_records) ----------------------
     def _audit_prime(self, head_logs: List[dict], initial_batch: int) -> None:
         """Clear and re-baseline on the newest head page (live refresh / open)."""
+        self._audit_generation += 1
         self.clear()
         self.audit_records.clear()
         self._audit_displayed_ids.clear()
@@ -448,6 +451,12 @@ class AuditPageMixin:
             self.audit_records.append(log)
             self._audit_displayed_ids.add(log["id"])
         self._render_display()
+        if self.row_count:
+            # DB order is newest-first. Make that invariant explicit after the
+            # rows exist; move_cursor scrolls after layout without taking focus
+            # away from the chat input (the fullscreen modal focuses separately).
+            self.move_cursor(row=0, column=0, animate=False, scroll=True)
+            self.scroll_home(animate=False)
 
     def _audit_append_page_records(self, logs: List[dict]) -> int:
         """Append a fetched page to ``audit_records`` and render matching rows.
@@ -479,25 +488,57 @@ class AuditPageMixin:
                 self.add_row(*self._audit_row_cells(log))
         return len(added)
 
-    def _maybe_load_next_page(self) -> None:
+    def _maybe_load_next_page(self) -> Optional[Any]:
         if self._audit_loading or self._audit_all_loaded:
-            return
+            return None
         if not self._at_scroll_bottom():
-            return
+            return None
+        generation = self._audit_generation
+        offset = self._audit_fetched
+        limit = self.audit_page_size
         self._audit_loading = True
-        try:
-            page = self._audit_fetch_page(self._audit_fetched, self.audit_page_size)
-            if not page:
-                self._audit_all_loaded = True
+
+        async def fetch_and_append() -> None:
+            try:
+                # get_recent_audit_logs opens its own SQLite connection, so the
+                # blocking read can safely run off the Textual event loop.
+                page = await asyncio.to_thread(self._audit_fetch_page, offset, limit)
+                failed = False
+            except asyncio.CancelledError:
+                if generation == self._audit_generation and offset == self._audit_fetched:
+                    self._audit_loading = False
+                raise
+            except Exception:
+                page = []
+                failed = True
+
+            # asyncio.to_thread resumes this coroutine on the Textual event
+            # loop. All DataTable mutation therefore remains on the UI thread.
+            if generation != self._audit_generation:
                 return
-            self._audit_fetched += len(page)
-            self._audit_append_page_records(page)
-            if len(page) < self.audit_page_size:
-                self._audit_all_loaded = True
+            if offset != self._audit_fetched:
+                self._audit_loading = False
+                return
+            try:
+                if failed or not page:
+                    self._audit_all_loaded = True
+                    return
+                self._audit_fetched += len(page)
+                self._audit_append_page_records(page)
+                if len(page) < limit:
+                    self._audit_all_loaded = True
+            except Exception:
+                self._audit_all_loaded = True  # fail-stop: never loop on an error
+            finally:
+                self._audit_loading = False
+
+        coroutine = fetch_and_append()
+        try:
+            return self.run_worker(coroutine, exit_on_error=False)
         except Exception:
-            self._audit_all_loaded = True  # fail-stop: never loop on an error
-        finally:
+            coroutine.close()
             self._audit_loading = False
+            return None
 
     # -- client-side search filter -----------------------------------------
     def set_search_filter(self, query: Any, tolerance: str = AUDIT_SEARCH_DEFAULT_TOLERANCE) -> None:
