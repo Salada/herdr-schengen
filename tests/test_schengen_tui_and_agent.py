@@ -13,6 +13,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -1017,22 +1019,253 @@ class TestAuditLedgerTruncationAndPaging(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("B" * 200, cells[8])  # full command NOT in the table cell
         self.assertEqual(cells[7], r"reason \[x]")  # reason escaped too
 
+    @unittest.skipUnless(HAS_TEXTUAL and hasattr(time, "tzset"), "Textual and tzset required")
+    async def test_audit_surfaces_render_full_os_local_datetime(self):
+        from textual.app import App
+
+        from cmd.schengen_tui import (
+            AuditDetailModal,
+            format_local_time,
+            modal_audit_cells,
+            sidebar_audit_cells,
+        )
+
+        log = {
+            "id": 42,
+            "timestamp": "2026-09-03T09:30:00Z",
+            "pane_id": "wTZ:p1",
+            "agent_kind": "agy",
+            "raw_command": "pwd",
+            "decision": "AUTO_APPROVED",
+            "safety_reason": "timezone display probe",
+            "decision_layer": "FAST_TRACK_AST",
+            "resolution": "APPROVED",
+            "approver": "human-tui",
+        }
+        old_tz = os.environ.get("TZ")
+        try:
+            # POSIX TZ syntax does not depend on a system tzdata package, so
+            # this exercises KST consistently on the minimal Alpine CI host.
+            os.environ["TZ"] = "KST-9"
+            time.tzset()
+            expected = "2026-09-03 18:30:00 KST"
+            self.assertEqual(format_local_time(log["timestamp"]), expected)
+            self.assertEqual(sidebar_audit_cells(log)[0], expected)
+            self.assertEqual(modal_audit_cells(log)[1], expected)
+            self.assertEqual(log["timestamp"], "2026-09-03T09:30:00Z")
+
+            app = App()
+            with patch("cmd.schengen_tui.get_audit_log_by_id", return_value=log), patch(
+                "cmd.schengen_tui.get_escalation_resolution", return_value="APPROVED"
+            ), patch("cmd.schengen_tui.get_escalation_approver", return_value="human-tui"), patch(
+                "cmd.schengen_tui.get_adjudications_for_audit", return_value=[]
+            ):
+                async with app.run_test() as pilot:
+                    app.push_screen(AuditDetailModal(log["id"]))
+                    await pilot.pause()
+                    detail = app.screen.query_one("#detail-fields")
+                    self.assertIn(expected, str(detail.content))
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_slow_page_keeps_chat_refresh_and_newest_focus_responsive(self):
+        from contextlib import ExitStack
+        from unittest.mock import MagicMock
+
+        from cmd.schengen_tui import AUDIT_SIDEBAR_HEAD, AuditDataTable, CommandTextArea, SchengenTUIApp
+
+        first_head = _audit_page_rows(AUDIT_SIDEBAR_HEAD, newest_id=100)
+        refreshed_head = _audit_page_rows(AUDIT_SIDEBAR_HEAD, newest_id=200)
+        older_page = _audit_page_rows(4, newest_id=90)
+        head = {"rows": first_head}
+        started = threading.Event()
+        release = threading.Event()
+
+        def fetch(limit=10, decision=None, pane_id=None, layer=None, offset=0):
+            if offset:
+                started.set()
+                if not release.wait(3):
+                    raise RuntimeError("test release was not signaled")
+                return older_page
+            return head["rows"][:limit]
+
+        with patch(
+            "cmd.schengen_tui.acquire_tui_role",
+            return_value=(MagicMock(), True, None),
+        ):
+            app = SchengenTUIApp()
+        process_chat = MagicMock()
+        app.process_user_chat = process_chat
+        with ExitStack() as stack:
+            stack.enter_context(patch("cmd.schengen_tui.get_recent_audit_logs", side_effect=fetch))
+            stack.enter_context(patch("cmd.schengen_tui.get_current_command_escalation", return_value=None))
+            stack.enter_context(patch("cmd.schengen_tui.get_oldest_question_escalation", return_value=None))
+            stack.enter_context(patch("cmd.schengen_tui.get_pending_escalations", return_value=[]))
+            stack.enter_context(patch("cmd.schengen_tui.list_active_guard_locks", return_value=[]))
+            stack.enter_context(patch("cmd.schengen_tui.read_in_flight_state", return_value=[]))
+            stack.enter_context(patch("cmd.schengen_tui.get_pane_info", return_value={"agent_status": "idle"}))
+            stack.enter_context(patch("cmd.schengen_tui.get_batch_approval_config", return_value={"batch_approval_enabled": False}))
+            stack.enter_context(patch("cmd.schengen_tui.get_pane_direct_config", return_value={}))
+            stack.enter_context(patch("cmd.schengen_tui.subprocess.Popen", return_value=MagicMock()))
+            try:
+                async with app.run_test(size=(140, 50)) as pilot:
+                    await pilot.pause()
+                    table = app.query_one("#audit-table", AuditDataTable)
+                    input_box = app.query_one("#input-box", CommandTextArea)
+                    self.assertEqual(table.audit_records[0]["id"], 100)
+                    self.assertEqual(table.cursor_coordinate.row, 0)
+                    self.assertEqual(table.scroll_y, 0)
+                    self.assertTrue(input_box.has_focus)
+
+                    with patch.object(table, "_at_scroll_bottom", return_value=True):
+                        worker = table._maybe_load_next_page()
+                    self.assertIsNotNone(worker)
+                    self.assertTrue(await asyncio.wait_for(asyncio.to_thread(started.wait, 2), 3))
+
+                    # The page read is still blocked in its worker, while the
+                    # main event loop accepts chat input and a head refresh.
+                    input_box.load_text("chat-during-page")
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    process_chat.assert_called_once_with("chat-during-page")
+                    app._write("chat-render-during-page")
+
+                    head["rows"] = refreshed_head
+                    app.update_radar_data(force=True)
+                    await pilot.pause()
+                    self.assertEqual(table.audit_records[0]["id"], 200)
+                    self.assertEqual(table.cursor_coordinate.row, 0)
+                    self.assertEqual(table.scroll_y, 0)
+                    self.assertTrue(input_box.has_focus)
+
+                    release.set()
+                    await worker.wait()
+                    await pilot.pause()
+                    self.assertEqual([row["id"] for row in table.audit_records], [row["id"] for row in refreshed_head])
+                    self.assertFalse(table._audit_loading)
+            finally:
+                release.set()
+                if app.tui_lock_fd:
+                    app.tui_lock_fd.close()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_page_error_clears_loading_without_freezing_ui(self):
+        from textual.app import App, ComposeResult
+        from textual.widgets import Input
+
+        from cmd.schengen_tui import PagedAuditDataTable
+
+        rows = _audit_page_rows(10)
+        started = threading.Event()
+        release = threading.Event()
+
+        class PagingApp(App):
+            def compose(self) -> ComposeResult:
+                yield Input(id="probe-input")
+                yield PagedAuditDataTable(id="probe-table")
+
+            def on_mount(self) -> None:
+                table = self.query_one("#probe-table", PagedAuditDataTable)
+                table.add_columns("ID", "Time", "Pane", "Agent", "Verdict", "Res", "Layer", "Reason", "Command")
+                table._audit_prime(rows, len(rows))
+                table._audit_all_loaded = False
+                self.query_one("#probe-input", Input).focus()
+
+        def failing_fetch(_offset, _limit):
+            started.set()
+            if not release.wait(3):
+                raise RuntimeError("test release was not signaled")
+            raise OSError("synthetic audit read failure")
+
+        app = PagingApp()
+        try:
+            async with app.run_test(size=(120, 40)) as pilot:
+                table = app.query_one("#probe-table", PagedAuditDataTable)
+                table._audit_fetch_page = failing_fetch
+                with patch.object(table, "_at_scroll_bottom", return_value=True):
+                    worker = table._maybe_load_next_page()
+                self.assertIsNotNone(worker)
+                self.assertTrue(await asyncio.wait_for(asyncio.to_thread(started.wait, 2), 3))
+
+                await pilot.press("x")
+                await pilot.pause()
+                self.assertEqual(app.query_one("#probe-input", Input).value, "x")
+                release.set()
+                await worker.wait()
+                await pilot.pause()
+                self.assertFalse(table._audit_loading)
+                self.assertTrue(table._audit_all_loaded)
+                self.assertEqual(len(table.audit_records), len(rows))
+        finally:
+            release.set()
+
+    @unittest.skipUnless(HAS_TEXTUAL, "Textual required")
+    async def test_appending_older_page_preserves_cursor_and_viewport(self):
+        from unittest.mock import patch
+
+        from cmd.schengen_tui import AUDIT_MODAL_HEAD, PagedAuditDataTable
+        from textual.app import App, ComposeResult
+
+        head = _audit_page_rows(AUDIT_MODAL_HEAD, newest_id=200)
+        older = _audit_page_rows(50, newest_id=100)
+
+        class PagingApp(App):
+            def compose(self) -> ComposeResult:
+                yield PagedAuditDataTable(id="probe-table")
+
+            def on_mount(self) -> None:
+                table = self.query_one("#probe-table", PagedAuditDataTable)
+                table.add_columns("ID", "Time", "Pane", "Agent", "Verdict", "Res", "Layer", "Reason", "Command")
+                table._audit_prime(head, AUDIT_MODAL_HEAD)
+                table._audit_all_loaded = False
+
+        app = PagingApp()
+        async with app.run_test(size=(120, 24)) as pilot:
+            table = app.query_one("#probe-table", PagedAuditDataTable)
+            table._audit_all_loaded = True
+            table.move_cursor(row=80, scroll=False)
+            table.scroll_end(animate=False, immediate=True)
+            await pilot.pause()
+            table._audit_all_loaded = False
+            before_scroll = table.scroll_y
+            before_cursor = table.cursor_coordinate
+            self.assertGreater(before_scroll, 0)
+
+            table._audit_fetch_page = lambda _offset, _limit: older
+            with patch.object(table, "_at_scroll_bottom", return_value=True):
+                worker = table._maybe_load_next_page()
+            self.assertIsNotNone(worker)
+            await worker.wait()
+            await pilot.pause()
+            self.assertEqual(table.cursor_coordinate, before_cursor)
+            self.assertEqual(table.scroll_y, before_scroll)
+            self.assertGreater(table.scroll_y, 0)  # never snapped to newest
+            self.assertEqual(len(table.audit_records), AUDIT_MODAL_HEAD + len(older))
+
     # ---- guard_db offset pagination --------------------------------------
 
     def test_get_recent_audit_logs_offset_pagination(self):
-        from core.guard_db import get_db_connection, get_recent_audit_logs, init_db, record_audit_log
-        init_db()
-        pane = f"wPAGEPROBE:{os.getpid()}"
-        cmds = [f"echo page-probe-{i}" for i in range(6)]
-        try:
+        from core import guard_db
+
+        with tempfile.TemporaryDirectory() as td, patch.object(
+            guard_db, "DB_PATH", Path(td) / "audit-pagination.db"
+        ):
+            guard_db.init_db()
+            pane = f"wPAGEPROBE:{os.getpid()}"
+            cmds = [f"echo page-probe-{i}" for i in range(6)]
             for i, c in enumerate(cmds):
-                record_audit_log(
+                guard_db.record_audit_log(
                     pane_id=pane, raw_command=c, decision="AUTO_APPROVED",
                     safety_reason="offset pagination unit probe", agent_kind="agy",
                     decision_layer="FAST_TRACK_AST",
                 )
-            page1 = get_recent_audit_logs(limit=4, offset=0, pane_id=pane)
-            page2 = get_recent_audit_logs(limit=4, offset=4, pane_id=pane)
+            page1 = guard_db.get_recent_audit_logs(limit=4, offset=0, pane_id=pane)
+            page2 = guard_db.get_recent_audit_logs(limit=4, offset=4, pane_id=pane)
             self.assertEqual(len(page1), 4)
             self.assertEqual(len(page2), 2)  # short tail page
             # newest-first ordering + disjoint windows over the same query
@@ -1041,10 +1274,7 @@ class TestAuditLedgerTruncationAndPaging(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ids1, sorted(ids1, reverse=True))
             self.assertTrue(all(a > b for a in ids1 for b in ids2))
             # offset beyond the ledger -> empty page (end of infinite scroll)
-            self.assertEqual(get_recent_audit_logs(limit=4, offset=20, pane_id=pane), [])
-        finally:
-            with get_db_connection() as conn:
-                conn.execute("DELETE FROM audit_logs WHERE pane_id = ?", (pane,))
+            self.assertEqual(guard_db.get_recent_audit_logs(limit=4, offset=20, pane_id=pane), [])
 
     # ---- live paging (mounted widgets) -----------------------------------
 
