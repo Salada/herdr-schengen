@@ -1044,7 +1044,9 @@ class TestAuditLedgerTruncationAndPaging(unittest.IsolatedAsyncioTestCase):
         }
         old_tz = os.environ.get("TZ")
         try:
-            os.environ["TZ"] = "Asia/Seoul"
+            # POSIX TZ syntax does not depend on a system tzdata package, so
+            # this exercises KST consistently on the minimal Alpine CI host.
+            os.environ["TZ"] = "KST-9"
             time.tzset()
             expected = "2026-09-03 18:30:00 KST"
             self.assertEqual(format_local_time(log["timestamp"]), expected)
